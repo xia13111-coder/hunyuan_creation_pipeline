@@ -45,12 +45,13 @@ def isaac_python() -> Path:
     if root_value:
         return (Path(root_value).expanduser().resolve() / "python.sh").resolve()
 
+    ov_pkg_dir = Path.home() / ".local" / "share" / "ov" / "pkg"
     candidates = [
-        Path("/home/user/isaacsim500/python.sh"),
         Path("/isaac-sim/python.sh"),
         Path("/opt/isaac-sim/python.sh"),
     ]
-    candidates.extend(sorted(Path("/home/user/.local/share/ov/pkg").glob("isaac_sim*/python.sh")))
+    if ov_pkg_dir.exists():
+        candidates.extend(sorted(ov_pkg_dir.glob("isaac_sim*/python.sh")))
     for candidate in candidates:
         if candidate.exists():
             return candidate.expanduser().resolve()

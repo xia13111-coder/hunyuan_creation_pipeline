@@ -48,13 +48,22 @@ def configure_runtime() -> dict[str, str | None]:
     if blender:
         os.environ["BLENDER_BIN"] = str(blender)
 
-    isaac_python = first_existing_path(
+    isaac_candidates: list[str | Path] = [os.getenv("ISAAC_PYTHON") or ""]
+    isaac_root = os.getenv("ISAACSIM_ROOT")
+    if isaac_root:
+        isaac_candidates.append(Path(isaac_root) / "python.sh")
+    isaac_candidates.extend(
         [
-            os.getenv("ISAAC_PYTHON") or "",
-            "/home/user/isaacsim500/python.sh",
-            "/isaac-sim/python.sh",
-            "/opt/isaac-sim/python.sh",
+            Path("/isaac-sim/python.sh"),
+            Path("/opt/isaac-sim/python.sh"),
         ]
+    )
+    ov_pkg_dir = Path.home() / ".local" / "share" / "ov" / "pkg"
+    if ov_pkg_dir.exists():
+        isaac_candidates.extend(sorted(ov_pkg_dir.glob("isaac_sim*/python.sh")))
+
+    isaac_python = first_existing_path(
+        isaac_candidates
     )
     if isaac_python:
         os.environ["ISAAC_PYTHON"] = str(isaac_python)
