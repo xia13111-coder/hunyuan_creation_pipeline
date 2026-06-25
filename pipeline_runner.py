@@ -698,6 +698,111 @@ def run_postprocess_job(
     }
 
 
+def run_glb_physics_job(
+    *,
+    input_path: str,
+    intermediate_output_dir: str,
+    final_output_dir: str,
+    material_file: str | None = None,
+    material: str = "plastic",
+    set_mass: float | None = None,
+    approx: str = "sdf",
+    usd_format: str = "usd",
+    visible_only: bool = False,
+    align: bool = False,
+    axis_map: str = "X=L,Y=M,Z=S",
+    resize: bool = False,
+    len_x: float | None = None,
+    len_y: float | None = None,
+    len_z: float | None = None,
+    unit: str = "m",
+    headless: bool = True,
+    log_cb: LogCallback = None,
+) -> dict:
+    """Generic path for existing GLB assets.
+
+    This intentionally skips Hunyuan generation and mesh refinement. By default
+    it preserves the authored GLB geometry and starts at USD conversion.
+    """
+    _log_blender_preflight(input_path, log_cb=log_cb)
+    steps = []
+
+    if align:
+        steps.append(
+            {
+                "step": "align",
+                "result": run_align_job(input_path=input_path, axis_map=axis_map, log_cb=log_cb),
+            }
+        )
+
+    if resize:
+        missing = [
+            name
+            for name, value in (("len_x", len_x), ("len_y", len_y), ("len_z", len_z))
+            if value is None
+        ]
+        if missing:
+            raise ValueError(f"resize requires: {', '.join(missing)}")
+        steps.append(
+            {
+                "step": "resize",
+                "result": run_resize_job(
+                    input_path=input_path,
+                    len_x=float(len_x),
+                    len_y=float(len_y),
+                    len_z=float(len_z),
+                    unit=unit,
+                    log_cb=log_cb,
+                ),
+            }
+        )
+
+    convert_result = run_convert_job(
+        input_path=input_path,
+        usd_format=usd_format,
+        visible_only=visible_only,
+        log_cb=log_cb,
+    )
+    steps.append({"step": "convert_usd", "result": convert_result})
+    usd_input_root = convert_result["usd_root"]
+
+    steps.append(
+        {
+            "step": "add_physics",
+            "result": run_add_physics_job(
+                folder=usd_input_root,
+                out_dir=intermediate_output_dir,
+                material_file=material_file,
+                material=material,
+                set_mass=set_mass,
+                approx=approx,
+                headless=headless,
+                log_cb=log_cb,
+            ),
+        }
+    )
+    steps.append(
+        {
+            "step": "collect_usd",
+            "result": run_collect_job(
+                folder=intermediate_output_dir,
+                out_dir=final_output_dir,
+                headless=headless,
+                log_cb=log_cb,
+            ),
+        }
+    )
+
+    return {
+        "input_path": input_path,
+        "usd_input_root": usd_input_root,
+        "intermediate_output_dir": intermediate_output_dir,
+        "final_output_dir": final_output_dir,
+        "processed_glb_files": _list_files_by_suffix(input_path, {".glb"}),
+        "steps": steps,
+    }
+
+
 def run_full_pipeline_job(
     *,
     generation_output_dir: str,
@@ -901,6 +1006,22 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     process.add_argument("--input-path", required=True, help="已有 GLB 文件或目录")
     _add_postprocess_args(process)
 
+    glb_physics = subparsers.add_parser("glb-physics", help="通用 GLB 后半段：GLB -> USD -> physics -> collect")
+    glb_physics.add_argument("--input-path", required=True, help="已有 GLB 文件或目录")
+    glb_physics.add_argument("--intermediate-output-dir", required=True, help="加物理后的中间 USD 输出目录")
+    glb_physics.add_argument("--final-output-dir", required=True, help="collect 后最终 USD 输出目录")
+    glb_physics.add_argument("--material", default="plastic", help="材料标签，对应 materials.json")
+    glb_physics.add_argument("--approx", default="sdf", help="碰撞近似类型")
+    glb_physics.add_argument("--set-mass", type=float, help="固定质量 kg；不传则自动估算")
+    glb_physics.add_argument("--usd-format", default="usd", choices=["usd", "usda", "usdc"], help="USD 输出格式")
+    glb_physics.add_argument("--visible-only", action="store_true", help="只导出可见对象")
+    glb_physics.add_argument("--align", action="store_true", help="转 USD 前先做轴向映射")
+    glb_physics.add_argument("--orientation", default="X=L,Y=M,Z=S", help="轴向映射，例如 X=L,Y=M,Z=S")
+    glb_physics.add_argument("--resize", action="store_true", help="转 USD 前先按 len-x/y/z 缩放并居中")
+    glb_physics.add_argument("--len-x", type=float, help="resize 时的目标 X 尺寸，单位 m")
+    glb_physics.add_argument("--len-y", type=float, help="resize 时的目标 Y 尺寸，单位 m")
+    glb_physics.add_argument("--len-z", type=float, help="resize 时的目标 Z 尺寸，单位 m")
+
     refine = subparsers.add_parser("refine-mesh", help="只对已有 GLB 执行 refine mesh")
     refine.add_argument("--input-path", required=True, help="已有 GLB 文件或目录")
     refine.add_argument("--output-dir", help="refine mesh 输出目录")
@@ -943,6 +1064,24 @@ def main(argv: list[str] | None = None) -> int:
                 set_mass=args.set_mass,
                 material=args.material,
                 approx=args.approx,
+                log_cb=_console_log,
+            )
+        elif args.command == "glb-physics":
+            result = run_glb_physics_job(
+                input_path=args.input_path,
+                intermediate_output_dir=args.intermediate_output_dir,
+                final_output_dir=args.final_output_dir,
+                material=args.material,
+                set_mass=args.set_mass,
+                approx=args.approx,
+                usd_format=args.usd_format,
+                visible_only=args.visible_only,
+                align=args.align,
+                axis_map=args.orientation,
+                resize=args.resize,
+                len_x=args.len_x,
+                len_y=args.len_y,
+                len_z=args.len_z,
                 log_cb=_console_log,
             )
         elif args.command == "refine-mesh":

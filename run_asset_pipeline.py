@@ -84,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--prompt", help="text prompt for Hunyuan generation")
     source.add_argument("--image-url", help="image URL for Hunyuan generation")
     source.add_argument("--existing-glb", help="existing GLB file or folder; skips Hunyuan generation")
+    source.add_argument("--manual-glb", help="hand-made/general GLB file or folder; runs GLB -> USD -> physics -> collect")
 
     parser.add_argument("--output-dir", default=str(DEFAULT_GENERATION_OUTPUT_DIR), help="Hunyuan generation output dir")
     parser.add_argument("--intermediate-output-dir", default=str(DEFAULT_INTERMEDIATE_OUTPUT_DIR), help="physics USD output dir")
@@ -97,6 +98,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--len-y", type=float, default=0.3, help="target Y size in meters")
     parser.add_argument("--len-z", type=float, default=0.3, help="target Z size in meters")
     parser.add_argument("--orientation", default="X=L,Y=M,Z=S", help="axis map, for example X=L,Y=M,Z=S")
+    parser.add_argument("--manual-align", action="store_true", help="for --manual-glb, align GLB before USD conversion")
+    parser.add_argument("--manual-resize", action="store_true", help="for --manual-glb, resize GLB before USD conversion")
+    parser.add_argument("--usd-format", default="usd", choices=["usd", "usda", "usdc"], help="USD format for manual/general GLB mode")
+    parser.add_argument("--visible-only", action="store_true", help="export only visible objects when converting GLB to USD")
 
     parser.add_argument("--material", default="plastic", help="material name in materials.json")
     parser.add_argument("--approx", default="sdf", help="collision approximation, for example sdf or convexDecomposition")
@@ -111,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def ensure_generation_source(args: argparse.Namespace) -> None:
-    if args.existing_glb:
+    if args.existing_glb or args.manual_glb:
         return
     if args.prompt or args.image_url:
         return
@@ -128,6 +133,32 @@ def write_result(result: dict[str, Any], path: str) -> None:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    if args.manual_glb:
+        postprocess_result = pipeline_runner.run_glb_physics_job(
+            input_path=args.manual_glb,
+            intermediate_output_dir=args.intermediate_output_dir,
+            final_output_dir=args.final_output_dir,
+            material=args.material,
+            set_mass=args.set_mass,
+            approx=args.approx,
+            usd_format=args.usd_format,
+            visible_only=args.visible_only,
+            align=args.manual_align,
+            axis_map=args.orientation,
+            resize=args.manual_resize,
+            len_x=args.len_x,
+            len_y=args.len_y,
+            len_z=args.len_z,
+            log_cb=log,
+        )
+        return {
+            "runtime": pipeline_runner.runtime_summary(),
+            "mode": "manual_glb",
+            "generation": None,
+            "refine_mesh": None,
+            "postprocess": postprocess_result,
+        }
+
     if args.existing_glb:
         process_input = args.existing_glb
         refine_result = None
