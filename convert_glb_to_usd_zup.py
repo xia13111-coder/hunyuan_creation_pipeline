@@ -1,5 +1,7 @@
+import math
 import os, sys, traceback
 import bpy
+from mathutils import Matrix
 
 
 def parse_args():
@@ -15,6 +17,12 @@ def parse_args():
     p.add_argument("--suffix", default="_zup",
                    help="未覆盖时输出文件夹后缀（默认 _zup）")
     p.add_argument("--visible-only", action="store_true", help="只导出可见对象")
+    p.add_argument(
+        "--axis-conversion",
+        choices=["preserve", "y-up-to-z-up"],
+        default="preserve",
+        help="是否烘焙源模型轴系。y-up-to-z-up 会执行 X'=X,Y'=-Z,Z'=Y",
+    )
     return p.parse_args(argv)
 
 def log(*a): print(*a, flush=True)
@@ -32,6 +40,22 @@ def import_glb(path):
     bpy.ops.import_scene.gltf(filepath=path)
     after = set(bpy.data.objects)
     return [ob for ob in (after - before)]
+
+def convert_y_up_to_z_up(objs):
+    """
+    Bake a source Y-up coordinate basis into Z-up coordinates:
+      X' = X
+      Y' = -Z
+      Z' = Y
+    This is a +90 degree rotation around X in a right-handed coordinate system.
+    """
+    roots = [ob for ob in objs if ob.parent not in objs]
+    if not roots:
+        roots = list(objs)
+    rot = Matrix.Rotation(math.radians(90.0), 4, "X")
+    for ob in roots:
+        ob.matrix_world = rot @ ob.matrix_world
+    bpy.context.view_layer.update()
 
 def export_usd(out_path, out_dir, visible_only=False):
 
@@ -138,6 +162,10 @@ def main():
             objs = import_glb(glb)
             if not objs:
                 log("  ! 未发现对象，跳过"); continue
+
+            if a.axis_conversion == "y-up-to-z-up":
+                log("  烘焙轴系：Y-up -> Z-up (X'=X, Y'=-Z, Z'=Y)")
+                convert_y_up_to_z_up(objs)
 
             base_noext = os.path.splitext(glb)[0]
             parent_dir  = os.path.dirname(base_noext)

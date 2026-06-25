@@ -74,6 +74,11 @@ The USD stage is authored as Z-up. `--set-mass` is the total mass of the whole
 asset; when a USD contains multiple rigid bodies, the mass is distributed by
 volume weight instead of assigning the full value to every mesh.
 
+Manual GLB mode also bakes the source coordinate convention by default:
+`--manual-axis-conversion y-up-to-z-up`, mapping `X'=X, Y'=-Z, Z'=Y`. This is
+different from only writing USD `upAxis = "Z"` metadata. If a GLB is already
+modeled in Z-up coordinates, use `--manual-axis-conversion preserve`.
+
 ```bash
 /home/user/miniconda3/envs/hunyuan/bin/python ./run_asset_pipeline.py \
   --manual-glb "/home/user/下载/焊机/未命名.glb" \

@@ -546,6 +546,7 @@ def run_convert_job(
     overwrite: bool = True,
     suffix: str | None = None,
     visible_only: bool = False,
+    axis_conversion: str = "preserve",
     log_cb: LogCallback = None,
 ) -> dict:
     args = [
@@ -558,6 +559,8 @@ def run_convert_job(
         input_path,
         "--usd-format",
         usd_format,
+        "--axis-conversion",
+        axis_conversion,
     ]
     _append_flag(args, "--overwrite", overwrite)
     _append_option(args, "--suffix", suffix if not overwrite else None)
@@ -568,6 +571,7 @@ def run_convert_job(
     return {
         "input_path": input_path,
         "usd_format": usd_format,
+        "axis_conversion": axis_conversion,
         "overwrite": overwrite,
         "usd_root": usd_root,
         "usd_input_path": usd_input_path or usd_root,
@@ -721,6 +725,7 @@ def run_glb_physics_job(
     approx: str = "sdf",
     usd_format: str = "usd",
     visible_only: bool = False,
+    axis_conversion: str = "y-up-to-z-up",
     align: bool = False,
     axis_map: str = "X=L,Y=M,Z=S",
     resize: bool = False,
@@ -773,6 +778,7 @@ def run_glb_physics_job(
         input_path=input_path,
         usd_format=usd_format,
         visible_only=visible_only,
+        axis_conversion=axis_conversion,
         log_cb=log_cb,
     )
     steps.append({"step": "convert_usd", "result": convert_result})
@@ -1027,6 +1033,12 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     glb_physics.add_argument("--approx", default="sdf", help="碰撞近似类型")
     glb_physics.add_argument("--set-mass", type=float, help="整个资产总质量 kg；不传则自动估算")
     glb_physics.add_argument("--usd-format", default="usd", choices=["usd", "usda", "usdc"], help="USD 输出格式")
+    glb_physics.add_argument(
+        "--axis-conversion",
+        default="y-up-to-z-up",
+        choices=["preserve", "y-up-to-z-up"],
+        help="手工/通用 GLB 轴系转换，默认 Y-up -> Z-up",
+    )
     glb_physics.add_argument("--visible-only", action="store_true", help="只导出可见对象")
     glb_physics.add_argument("--align", action="store_true", help="转 USD 前先做轴向映射")
     glb_physics.add_argument("--orientation", default="X=L,Y=M,Z=S", help="轴向映射，例如 X=L,Y=M,Z=S")
@@ -1089,6 +1101,7 @@ def main(argv: list[str] | None = None) -> int:
                 approx=args.approx,
                 usd_format=args.usd_format,
                 visible_only=args.visible_only,
+                axis_conversion=args.axis_conversion,
                 align=args.align,
                 axis_map=args.orientation,
                 resize=args.resize,
