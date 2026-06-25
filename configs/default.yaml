@@ -1,0 +1,71 @@
+backend:
+  name: blender
+  blender_executable: blender
+  keep_intermediate: true
+
+cleanup:
+  merge_distance: 0.0005
+  degenerate_threshold: 0.00001
+  min_component_faces: 8
+  min_component_area_ratio: 0.00005
+  max_component_cleanup_face_fraction: 0.05
+
+source:
+  normal_angle_degrees: 60.0
+
+retopology:
+  method: auto
+  auto_component_threshold: 32
+  auto_boundary_edge_ratio_threshold: 0.02
+  target_faces: 30000
+  preserve_shape_target_face_ratio: 0.18
+  preserve_shape_min_target_faces: 80000
+  preserve_shape_max_target_faces: 180000
+  preserve_shape_smooth_iterations: 0
+  preserve_shape_shrinkwrap_iterations: 1
+  voxel_size: null
+  voxel_size_factor: 1.15
+  adaptivity: 0.15
+  decimate_triangulate: true
+  decimate_after_remesh: true
+  smooth_iterations: 2
+  smooth_factor: 0.18
+  shrinkwrap_iterations: 2
+  projection_offset: 0.0
+
+uv:
+  angle_limit_degrees: 66.0
+  island_margin: 0.02
+  area_weight: 0.0
+
+textures:
+  enabled: true
+  resolution: 2048
+  samples: 64
+  margin: 16
+  cage_extrusion: 0.02
+  bake_base_color: true
+  bake_normal: true
+  bake_roughness: false
+  pbr_repaint: false
+  neutral_roughness: 0.65
+  neutral_metallic: 0.0
+
+qc:
+  fail_on_error: false
+  adapt_thresholds_to_selected_method: true
+  uv_overlap_grid: 128
+  thresholds:
+    min_faces: 1000
+    max_faces: 60000
+    max_projection_rms: 0.02
+    max_projection_max: 0.08
+    max_uv_overlap_ratio: 0.02
+    max_uv_out_of_bounds_fraction: 0.0
+    max_open_or_nonmanifold_edges: 0
+
+export:
+  formats:
+    - glb
+  glb_filename: refined_asset.glb
+  obj_filename: refined_asset.obj

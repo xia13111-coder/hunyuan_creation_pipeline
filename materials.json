@@ -1,0 +1,22 @@
+{
+  "materials": {
+    "steel":  { "density": 7850, "friction": 0.5, "restitution": 0.05, "combine": "average", "dyn_ratio": 0.9 },
+    "rubber": { "density": 1100, "friction": 1.0, "restitution": 0.6,  "dyn_ratio": 0.7 },
+    "wood":   { "density": 700,  "friction": 0.6, "restitution": 0.2 },
+    "copper": {
+      "density": 8960,
+      "friction": 0.40,
+      "restitution": 0.05,
+      "dyn_ratio": 0.9},
+    "plastic": {
+      "density": 950,
+      "friction": 0.30,
+      "restitution": 0.1,
+      "dyn_ratio": 0.9}
+  },
+  "name_map": [
+    { "regex": "tire|rubber", "tag": "rubber" },
+    { "regex": "metal|steel", "tag": "steel" },
+    { "regex": "wood",        "tag": "wood" }
+  ]
+}

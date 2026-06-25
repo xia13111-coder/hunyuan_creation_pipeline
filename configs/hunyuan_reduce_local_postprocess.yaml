@@ -1,0 +1,118 @@
+backend:
+  name: hunyuan_api
+  blender_executable: blender
+  keep_intermediate: true
+
+hunyuan:
+  endpoint: ai3d.tencentcloudapi.com
+  service: ai3d
+  version: "2025-05-13"
+  region: ap-guangzhou
+  secret_id_env: TENCENTCLOUD_SECRET_ID
+  secret_key_env: TENCENTCLOUD_SECRET_KEY
+  token_env: TENCENTCLOUD_TOKEN
+  input_url: null
+  input_url_env: HUNYUAN_INPUT_URL
+  input_type: GLB
+
+  temp_upload:
+    enabled: false
+    provider: uguu
+    endpoint: https://uguu.se/upload.php
+    timeout_seconds: 300
+    download_error_max_retries: 4
+    download_error_retry_interval_seconds: 10
+
+  poll_interval_seconds: 10
+  timeout_seconds: 3600
+  submit_max_retries: 6
+  submit_retry_interval_seconds: 60
+  submit_retry_backoff_factor: 1.5
+  submit_retry_error_codes:
+    - ResourceInsufficient
+    - InternalError
+    - FailedOperation.ResourceInsufficient
+
+  download_preference:
+    - GLB
+    - FBX
+    - ZIP
+    - OBJ
+
+  retopology:
+    enabled: true
+    polygon_type: quadrilateral
+    face_level: high
+
+  uv:
+    enabled: false
+
+  texture:
+    enabled: false
+
+  local_postprocess:
+    enabled: true
+
+cleanup:
+  merge_distance: 0.0001
+  degenerate_threshold: 5.0e-07
+  min_component_faces: 8
+  min_component_area_ratio: 1.0e-06
+  max_component_cleanup_face_fraction: 0.05
+
+retopology:
+  method: external_target_project
+  target_path: null
+  normalize_external_target_to_source_bbox: true
+  cleanup_target_small_components: false
+  smooth_iterations: 0
+  shrinkwrap_iterations: 1
+  projection_offset: 0.0
+
+uv:
+  method: lightmap_pack
+  box_div: 24
+  margin_div: 0.2
+
+textures:
+  enabled: true
+  resolution: 2048
+  samples: 64
+  margin: 24
+  cage_extrusion: 0.001
+  max_ray_distance: 0.002
+  bake_base_color: true
+  bake_normal: true
+  bake_roughness: true
+  bake_metallic: true
+  bake_ao: false
+  bake_emissive: false
+  pbr_transfer: nearest_surface_texture
+  pbr_repaint: false
+  base_color_transfer: nearest_surface_texture
+  transfer_max_distance: 0.004
+  transfer_normal_dot_min: 0.05
+  transfer_dilate_iterations: 24
+  transfer_fill_uncovered: true
+  transfer_fill_max_iterations: 512
+  transfer_allow_nearest_fallback: true
+
+qc:
+  fail_on_error: false
+  adapt_thresholds_to_selected_method: true
+  uv_overlap_grid: 128
+  thresholds:
+    min_faces: 1000
+    max_faces: 220000
+    max_projection_rms: 0.03
+    max_projection_max: 0.12
+    max_surface_area_relative_delta: null
+    max_bbox_axis_relative_delta: null
+    max_uv_overlap_ratio: 0.03
+    max_uv_out_of_bounds_fraction: 0.0
+    max_open_or_nonmanifold_edges: 200000
+
+export:
+  formats:
+    - glb
+  glb_filename: refined_asset.glb
