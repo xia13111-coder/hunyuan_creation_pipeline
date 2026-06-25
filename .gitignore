@@ -15,7 +15,9 @@ downloads/
 downloads_*/
 output/
 output_*/
+manual_output_*/
 pipeline_result.json
+manual_pipeline_result*.json
 *.log
 
 data/*

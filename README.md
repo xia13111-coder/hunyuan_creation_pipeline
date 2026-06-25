@@ -70,6 +70,10 @@ Hunyuan generation and mesh refinement, preserves the authored GLB geometry by
 default, then converts to USD, adds physics/mass/material, and collects the
 final asset.
 
+The USD stage is authored as Z-up. `--set-mass` is the total mass of the whole
+asset; when a USD contains multiple rigid bodies, the mass is distributed by
+volume weight instead of assigning the full value to every mesh.
+
 ```bash
 /home/user/miniconda3/envs/hunyuan/bin/python ./run_asset_pipeline.py \
   --manual-glb "/home/user/下载/焊机/未命名.glb" \

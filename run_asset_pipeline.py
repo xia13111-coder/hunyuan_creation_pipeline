@@ -105,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--material", default="plastic", help="material name in materials.json")
     parser.add_argument("--approx", default="sdf", help="collision approximation, for example sdf or convexDecomposition")
-    parser.add_argument("--set-mass", type=float, help="fixed mass in kg; omitted means auto estimate")
+    parser.add_argument("--set-mass", type=float, help="total asset mass in kg; omitted means auto estimate")
 
     parser.add_argument("--skip-refine", action="store_true", help="skip refine mesh")
     parser.add_argument("--refine-output-dir", help="refine mesh output dir")

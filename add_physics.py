@@ -38,7 +38,7 @@ def parse_args():
     ap.add_argument("--headless", action="store_true", help="无界面运行")
 
 
-    ap.add_argument("--set-mass", type=float, help="给所有物体直接设置固定质量(kg)，仅覆盖质量")
+    ap.add_argument("--set-mass", type=float, help="设置整个资产总质量(kg)，多刚体时按体积权重分配")
     ap.add_argument("--material", help="统一材质标签（如 steel/rubber/wood/...），覆盖密度/摩擦/回弹/组合模式")
 
 
@@ -127,6 +127,8 @@ def ensure_velocity_attrs_on_xform(xf_prim, use_physx_names=False):
     v.Set(Gf.Vec3f(0,0,0)); av.Set(Gf.Vec3f(0,0,0))
 
 def find_usd_files(root):
+    if os.path.isfile(root):
+        return [os.path.abspath(root)] if root.lower().endswith((".usd", ".usda", ".usdc")) else []
     out = []
     for r, _, fs in os.walk(root):
         for n in fs:
@@ -271,6 +273,60 @@ def estimate_mass_by_density_precise(stage, prim, density, fallback_mass=1.0):
         vol_m3_fb = max(size[0], 1e-9) * max(size[1], 1e-9) * max(size[2], 1e-9) * (mpu ** 3)
         m = density * vol_m3_fb
     return float(min(max(m, 0.01), 10000.0))
+
+def compute_mass_distribution_weight(stage, prim, density):
+    vol_m3 = compute_precise_volume_m3(stage, prim)
+    if not vol_m3 or vol_m3 <= 0.0:
+        rng = compute_world_aabb(stage, prim)
+        if rng:
+            size = rng.GetSize()
+            mpu = _meters_per_unit(stage)
+            vol_m3 = (
+                max(size[0], 1e-9)
+                * max(size[1], 1e-9)
+                * max(size[2], 1e-9)
+                * (mpu ** 3)
+            )
+    if not vol_m3 or vol_m3 <= 0.0:
+        return 1.0
+    return max(float(vol_m3) * max(float(density), 1e-9), 1e-9)
+
+def distribute_total_mass(stage, records, total_mass):
+    rigid_records = [
+        record
+        for record in records
+        if record["params"].get("body_kind", "rigid") == "rigid"
+    ]
+    if not rigid_records:
+        return {}
+
+    total_mass = float(total_mass)
+    if total_mass <= 0.0:
+        raise ValueError("--set-mass must be greater than 0 when provided")
+
+    weights = [
+        compute_mass_distribution_weight(
+            stage,
+            record["rb_xform"],
+            float(record["params"].get("density", 500.0)),
+        )
+        for record in rigid_records
+    ]
+    total_weight = sum(weights)
+    if total_weight <= 0.0:
+        weights = [1.0 for _ in rigid_records]
+        total_weight = float(len(rigid_records))
+
+    masses = {}
+    assigned = 0.0
+    for index, (record, weight) in enumerate(zip(rigid_records, weights)):
+        if index == len(rigid_records) - 1:
+            mass = max(total_mass - assigned, 0.0)
+        else:
+            mass = total_mass * (weight / total_weight)
+            assigned += mass
+        masses[record["rb_xform"].GetPath().pathString] = float(mass)
+    return masses
 
 def bind_mat_to_body_and_meshes(stage, body_prim, material):
     UsdShade.MaterialBindingAPI.Apply(body_prim).Bind(
@@ -521,7 +577,7 @@ def build_out_path(in_path):
     stem, ext = os.path.splitext(fname)
     out_name = f"{stem}{args.suffix}{ext}"
     if args.out_dir:
-        rel_dir = os.path.relpath(base_dir, args.folder)
+        rel_dir = "." if os.path.isfile(args.folder) else os.path.relpath(base_dir, args.folder)
         out_dir = os.path.normpath(os.path.join(args.out_dir, rel_dir))
     else:
         out_dir = base_dir
@@ -547,10 +603,17 @@ def process_usd(in_path):
         log("  !! failed to open stage")
         return
 
+    try:
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+        log("  stage upAxis = Z")
+    except Exception as e:
+        log(f"  [WARN] failed to set stage upAxis=Z: {e}")
+
     anchor = get_anchor_root(stage)
     log("  anchor root =", anchor.GetPath().pathString)
 
-    for prim in anchor.GetChildren():
+    records = []
+    for prim in list(anchor.GetChildren()):
         if prim.IsA(UsdGeom.Mesh) or prim.IsA(UsdGeom.Cube) or prim.IsA(UsdGeom.Sphere) or prim.IsA(UsdGeom.Capsule):
             body = prim
         elif prim.IsA(UsdGeom.Xform) and xform_has_geom(prim):
@@ -562,10 +625,22 @@ def process_usd(in_path):
         rb_xform = add_rigid_and_collider(stage, body, params)
         if rb_xform is None:
             continue
+        records.append({"body": body, "rb_xform": rb_xform, "params": params})
 
+    fixed_masses = {}
+    if args.set_mass is not None:
+        fixed_masses = distribute_total_mass(stage, records, args.set_mass)
+        log(
+            f"  total mass={float(args.set_mass):.3f} kg distributed over "
+            f"{len(fixed_masses)} rigid body/bodies"
+        )
+
+    for record in records:
+        rb_xform = record["rb_xform"]
+        params = record["params"]
         if params.get("body_kind", "rigid") == "rigid":
             if args.set_mass is not None:
-                m = float(args.set_mass)
+                m = fixed_masses.get(rb_xform.GetPath().pathString, float(args.set_mass))
             elif params.get("mass") is not None:
                 m = float(params["mass"])
             else:

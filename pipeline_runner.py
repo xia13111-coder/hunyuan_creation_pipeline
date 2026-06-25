@@ -260,6 +260,15 @@ def _converted_usd_root(input_path: str, *, overwrite: bool, suffix: str | None)
     return input_path
 
 
+def _converted_usd_path(input_path: str, *, usd_format: str, overwrite: bool, suffix: str | None) -> str | None:
+    base = Path(input_path)
+    if not base.is_file():
+        return None
+    out_dir = Path(_converted_usd_root(input_path, overwrite=overwrite, suffix=suffix))
+    ext = f".{usd_format}" if usd_format in {"usdc", "usda"} else ".usd"
+    return str(out_dir / f"{out_dir.name}{ext}")
+
+
 def _log_blender_preflight(input_path: str, log_cb: LogCallback = None) -> list[str]:
     blender = blender_bin()
     glb_files = _list_files_by_suffix(input_path, {".glb"})
@@ -555,11 +564,13 @@ def run_convert_job(
     _append_flag(args, "--visible-only", visible_only)
     _run_command(args, log_cb=log_cb)
     usd_root = _converted_usd_root(input_path, overwrite=overwrite, suffix=suffix)
+    usd_input_path = _converted_usd_path(input_path, usd_format=usd_format, overwrite=overwrite, suffix=suffix)
     return {
         "input_path": input_path,
         "usd_format": usd_format,
         "overwrite": overwrite,
         "usd_root": usd_root,
+        "usd_input_path": usd_input_path or usd_root,
         "usd_files": _list_files_by_suffix(usd_root, {".usd", ".usda", ".usdc"}),
     }
 
@@ -662,11 +673,12 @@ def run_postprocess_job(
     )
     steps.append({"step": "convert_usd", "result": convert_result})
     usd_input_root = convert_result["usd_root"]
+    physics_input = convert_result.get("usd_input_path") or usd_input_root
     steps.append(
         {
             "step": "add_physics",
             "result": run_add_physics_job(
-                folder=usd_input_root,
+                folder=physics_input,
                 out_dir=intermediate_output_dir,
                 material_file=material_file,
                 material=material,
@@ -765,12 +777,13 @@ def run_glb_physics_job(
     )
     steps.append({"step": "convert_usd", "result": convert_result})
     usd_input_root = convert_result["usd_root"]
+    physics_input = convert_result.get("usd_input_path") or usd_input_root
 
     steps.append(
         {
             "step": "add_physics",
             "result": run_add_physics_job(
-                folder=usd_input_root,
+                folder=physics_input,
                 out_dir=intermediate_output_dir,
                 material_file=material_file,
                 material=material,
@@ -980,7 +993,7 @@ def _add_postprocess_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--orientation", default="X=L,Y=M,Z=S", help="轴向映射，例如 X=L,Y=M,Z=S")
     parser.add_argument("--intermediate-output-dir", required=True, help="加物理后的中间 USD 输出目录")
     parser.add_argument("--final-output-dir", required=True, help="collect 后最终 USD 输出目录")
-    parser.add_argument("--set-mass", type=float, help="固定质量 kg；不传则自动估算")
+    parser.add_argument("--set-mass", type=float, help="整个资产总质量 kg；不传则自动估算")
     parser.add_argument("--material", default="plastic", help="材料标签，对应 materials.json")
     parser.add_argument("--approx", default="convexDecomposition", help="碰撞近似类型")
 
@@ -1012,7 +1025,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     glb_physics.add_argument("--final-output-dir", required=True, help="collect 后最终 USD 输出目录")
     glb_physics.add_argument("--material", default="plastic", help="材料标签，对应 materials.json")
     glb_physics.add_argument("--approx", default="sdf", help="碰撞近似类型")
-    glb_physics.add_argument("--set-mass", type=float, help="固定质量 kg；不传则自动估算")
+    glb_physics.add_argument("--set-mass", type=float, help="整个资产总质量 kg；不传则自动估算")
     glb_physics.add_argument("--usd-format", default="usd", choices=["usd", "usda", "usdc"], help="USD 输出格式")
     glb_physics.add_argument("--visible-only", action="store_true", help="只导出可见对象")
     glb_physics.add_argument("--align", action="store_true", help="转 USD 前先做轴向映射")
