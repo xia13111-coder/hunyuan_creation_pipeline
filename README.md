@@ -1,86 +1,158 @@
 # Hunyuan Creation Pipeline
 
-这是一个资产生成和后处理流水线，用于把 Hunyuan 生成的 GLB 或已有的 GLB 模型转换为带物理属性的 USD 资产。
+A production-oriented asset pipeline for Tencent Hunyuan 3D outputs and existing GLB models. It can generate GLB assets, refine Hunyuan meshes, convert GLB to USD, author simulation physics, and collect final USD assets for downstream use.
 
-## 功能
+## Pipeline Diagram
 
-- 调用 Tencent Hunyuan 3D 生成 GLB。
-- 对 Hunyuan 生成的 GLB 执行 refine mesh。
-- 将 GLB 转为 Z-up USD。
-- 使用 Isaac Sim 添加物理材质、碰撞体、刚体和质量。
-- 收集最终 USD 资产到统一输出目录。
-- 支持手工建模或第三方 GLB 直接走后半段流水线。
+```mermaid
+flowchart TD
+    subgraph INPUTS["Inputs"]
+        IMG["Image folder\n--input-dir"]
+        URL["Image URL\n--image-url"]
+        PROMPT["Text prompt\n--prompt"]
+        EXISTING["Existing Hunyuan GLB\n--existing-glb"]
+        MANUAL["Manual or third-party GLB\n--manual-glb"]
+    end
 
-## 流水线模式
+    subgraph HUNYUAN["Hunyuan generation"]
+        GEN["hunyuan_to3d_batch.py\nGenerate raw GLB"]
+        RAW["./downloads/\nRaw Hunyuan GLB"]
+    end
 
-### Hunyuan 生成模式
+    subgraph REFINE["Hunyuan refine mesh"]
+        REFINE_STEP["asset_refiner\nConfig: ./configs/hunyuan_reduce_local_postprocess.yaml"]
+        REFINED["./downloads_refined_mesh/\nRefined GLB"]
+    end
+
+    subgraph BLENDER["Blender post-processing"]
+        ALIGN["align_glb_axis_only.py\nAxis mapping"]
+        RESIZE["resize_glb_xyz_and_center.py\nResize and center"]
+        CONVERT["convert_glb_to_usd_zup.py\nGLB to USD\nSet USD upAxis = Z"]
+    end
+
+    subgraph PHYSICS["Isaac Sim physics authoring"]
+        MATERIAL["materials.json\nMaterial preset"]
+        PHYSICS_STEP["add_physics.py\nCollision, rigid body, mass"]
+        INTERMEDIATE["./output_intermediate/\nPhysics-authored USD"]
+    end
+
+    subgraph COLLECT["Final collection"]
+        COLLECT_STEP["collect_usd_flat.py\nCollect USD, materials, textures"]
+        FINAL["./output_final/\nFinal USD assets"]
+        SUMMARY["./pipeline_result.json\nPipeline summary"]
+    end
+
+    IMG --> GEN
+    URL --> GEN
+    PROMPT --> GEN
+    GEN --> RAW
+    RAW --> REFINE_STEP
+    EXISTING --> REFINE_STEP
+    REFINE_STEP --> REFINED
+    REFINED --> ALIGN
+    ALIGN --> RESIZE
+    RESIZE --> CONVERT
+
+    MANUAL --> MANUAL_PREP["Manual preprocessing\nDefault: preserve geometry\nOptional: --manual-align / --manual-resize"]
+    MANUAL_PREP --> CONVERT
+
+    CONVERT --> PHYSICS_STEP
+    MATERIAL --> PHYSICS_STEP
+    PHYSICS_STEP --> INTERMEDIATE
+    INTERMEDIATE --> COLLECT_STEP
+    COLLECT_STEP --> FINAL
+    COLLECT_STEP --> SUMMARY
+```
+
+## Features
+
+- Generate GLB assets through Tencent Hunyuan 3D from images, image URLs, or text prompts.
+- Run refine mesh on Hunyuan-generated or Hunyuan-style GLB files.
+- Convert GLB files to USD and write Z-up USD stage metadata.
+- Author physics materials, collision, rigid bodies, and mass through Isaac Sim.
+- Collect final USD assets, materials, and textures into one output directory.
+- Run the back half of the pipeline for manually modeled or third-party GLB assets.
+
+## Pipeline Modes
+
+### Hunyuan Generation
 
 ```text
-图片 / prompt
--> Hunyuan 生成 GLB
+image / image URL / prompt
+-> Hunyuan GLB generation
 -> refine mesh
--> 轴向对齐和尺寸调整
--> GLB 转 USD
--> 添加物理属性
--> 收集最终 USD
+-> axis alignment and resize
+-> GLB to USD
+-> add physics
+-> collect final USD
 ```
 
-### 已有 Hunyuan GLB
+### Existing Hunyuan GLB
 
 ```text
-已有 GLB
+existing GLB
 -> refine mesh
--> 轴向对齐和尺寸调整
--> GLB 转 USD
--> 添加物理属性
--> 收集最终 USD
+-> axis alignment and resize
+-> GLB to USD
+-> add physics
+-> collect final USD
 ```
 
-### 手工建模 GLB
+### Manual GLB
 
 ```text
-已有 GLB
--> GLB 转 USD
--> 添加物理属性
--> 收集最终 USD
+existing GLB
+-> GLB to USD
+-> add physics
+-> collect final USD
 ```
 
-手工建模模式不会做 Hunyuan refine mesh，也不会旋转或烘焙模型方向；它只会写入 USD `upAxis = "Z"` 元数据。
+Manual GLB mode skips Hunyuan generation and refine mesh. By default, it preserves the authored geometry orientation and only writes USD `upAxis = "Z"` metadata.
 
-## 环境准备
+## Requirements
 
-安装依赖：
+- Linux environment with NVIDIA GPU support for Isaac Sim workflows.
+- Conda environment created from `./environment.yml`.
+- Blender.
+- Isaac Sim.
+- Tencent Cloud credentials for Hunyuan generation or refine mesh.
 
-```bash
-conda env create -f ./environment.yml
-conda activate hunyuan
-```
-
-如果环境已经存在：
-
-```bash
-conda env update -f ./environment.yml --prune
-```
-
-Hunyuan 生成或 refine mesh 需要设置 Tencent Cloud 凭证：
-
-```bash
-export TENCENTCLOUD_SECRET_ID="your-secret-id"
-export TENCENTCLOUD_SECRET_KEY="your-secret-key"
-```
-
-Blender 和 Isaac Sim 会自动检测常见安装位置。自动检测不到时，可以按本机环境设置：
+The runner auto-detects common Blender and Isaac Sim locations. If auto-detection fails, set the paths explicitly:
 
 ```bash
 export BLENDER_BIN="blender"
 export ISAAC_PYTHON="./isaac-sim/python.sh"
 ```
 
-## 运行命令
+## Setup
 
-### 1. Hunyuan 完整流水线
+Create the conda environment:
 
-把输入图片放到 `./data/`，然后执行：
+```bash
+conda env create -f ./environment.yml
+conda activate hunyuan
+```
+
+Update an existing environment:
+
+```bash
+conda env update -f ./environment.yml --prune
+```
+
+Set Tencent Cloud credentials when using Hunyuan generation or refine mesh:
+
+```bash
+export TENCENTCLOUD_SECRET_ID="your-secret-id"
+export TENCENTCLOUD_SECRET_KEY="your-secret-key"
+```
+
+Do not commit real credentials.
+
+## Usage
+
+### 1. Full Hunyuan Pipeline
+
+Place input images in `./data/`, then run:
 
 ```bash
 python ./run_asset_pipeline.py \
@@ -98,7 +170,7 @@ python ./run_asset_pipeline.py \
   --approx sdf
 ```
 
-### 2. 已有 Hunyuan GLB
+### 2. Existing Hunyuan GLB
 
 ```bash
 python ./run_asset_pipeline.py \
@@ -113,7 +185,7 @@ python ./run_asset_pipeline.py \
   --approx sdf
 ```
 
-### 3. 手工建模 GLB
+### 3. Manual GLB
 
 ```bash
 python ./run_asset_pipeline.py \
@@ -126,7 +198,7 @@ python ./run_asset_pipeline.py \
   --set-mass 30
 ```
 
-如果手工模型也需要使用流水线的轴向映射和尺寸调整，可以增加：
+If the manual model also needs the pipeline axis mapping or resize step, add:
 
 ```bash
   --manual-align \
@@ -136,63 +208,63 @@ python ./run_asset_pipeline.py \
   --len-z 0.5
 ```
 
-## 关键参数
+## Key Options
 
-| 参数 | 说明 |
+| Option | Description |
 | --- | --- |
-| `--input-dir` | Hunyuan 生成模式的输入图片目录。 |
-| `--prompt` | Hunyuan 文生 3D 的文本提示词。 |
-| `--image-url` | Hunyuan 图生 3D 的图片 URL。 |
-| `--existing-glb` | 已有 Hunyuan GLB，仍会执行 refine mesh。 |
-| `--manual-glb` | 手工建模或第三方 GLB，跳过 Hunyuan 和 refine mesh。 |
-| `--len-x`, `--len-y`, `--len-z` | 目标尺寸，单位为米。 |
-| `--orientation` | `align_glb_axis_only.py` 使用的轴向映射。 |
-| `--material` | `materials.json` 中的材质名称。 |
-| `--approx` | 碰撞近似方式，例如 `sdf`、`convexHull`、`triangleMesh`。 |
-| `--set-mass` | 整个资产的总质量，单位为 kg。 |
-| `--skip-refine` | 对已有 GLB 跳过 refine mesh。 |
-| `--usd-format` | USD 输出格式，例如 `usd` 或 `usda`。 |
+| `--input-dir` | Input image directory for Hunyuan generation. |
+| `--prompt` | Text prompt for Hunyuan text-to-3D generation. |
+| `--image-url` | Image URL for Hunyuan image-to-3D generation. |
+| `--existing-glb` | Existing Hunyuan GLB path; still runs refine mesh. |
+| `--manual-glb` | Manual or third-party GLB path; skips Hunyuan and refine mesh. |
+| `--len-x`, `--len-y`, `--len-z` | Target size in meters. |
+| `--orientation` | Axis mapping consumed by `align_glb_axis_only.py`. |
+| `--material` | Material name from `./materials.json`. |
+| `--approx` | Collision approximation, such as `sdf`, `convexHull`, or `triangleMesh`. |
+| `--set-mass` | Total asset mass in kilograms. |
+| `--skip-refine` | Skip refine mesh for existing GLB workflows. |
+| `--usd-format` | USD output format, such as `usd` or `usda`. |
 
-查看完整参数：
+Print the full CLI reference:
 
 ```bash
 python ./run_asset_pipeline.py --help
 ```
 
-## 质量和坐标约定
+## Coordinate And Mass Conventions
 
-- 输出 USD 会设置为 `upAxis = "Z"`。
-- 手工建模 GLB 默认保留原始几何方向。
-- `--set-mass` 表示整个资产的总质量，不是某一个 mesh 的质量。
-- 如果资产中有多个刚体，总质量会按体积分配。
-- 如果没有设置 `--set-mass`，质量会根据材质密度和模型体积估算。
+- Output USD stages are authored with `upAxis = "Z"`.
+- Manual GLB mode preserves source geometry orientation by default.
+- `--set-mass` means total asset mass, not the mass of one individual mesh.
+- If an asset contains multiple rigid bodies, the total mass is distributed by volume weight.
+- If `--set-mass` is omitted, mass is estimated from material density and mesh volume.
 
-## 输出目录
-
-```text
-./downloads/                  Hunyuan 原始生成结果
-./downloads_refined_mesh/      refine mesh 结果和中间 GLB
-./output_intermediate/         添加物理属性后的 USD
-./output_final/                最终收集后的 USD 资产
-./pipeline_result.json         流水线结果摘要
-```
-
-生成结果、缓存、日志和本地环境文件都不会提交到 git。
-
-## 项目结构
+## Outputs
 
 ```text
-./run_asset_pipeline.py          主入口
-./pipeline_runner.py             流水线编排
-./hunyuan_to3d_batch.py          Hunyuan 生成客户端
-./asset_refiner/                 refine mesh 模块
-./align_glb_axis_only.py         GLB 轴向映射
-./resize_glb_xyz_and_center.py   GLB 尺寸调整和居中
-./convert_glb_to_usd_zup.py      GLB 转 USD
-./add_physics.py                 Isaac Sim 物理属性写入
-./collect_usd_flat.py            最终 USD 收集
-./configs/                       refine mesh 配置
-./materials.json                 物理材质配置
+./downloads/                  Raw Hunyuan generation results
+./downloads_refined_mesh/      Refined GLB files and intermediate files
+./output_intermediate/         USD files after physics authoring
+./output_final/                Final collected USD assets
+./pipeline_result.json         Machine-readable pipeline summary
 ```
 
-Docker 和 HTTP API 的使用方式见 `./README.docker.md`。
+Generated assets, caches, logs, and local environment files are ignored by git.
+
+## Project Layout
+
+```text
+./run_asset_pipeline.py          Main runner
+./pipeline_runner.py             Pipeline orchestration
+./hunyuan_to3d_batch.py          Hunyuan generation client
+./asset_refiner/                 Refine mesh package
+./align_glb_axis_only.py         GLB axis mapping
+./resize_glb_xyz_and_center.py   GLB resize and centering
+./convert_glb_to_usd_zup.py      GLB to USD conversion
+./add_physics.py                 Isaac Sim physics authoring
+./collect_usd_flat.py            Final USD collection
+./configs/                       Refine mesh configs
+./materials.json                 Physics material presets
+```
+
+Docker and HTTP API usage are documented in `./README.docker.md`.
