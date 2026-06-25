@@ -101,12 +101,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--manual-align", action="store_true", help="for --manual-glb, align GLB before USD conversion")
     parser.add_argument("--manual-resize", action="store_true", help="for --manual-glb, resize GLB before USD conversion")
     parser.add_argument("--usd-format", default="usd", choices=["usd", "usda", "usdc"], help="USD format for manual/general GLB mode")
-    parser.add_argument(
-        "--manual-axis-conversion",
-        default="y-up-to-z-up",
-        choices=["preserve", "y-up-to-z-up"],
-        help="for --manual-glb, bake source axis convention; default converts Y-up GLB to Z-up USD",
-    )
     parser.add_argument("--visible-only", action="store_true", help="export only visible objects when converting GLB to USD")
 
     parser.add_argument("--material", default="plastic", help="material name in materials.json")
@@ -149,7 +143,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             approx=args.approx,
             usd_format=args.usd_format,
             visible_only=args.visible_only,
-            axis_conversion=args.manual_axis_conversion,
             align=args.manual_align,
             axis_map=args.orientation,
             resize=args.manual_resize,
