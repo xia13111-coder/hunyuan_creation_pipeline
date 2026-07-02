@@ -44,12 +44,6 @@ hunyuan:
     polygon_type: quadrilateral
     face_level: high
 
-  uv:
-    enabled: false
-
-  texture:
-    enabled: false
-
   local_postprocess:
     enabled: true
 
@@ -77,19 +71,13 @@ uv:
 textures:
   enabled: true
   resolution: 2048
-  samples: 64
-  margin: 24
-  cage_extrusion: 0.001
-  max_ray_distance: 0.002
   bake_base_color: true
   bake_normal: true
   bake_roughness: true
   bake_metallic: true
   bake_ao: false
   bake_emissive: false
-  pbr_transfer: nearest_surface_texture
   pbr_repaint: false
-  base_color_transfer: nearest_surface_texture
   transfer_max_distance: 0.004
   transfer_normal_dot_min: 0.05
   transfer_dilate_iterations: 24

@@ -1,6 +1,5 @@
 import os
 import sys
-import itertools
 import traceback
 import numpy as np
 import bpy

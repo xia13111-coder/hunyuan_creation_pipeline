@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 
+"""User-facing asset pipeline CLI.
+
+Call flow:
+main -> configure_runtime -> ensure_generation_source -> run
+
+run branches:
+- manual_glb -> pipeline_runner.run_glb_physics_job
+- existing_glb -> pipeline_runner.run_refine_mesh_job -> run_process_model_job
+- generated input -> pipeline_runner.run_generate_and_process_model_job
+"""
+
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import shutil
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +64,9 @@ def configure_runtime() -> dict[str, str | None]:
         isaac_candidates.append(Path(isaac_root) / "python.sh")
     isaac_candidates.extend(
         [
+            Path.home() / "isaacsim500" / "python.sh",
+            Path.home() / "isaacsim" / "python.sh",
+            Path.home() / "isaac-sim" / "python.sh",
             Path("/isaac-sim/python.sh"),
             Path("/opt/isaac-sim/python.sh"),
         ]
@@ -142,6 +155,7 @@ def write_result(result: dict[str, Any], path: str) -> None:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    """Choose the pipeline mode and delegate to pipeline_runner."""
     if args.manual_glb:
         postprocess_result = pipeline_runner.run_glb_physics_job(
             input_path=args.manual_glb,

@@ -1,8 +1,26 @@
 #!/usr/bin/env python3
 
+"""Pipeline orchestration helpers.
+
+This module is intentionally a library, not the primary CLI. User commands go
+through run_asset_pipeline.py, while serve_api.py imports these functions for
+background jobs.
+
+Main call flows:
+- run_generate_and_process_model_job
+  -> run_generate_model_job
+  -> run_refine_mesh_job
+  -> run_process_model_job
+  -> run_postprocess_job
+- run_process_model_job
+  -> run_postprocess_job
+  -> align -> resize -> convert_usd -> add_physics -> collect_usd
+- run_glb_physics_job
+  -> optional align/resize -> convert_usd -> add_physics -> collect_usd
+"""
+
 from __future__ import annotations
 
-import argparse
 import os
 import json
 import re
@@ -47,6 +65,9 @@ def isaac_python() -> Path:
 
     ov_pkg_dir = Path.home() / ".local" / "share" / "ov" / "pkg"
     candidates = [
+        Path.home() / "isaacsim500" / "python.sh",
+        Path.home() / "isaacsim" / "python.sh",
+        Path.home() / "isaac-sim" / "python.sh",
         Path("/isaac-sim/python.sh"),
         Path("/opt/isaac-sim/python.sh"),
     ]
@@ -400,6 +421,7 @@ def run_refine_mesh_job(
     fail_on_qc_error: bool = False,
     log_cb: LogCallback = None,
 ) -> dict:
+    """Run asset_refiner for each GLB and collect refined GLBs for postprocess."""
     glb_files = _list_files_by_suffix(input_path, {".glb"})
     if not glb_files:
         raise FileNotFoundError(f"No .glb files found for refine mesh input: {input_path}")
@@ -651,6 +673,7 @@ def run_postprocess_job(
     headless: bool = True,
     log_cb: LogCallback = None,
 ) -> dict:
+    """Hunyuan-style postprocess: align, resize, convert, add physics, collect."""
     _log_blender_preflight(input_path, log_cb=log_cb)
     steps = []
     steps.append({"step": "align", "result": run_align_job(input_path=input_path, axis_map=axis_map, log_cb=log_cb)})
@@ -732,11 +755,7 @@ def run_glb_physics_job(
     headless: bool = True,
     log_cb: LogCallback = None,
 ) -> dict:
-    """Generic path for existing GLB assets.
-
-    This intentionally skips Hunyuan generation and mesh refinement. By default
-    it preserves the authored GLB geometry and starts at USD conversion.
-    """
+    """Generic GLB path: optional geometry prep, convert, add physics, collect."""
     _log_blender_preflight(input_path, log_cb=log_cb)
     steps = []
 
@@ -814,30 +833,6 @@ def run_glb_physics_job(
         "final_output_dir": final_output_dir,
         "processed_glb_files": _list_files_by_suffix(input_path, {".glb"}),
         "steps": steps,
-    }
-
-
-def run_full_pipeline_job(
-    *,
-    generation_output_dir: str,
-    postprocess_input_path: str | None,
-    postprocess_params: dict,
-    hunyuan_params: dict,
-    log_cb: LogCallback = None,
-) -> dict:
-    generation_args = dict(hunyuan_params)
-    generation_args["output_dir"] = generation_output_dir
-    generation_result = run_hunyuan_job(log_cb=log_cb, **generation_args)
-    postprocess_args = dict(postprocess_params)
-    resolved_input_path = postprocess_input_path or postprocess_args.pop("input_path", None) or generation_output_dir
-    postprocess_result = run_postprocess_job(
-        input_path=resolved_input_path,
-        log_cb=log_cb,
-        **postprocess_args,
-    )
-    return {
-        "generation": generation_result,
-        "postprocess": postprocess_result,
     }
 
 
@@ -921,6 +916,7 @@ def run_generate_and_process_model_job(
     refine_fail_on_qc_error: bool = False,
     log_cb: LogCallback = None,
 ) -> dict:
+    """Full production path: generate GLB, optionally refine, then postprocess."""
     generation_result = run_generate_model_job(
         output_dir=output_dir,
         input_dir=input_dir,
@@ -961,187 +957,3 @@ def run_generate_and_process_model_job(
         "refine_mesh": refine_result,
         "postprocess": process_result,
     }
-
-
-def _console_log(message: str) -> None:
-    print(message, flush=True)
-
-
-def _write_result(result: dict, result_json: str | None) -> None:
-    text = json.dumps(result, ensure_ascii=False, indent=2)
-    if result_json:
-        path = Path(result_json).expanduser().resolve()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text + "\n", encoding="utf-8")
-        print(f"Result JSON: {path}", flush=True)
-    else:
-        print(text, flush=True)
-
-
-def _add_generation_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--input-dir", help="输入图片目录")
-    parser.add_argument("--prompt", help="文生 3D prompt")
-    parser.add_argument("--image-url", help="图片 URL")
-    parser.add_argument("--output-dir", default="./downloads", help="混元生成输出目录")
-    parser.add_argument("--face-count", type=int, help="混元专业版目标面数")
-    parser.add_argument("--download-preview", action="store_true", help="下载混元预览图")
-
-
-def _add_postprocess_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--len-x", type=float, required=True, help="目标 X 尺寸，单位 m")
-    parser.add_argument("--len-y", type=float, required=True, help="目标 Y 尺寸，单位 m")
-    parser.add_argument("--len-z", type=float, required=True, help="目标 Z 尺寸，单位 m")
-    parser.add_argument("--orientation", default="X=L,Y=M,Z=S", help="轴向映射，例如 X=L,Y=M,Z=S")
-    parser.add_argument("--intermediate-output-dir", required=True, help="加物理后的中间 USD 输出目录")
-    parser.add_argument("--final-output-dir", required=True, help="collect 后最终 USD 输出目录")
-    parser.add_argument("--set-mass", type=float, help="整个资产总质量 kg；不传则自动估算")
-    parser.add_argument("--material", default="plastic", help="材料标签，对应 materials.json")
-    parser.add_argument("--approx", default="convexDecomposition", help="碰撞近似类型")
-
-
-def _add_refine_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--no-refine-mesh", action="store_false", dest="refine_mesh", help="跳过 refine mesh")
-    parser.set_defaults(refine_mesh=True)
-    parser.add_argument("--refine-output-dir", help="refine mesh 输出目录")
-    parser.add_argument("--refine-config-path", help="refine mesh 配置文件")
-    parser.add_argument("--refine-temp-upload", help="临时上传服务，默认 uguu；可传 none 关闭")
-    parser.add_argument("--refine-fail-on-qc-error", action="store_true", help="QC fail 时让任务失败")
-
-
-def _build_cli_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run Hunyuan asset generation and post-processing without the HTTP API.")
-    parser.add_argument("--result-json", help="把最终结果写到 JSON 文件；不传则打印到 stdout")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    generate = subparsers.add_parser("generate-model", help="只调用混元生成 GLB")
-    _add_generation_args(generate)
-
-    process = subparsers.add_parser("process-model", help="只处理已有 GLB，不调用混元生成")
-    process.add_argument("--input-path", required=True, help="已有 GLB 文件或目录")
-    _add_postprocess_args(process)
-
-    glb_physics = subparsers.add_parser("glb-physics", help="通用 GLB 后半段：GLB -> USD -> physics -> collect")
-    glb_physics.add_argument("--input-path", required=True, help="已有 GLB 文件或目录")
-    glb_physics.add_argument("--intermediate-output-dir", required=True, help="加物理后的中间 USD 输出目录")
-    glb_physics.add_argument("--final-output-dir", required=True, help="collect 后最终 USD 输出目录")
-    glb_physics.add_argument("--material", default="plastic", help="材料标签，对应 materials.json")
-    glb_physics.add_argument("--approx", default="sdf", help="碰撞近似类型")
-    glb_physics.add_argument("--set-mass", type=float, help="整个资产总质量 kg；不传则自动估算")
-    glb_physics.add_argument("--usd-format", default="usd", choices=["usd", "usda", "usdc"], help="USD 输出格式")
-    glb_physics.add_argument("--visible-only", action="store_true", help="只导出可见对象")
-    glb_physics.add_argument("--align", action="store_true", help="转 USD 前先做轴向映射")
-    glb_physics.add_argument("--orientation", default="X=L,Y=M,Z=S", help="轴向映射，例如 X=L,Y=M,Z=S")
-    glb_physics.add_argument("--resize", action="store_true", help="转 USD 前先按 len-x/y/z 缩放并居中")
-    glb_physics.add_argument("--len-x", type=float, help="resize 时的目标 X 尺寸，单位 m")
-    glb_physics.add_argument("--len-y", type=float, help="resize 时的目标 Y 尺寸，单位 m")
-    glb_physics.add_argument("--len-z", type=float, help="resize 时的目标 Z 尺寸，单位 m")
-
-    refine = subparsers.add_parser("refine-mesh", help="只对已有 GLB 执行 refine mesh")
-    refine.add_argument("--input-path", required=True, help="已有 GLB 文件或目录")
-    refine.add_argument("--output-dir", help="refine mesh 输出目录")
-    refine.add_argument("--config-path", help="refine mesh 配置文件")
-    refine.add_argument("--temp-upload", help="临时上传服务，默认 uguu；可传 none 关闭")
-    refine.add_argument("--fail-on-qc-error", action="store_true", help="QC fail 时让任务失败")
-
-    full = subparsers.add_parser("generate-and-process-model", help="混元生成 -> refine mesh -> Blender/Isaac 后处理")
-    _add_generation_args(full)
-    full.add_argument("--postprocess-input-path", help="指定后处理输入；不传则使用混元输出目录")
-    _add_refine_args(full)
-    _add_postprocess_args(full)
-    return parser
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = _build_cli_parser()
-    args = parser.parse_args(argv)
-
-    try:
-        if args.command == "generate-model":
-            result = run_generate_model_job(
-                output_dir=args.output_dir,
-                input_dir=args.input_dir,
-                prompt=args.prompt,
-                image_url=args.image_url,
-                face_count=args.face_count,
-                download_preview=args.download_preview,
-                log_cb=_console_log,
-            )
-        elif args.command == "process-model":
-            result = run_process_model_job(
-                input_path=args.input_path,
-                len_x=args.len_x,
-                len_y=args.len_y,
-                len_z=args.len_z,
-                orientation=args.orientation,
-                intermediate_output_dir=args.intermediate_output_dir,
-                final_output_dir=args.final_output_dir,
-                set_mass=args.set_mass,
-                material=args.material,
-                approx=args.approx,
-                log_cb=_console_log,
-            )
-        elif args.command == "glb-physics":
-            result = run_glb_physics_job(
-                input_path=args.input_path,
-                intermediate_output_dir=args.intermediate_output_dir,
-                final_output_dir=args.final_output_dir,
-                material=args.material,
-                set_mass=args.set_mass,
-                approx=args.approx,
-                usd_format=args.usd_format,
-                visible_only=args.visible_only,
-                align=args.align,
-                axis_map=args.orientation,
-                resize=args.resize,
-                len_x=args.len_x,
-                len_y=args.len_y,
-                len_z=args.len_z,
-                log_cb=_console_log,
-            )
-        elif args.command == "refine-mesh":
-            result = run_refine_mesh_job(
-                input_path=args.input_path,
-                output_dir=args.output_dir,
-                config_path=args.config_path,
-                temp_upload=args.temp_upload,
-                fail_on_qc_error=args.fail_on_qc_error,
-                log_cb=_console_log,
-            )
-        elif args.command == "generate-and-process-model":
-            result = run_generate_and_process_model_job(
-                output_dir=args.output_dir,
-                intermediate_output_dir=args.intermediate_output_dir,
-                final_output_dir=args.final_output_dir,
-                len_x=args.len_x,
-                len_y=args.len_y,
-                len_z=args.len_z,
-                orientation=args.orientation,
-                set_mass=args.set_mass,
-                material=args.material,
-                approx=args.approx,
-                input_dir=args.input_dir,
-                prompt=args.prompt,
-                image_url=args.image_url,
-                face_count=args.face_count,
-                download_preview=args.download_preview,
-                postprocess_input_path=args.postprocess_input_path,
-                refine_mesh=args.refine_mesh,
-                refine_output_dir=args.refine_output_dir,
-                refine_config_path=args.refine_config_path,
-                refine_temp_upload=args.refine_temp_upload,
-                refine_fail_on_qc_error=args.refine_fail_on_qc_error,
-                log_cb=_console_log,
-            )
-        else:
-            parser.error(f"Unknown command: {args.command}")
-            return 2
-    except Exception as exc:
-        print(f"pipeline_runner: error: {exc}", file=sys.stderr, flush=True)
-        return 1
-
-    _write_result(result, args.result_json)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

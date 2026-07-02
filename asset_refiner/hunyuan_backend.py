@@ -1,3 +1,14 @@
+"""Tencent Hunyuan ReduceFace backend plus local Blender postprocess.
+
+Call flow:
+runner.run_refinement
+-> run_hunyuan_refinement
+-> resolve input URL or temporary upload
+-> submit_reduce_face -> run_job
+-> download ReduceFace result
+-> run_local_postprocess_worker -> blender_worker.py
+"""
+
 from __future__ import annotations
 
 import copy
@@ -254,59 +265,6 @@ def submit_reduce_face(
     )
 
 
-def submit_uv(
-    client: TencentCloudApiClient,
-    input_file: RemoteFile,
-    config: dict[str, Any],
-) -> dict[str, Any]:
-    return run_job(
-        client,
-        submit_action="SubmitHunyuanTo3DUVJob",
-        describe_action="DescribeHunyuanTo3DUVJob",
-        submit_payload={
-            "File": {"Type": input_file.type, "Url": input_file.url},
-            "__hunyuan_retry_config": config.get("hunyuan", {}),
-        },
-        poll_interval_seconds=int(config.get("hunyuan", {}).get("poll_interval_seconds", 10) or 10),
-        timeout_seconds=int(config.get("hunyuan", {}).get("timeout_seconds", 3600) or 3600),
-        stage_name="uv",
-    )
-
-
-def submit_texture(
-    client: TencentCloudApiClient,
-    input_file: RemoteFile,
-    config: dict[str, Any],
-) -> dict[str, Any]:
-    texture = config.get("hunyuan", {}).get("texture", {})
-    payload: dict[str, Any] = {
-        "File3D": {"Type": input_file.type, "Url": input_file.url},
-        "Model": str(texture.get("model") or "3.1"),
-        "EnablePBR": bool(texture.get("enable_pbr", False)),
-        "__hunyuan_retry_config": config.get("hunyuan", {}),
-    }
-    if texture.get("prompt"):
-        payload["Prompt"] = texture["prompt"]
-    if texture.get("image_url"):
-        payload["Image"] = {"Url": texture["image_url"]}
-    if not payload.get("Prompt") and not payload.get("Image"):
-        raise HunyuanApiError("hunyuan.texture.enabled requires hunyuan.texture.prompt or hunyuan.texture.image_url")
-
-    return run_job(
-        client,
-        submit_action="SubmitTextureTo3DJob",
-        describe_action="DescribeTextureTo3DJob",
-        submit_payload=payload,
-        poll_interval_seconds=int(config.get("hunyuan", {}).get("poll_interval_seconds", 10) or 10),
-        timeout_seconds=int(config.get("hunyuan", {}).get("timeout_seconds", 3600) or 3600),
-        stage_name="texture",
-    )
-
-
-def qc_worker_path() -> Path:
-    return Path(__file__).with_name("hunyuan_qc_worker.py")
-
-
 def local_worker_path() -> Path:
     return Path(__file__).with_name("blender_worker.py")
 
@@ -319,47 +277,6 @@ def blender_executable(config: dict[str, Any]) -> str:
     if candidate.exists():
         return str(candidate)
     raise FileNotFoundError("Blender executable not found for Hunyuan API local processing")
-
-
-def run_qc_worker(
-    *,
-    input_ref: str,
-    api_result_path: Path,
-    output_dir: Path,
-    config_path: Path,
-    report_path: Path,
-    log_path: Path,
-    config: dict[str, Any],
-) -> None:
-    blender = blender_executable(config)
-    source_args: list[str] = []
-    if not is_http_url(input_ref) and Path(input_ref).exists():
-        source_args = ["--source", str(Path(input_ref).resolve())]
-    command = [
-        blender,
-        "--background",
-        "--factory-startup",
-        "--python",
-        str(qc_worker_path()),
-        "--",
-        "--api-result",
-        str(api_result_path),
-        "--output",
-        str(output_dir),
-        "--config-json",
-        str(config_path),
-        "--report",
-        str(report_path),
-        *source_args,
-    ]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    log_path.write_text(
-        (completed.stdout or "") + ("\n" if completed.stdout and completed.stderr else "") + (completed.stderr or ""),
-        encoding="utf-8",
-    )
-    if completed.returncode != 0:
-        excerpt = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
-        raise BackendExecutionError(f"Hunyuan API QC worker failed with exit code {completed.returncode}. Log: {log_path}\n{excerpt}")
 
 
 def build_local_postprocess_config(config: dict[str, Any], target_path: Path) -> dict[str, Any]:
@@ -381,6 +298,7 @@ def run_local_postprocess_worker(
     log_path: Path,
     config: dict[str, Any],
 ) -> Path:
+    """Run blender_worker.py with the ReduceFace result as the retopo target."""
     if is_http_url(input_ref) or not Path(input_ref).exists():
         raise HunyuanApiError(
             "Hunyuan local postprocess requires a local --input path so Blender can migrate textures "
@@ -426,14 +344,18 @@ def run_hunyuan_refinement(
     *,
     input_ref: str,
     output_dir: Path,
-    resolved_config_path: Path,
     report_path: Path,
-    log_path: Path,
     config: dict[str, Any],
     dry_run: bool = False,
 ) -> dict[str, Any] | None:
+    """Submit ReduceFace, download the target, then run local Blender postprocess."""
     temp_upload_required = False
     use_local_postprocess = local_postprocess_enabled(config)
+    if not use_local_postprocess:
+        raise HunyuanApiError(
+            "The Hunyuan backend now supports only ReduceFace plus local Blender postprocess. "
+            "Set hunyuan.local_postprocess.enabled=true."
+        )
     api_input_ref = resolve_api_upload_input_ref(input_ref, config)
     try:
         remote_input = resolve_remote_input(api_input_ref, config)
@@ -449,14 +371,8 @@ def run_hunyuan_refinement(
         "api_upload_input": str(api_input_ref),
         "remote_input": remote_input.__dict__,
         "temporary_upload": temp_upload_required,
-        "stages": ["reduce_face"],
+        "stages": ["reduce_face", "local_uv_texture_postprocess"],
     }
-    if use_local_postprocess:
-        plan["stages"].append("local_uv_texture_postprocess")
-    elif config.get("hunyuan", {}).get("uv", {}).get("enabled", True):
-        plan["stages"].append("uv")
-    if not use_local_postprocess and config.get("hunyuan", {}).get("texture", {}).get("enabled", False):
-        plan["stages"].append("texture")
     if dry_run:
         return {"status": "dry_run", "plan": plan}
 
@@ -505,22 +421,6 @@ def run_hunyuan_refinement(
             list(config.get("hunyuan", {}).get("download_preference", [])),
         )
 
-    if not use_local_postprocess and config.get("hunyuan", {}).get("uv", {}).get("enabled", True):
-        uv_result = submit_uv(client, current_file, config)
-        api_stages.append(uv_result)
-        current_file = choose_result_file(
-            uv_result["describe_response"].get("ResultFile3Ds", []),
-            list(config.get("hunyuan", {}).get("download_preference", [])),
-        )
-
-    if not use_local_postprocess and config.get("hunyuan", {}).get("texture", {}).get("enabled", False):
-        texture_result = submit_texture(client, current_file, config)
-        api_stages.append(texture_result)
-        current_file = choose_result_file(
-            texture_result["describe_response"].get("ResultFile3Ds", []),
-            list(config.get("hunyuan", {}).get("download_preference", [])),
-        )
-
     api_summary = {
         "backend": "hunyuan_api",
         "source_input": str(input_ref),
@@ -538,52 +438,35 @@ def run_hunyuan_refinement(
     (output_dir / "hunyuan_api_result.json").write_text(json.dumps(api_summary, indent=2, ensure_ascii=False), encoding="utf-8")
 
     suffix = "." + current_file.type.lower().replace("unknown", "bin")
-    download_name = "hunyuan_reduce_target" if use_local_postprocess else "selected_result"
+    download_name = "hunyuan_reduce_target"
     api_result_path = prepare_downloaded_model(download_url(current_file.url, intermediate / f"{download_name}{suffix}"))
 
-    if use_local_postprocess:
-        local_log_path = output_dir / "hunyuan_local_postprocess_blender.log"
-        local_config_path = run_local_postprocess_worker(
-            input_ref=input_ref,
-            target_path=api_result_path,
-            output_dir=output_dir,
-            report_path=report_path,
-            log_path=local_log_path,
-            config=config,
-        )
-        with report_path.open("r", encoding="utf-8") as handle:
-            report = json.load(handle)
-        api_summary["local_postprocess"] = {
-            "method": "blender_external_target_project_uv_texture_migration",
-            "target_path": str(api_result_path),
-            "config_path": str(local_config_path),
-            "log_path": str(local_log_path),
-        }
-        report["hunyuan_api"] = api_summary
-        report.setdefault("stages", {})["hunyuan_api"] = {
-            "method": "SubmitReduceFaceJob",
-            "job_ids": [stage.get("job_id") for stage in api_stages],
-            "local_postprocess": True,
-        }
-        report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-        (output_dir / "hunyuan_api_result.json").write_text(
-            json.dumps(api_summary, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return report
-
-    run_qc_worker(
+    local_log_path = output_dir / "hunyuan_local_postprocess_blender.log"
+    local_config_path = run_local_postprocess_worker(
         input_ref=input_ref,
-        api_result_path=api_result_path,
+        target_path=api_result_path,
         output_dir=output_dir,
-        config_path=resolved_config_path,
         report_path=report_path,
-        log_path=log_path,
+        log_path=local_log_path,
         config=config,
     )
-
     with report_path.open("r", encoding="utf-8") as handle:
         report = json.load(handle)
+    api_summary["local_postprocess"] = {
+        "method": "blender_external_target_project_uv_texture_migration",
+        "target_path": str(api_result_path),
+        "config_path": str(local_config_path),
+        "log_path": str(local_log_path),
+    }
     report["hunyuan_api"] = api_summary
+    report.setdefault("stages", {})["hunyuan_api"] = {
+        "method": "SubmitReduceFaceJob",
+        "job_ids": [stage.get("job_id") for stage in api_stages],
+        "local_postprocess": True,
+    }
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    (output_dir / "hunyuan_api_result.json").write_text(
+        json.dumps(api_summary, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     return report

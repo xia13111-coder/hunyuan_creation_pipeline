@@ -41,11 +41,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Upload local --input to a temporary public file host for Hunyuan API input. This exposes the model URL publicly for the host retention period.",
     )
     parser.add_argument(
-        "--hunyuan-no-uv",
-        action="store_true",
-        help="Run only Hunyuan ReduceFace and skip the Hunyuan UV job.",
-    )
-    parser.add_argument(
         "--hunyuan-local-postprocess",
         action="store_true",
         help="Use Hunyuan ReduceFace as the low-poly target, then run local Blender UV and texture migration.",
@@ -76,13 +71,9 @@ def _overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
         temp_upload = overrides.setdefault("hunyuan", {}).setdefault("temp_upload", {})
         temp_upload["enabled"] = True
         temp_upload["provider"] = args.hunyuan_temp_upload
-    if args.hunyuan_no_uv:
-        overrides.setdefault("hunyuan", {}).setdefault("uv", {})["enabled"] = False
     if getattr(args, "hunyuan_local_postprocess", False):
         hunyuan = overrides.setdefault("hunyuan", {})
         hunyuan.setdefault("local_postprocess", {})["enabled"] = True
-        hunyuan.setdefault("uv", {})["enabled"] = False
-        hunyuan.setdefault("texture", {})["enabled"] = False
     if args.fail_on_qc_error:
         overrides.setdefault("qc", {})["fail_on_error"] = True
     return overrides

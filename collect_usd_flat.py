@@ -1,19 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
-"""
-批量对 USD 做 Collect Asset：
-等价于 UI 里勾选：
-  - USD Only
-  - Materials Only
-  - Flat Collection（纹理也全部平铺在一个目录）
-用法示例：
-
-./python.sh /home/user/ubtech/physic_setting/collect_usd_flat.py \
-  --folder /home/user/hunyuan3.0_assets_creation/table_1 \
-  --out-dir /home/user/hunyuan3.0_assets_creation/table_1_collect \
-  --headless
-"""
 
 import os
 import argparse
@@ -59,13 +44,7 @@ def find_usd_files(root):
     return sorted(usd_list)
 
 def build_collect_dir(usd_path: str) -> str:
-    """
-    根据原始 usd 路径构造一个输出目录。
-    现在简单处理：用文件名的 stem 做子目录名。
-    例如：
-      /.../table_33_GLB_phys.usd
-      -> /.../table_1_collect/table_33_GLB_phys
-    """
+
     _, fname = os.path.split(usd_path)
     stem, _ = os.path.splitext(fname)
     return os.path.join(args.out_dir, stem)
@@ -81,10 +60,6 @@ def collect_one(usd_path: str):
     collector = Collector(
         usd_path=os.path.abspath(usd_path),
         collect_dir=os.path.abspath(collect_dir),
-        # 对应 UI 勾选：
-        #   - USD Only
-        #   - Materials Only
-        #   - Flat collection + Flat textures
         usd_only=True,
         material_only=True,
         flat_collection=True,
@@ -92,7 +67,6 @@ def collect_one(usd_path: str):
     )
 
     async def _do_collect():
-        # 打印一下进度，防止看起来像卡死
         def on_progress(cur, total):
             log(f"    progress: {cur}/{total}")
 
@@ -105,8 +79,6 @@ def collect_one(usd_path: str):
         )
         return ok, root_usd
 
-    # 关键点：不要自己 asyncio.run！
-    # 把协程丢给 omni.kit.async_engine 来调度
     task = run_coroutine(_do_collect())
 
     # 用 SimulationApp.update() 驱动 Kit 的事件循环，直到任务完成

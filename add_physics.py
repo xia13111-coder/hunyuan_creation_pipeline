@@ -1,14 +1,13 @@
+"""Add Isaac Sim physics authoring data to USD assets.
 
-"""
-
-./python.sh /home/user/ubtech/physic_setting/add_physics.py \
-  --folder /home/user/create_data/downloads \
-  --material-file /home/user/ubtech/physic_setting/materials.json \
-  --out-dir /home/user/ubtech/physic_setting/table_7 \
-  --suffix _phys --headless \
-  --material plastic --set-mass 30.0 \
-  --approx sdf --force-sdf \
-  --sdf-res 256 --sdf-subgrid 6 --sdf-band 0.01 --sdf-margin 0.01
+Example:
+    /home/user/isaacsim500/python.sh ./add_physics.py \
+      --folder ./downloads_refined_mesh/postprocess_glbs \
+      --material-file ./materials.json \
+      --out-dir ./output_intermediate \
+      --headless \
+      --material plastic \
+      --approx sdf
 """
 
 import argparse
@@ -17,7 +16,6 @@ import json
 import math
 import os
 import re
-import sys
 
 
 from omni.isaac.kit import SimulationApp

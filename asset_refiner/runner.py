@@ -1,3 +1,13 @@
+"""Backend dispatcher for asset_refiner.
+
+Call flow from CLI:
+asset_refiner.cli.main -> run_refinement
+
+run_refinement selects a backend from config["backend"]["name"]:
+- "hunyuan_api" -> hunyuan_backend.run_hunyuan_refinement
+- any other value -> Blender command -> blender_worker.py
+"""
+
 from __future__ import annotations
 
 import json
@@ -73,6 +83,7 @@ def run_refinement(
     overrides: dict[str, Any] | None = None,
     dry_run: bool = False,
 ) -> RunResult:
+    """Resolve config and dispatch to Hunyuan API or local Blender backend."""
     config = apply_overrides(load_config(config_path), overrides)
     input_ref = str(input_path)
     if is_http_url(input_ref):
@@ -89,7 +100,7 @@ def run_refinement(
     resolved_config_path = destination / "resolved_config.json"
     report_path = destination / "qc_report.json"
     backend_name = str(config.get("backend", {}).get("name") or "blender")
-    log_path = destination / ("hunyuan_qc_blender.log" if backend_name == "hunyuan_api" else "blender.log")
+    log_path = destination / ("hunyuan_local_postprocess_blender.log" if backend_name == "hunyuan_api" else "blender.log")
     save_json(resolved_config_path, config)
 
     if backend_name == "hunyuan_api":
@@ -106,9 +117,7 @@ def run_refinement(
             report = run_hunyuan_refinement(
                 input_ref=str(source),
                 output_dir=destination,
-                resolved_config_path=resolved_config_path,
                 report_path=report_path,
-                log_path=log_path,
                 config=config,
                 dry_run=True,
             )
@@ -116,9 +125,7 @@ def run_refinement(
         report = run_hunyuan_refinement(
             input_ref=str(source),
             output_dir=destination,
-            resolved_config_path=resolved_config_path,
             report_path=report_path,
-            log_path=log_path,
             config=config,
             dry_run=False,
         )

@@ -1,3 +1,18 @@
+"""Blender worker for local mesh cleanup, UVs, texture migration, and QC.
+
+Main call flow:
+main -> run_pipeline
+-> import_asset -> join_as_whole_asset -> clean_source_surface
+-> whole_asset_retopology -> generate_uv -> migrate_textures
+-> projection_metrics -> mesh_metrics -> export_final -> build_qc_checks
+
+Texture migration flow:
+migrate_textures
+-> transfer_texture_nearest_surface
+-> nearest_source_texture_sample
+-> save_image
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -1170,6 +1185,7 @@ def transfer_texture_nearest_surface(
     config: dict[str, Any],
     texture_type: str,
 ) -> tuple[bpy.types.Image, dict[str, Any]]:
+    """Project target UV texels back to source geometry and sample source textures."""
     import numpy as np
 
     texture_cfg = config.get("textures", {})
@@ -1294,56 +1310,6 @@ def transfer_base_color_nearest_surface(
     return transfer_texture_nearest_surface(source, target, resolution, config, "base_color")
 
 
-def setup_cycles_for_baking(config: dict[str, Any]) -> None:
-    scene = bpy.context.scene
-    scene.render.engine = "CYCLES"
-    scene.cycles.samples = int(config.get("textures", {}).get("samples", 64) or 64)
-    scene.cycles.use_denoising = False
-    scene.render.bake.margin = int(config.get("textures", {}).get("margin", 16) or 16)
-    scene.view_settings.view_transform = "Standard"
-    scene.view_settings.look = "None"
-    scene.view_settings.exposure = 0
-    scene.view_settings.gamma = 1
-
-
-def bake_selected_to_active(
-    source: bpy.types.Object,
-    target: bpy.types.Object,
-    bake_type: str,
-    image_node: bpy.types.Node,
-    material: bpy.types.Material,
-    config: dict[str, Any],
-    pass_filter: set[str] | None = None,
-) -> None:
-    material.node_tree.nodes.active = image_node
-    for node in material.node_tree.nodes:
-        node.select = False
-    image_node.select = True
-    select_only([source, target])
-    bpy.context.view_layer.objects.active = target
-    kwargs: dict[str, Any] = {
-        "type": bake_type,
-        "use_clear": True,
-        "use_selected_to_active": True,
-        "cage_extrusion": float(config.get("textures", {}).get("cage_extrusion", 0.02) or 0.02),
-        "max_ray_distance": float(config.get("textures", {}).get("max_ray_distance", 0.0) or 0.0),
-    }
-    if pass_filter is not None:
-        kwargs["pass_filter"] = pass_filter
-    bpy.ops.object.bake(**kwargs)
-
-
-def transfer_method_for_texture(texture_cfg: dict[str, Any], texture_type: str) -> str:
-    if texture_type == "base_color":
-        return str(texture_cfg.get("base_color_transfer", "blender_bake") or "blender_bake")
-    return str(
-        texture_cfg.get(f"{texture_type}_transfer")
-        or texture_cfg.get("pbr_transfer")
-        or texture_cfg.get("base_color_transfer")
-        or "nearest_surface_texture"
-    )
-
-
 def create_fallback_texture_image(
     texture_type: str,
     spec: dict[str, Any],
@@ -1407,6 +1373,7 @@ def transfer_nearest_texture_with_fallback(
 
 
 def migrate_textures(source: bpy.types.Object, target: bpy.types.Object, output_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
+    """Create target material and write migrated PBR textures into output_dir."""
     texture_cfg = config.get("textures", {})
     texture_dir = output_dir / "textures"
     texture_dir.mkdir(parents=True, exist_ok=True)
@@ -1416,86 +1383,47 @@ def migrate_textures(source: bpy.types.Object, target: bpy.types.Object, output_
         raise RuntimeError("Could not create a Principled BSDF material for baking")
 
     resolution = int(texture_cfg.get("resolution", 2048) or 2048)
-    setup_cycles_for_baking(config)
     textures: list[dict[str, Any]] = []
     warnings: list[str] = []
 
     if texture_cfg.get("enabled", True) and texture_cfg.get("bake_base_color", True):
-        transfer_method = str(texture_cfg.get("base_color_transfer", "blender_bake") or "blender_bake")
-        transfer_stats: dict[str, Any] = {"method": transfer_method}
+        spec = pbr_texture_spec("base_color", texture_cfg)
         baked = True
-        if transfer_method == "nearest_surface_texture":
-            try:
-                image, transfer_stats = transfer_base_color_nearest_surface(source, target, resolution, config)
-            except Exception as exc:
-                baked = False
-                image = bpy.data.images.new("refined_base_color", width=resolution, height=resolution, alpha=True)
-                image.colorspace_settings.name = "sRGB"
-                fill_image(image, (0.8, 0.8, 0.8, 1.0))
-                warnings.append(f"nearest_surface_texture transfer failed; wrote neutral fallback: {exc}")
-        else:
-            image = bpy.data.images.new("refined_base_color", width=resolution, height=resolution, alpha=True)
-            image.colorspace_settings.name = "sRGB"
-        node = create_texture_node(material, image, "BaseColor_Bake_Target")
-        material.node_tree.links.new(node.outputs["Color"], bsdf.inputs["Base Color"])
-        if transfer_method != "nearest_surface_texture":
-            try:
-                bake_selected_to_active(source, target, "DIFFUSE", node, material, config, {"COLOR"})
-            except Exception as exc:  # Blender bake errors are often RuntimeError with sparse detail.
-                baked = False
-                fill_image(image, (0.8, 0.8, 0.8, 1.0))
-                warnings.append(f"base_color bake failed; wrote neutral fallback: {exc}")
+        transfer_stats: dict[str, Any] = {"method": "nearest_surface_texture"}
+        try:
+            image, transfer_stats = transfer_base_color_nearest_surface(source, target, resolution, config)
+        except Exception as exc:
+            baked = False
+            image = create_fallback_texture_image(
+                "base_color",
+                spec,
+                resolution,
+                spec.get("fallback", (0.8, 0.8, 0.8, 1.0)),
+            )
+            warnings.append(f"base_color nearest-surface transfer failed; wrote fallback texture: {exc}")
+        connect_texture_to_refined_material(material, bsdf, image, spec)
         path = texture_dir / "base_color.png"
         save_image(image, path)
         textures.append({"type": "base_color", "path": str(path), "resolution": [resolution, resolution], "baked": baked, "transfer": transfer_stats})
 
     if texture_cfg.get("enabled", True) and texture_cfg.get("bake_normal", True):
-        transfer_method = transfer_method_for_texture(texture_cfg, "normal")
-        transfer_stats: dict[str, Any] = {"method": transfer_method}
-        baked = True
         spec = pbr_texture_spec("normal", texture_cfg)
-        if transfer_method == "nearest_surface_texture":
-            image, baked, transfer_stats, transfer_warnings = transfer_nearest_texture_with_fallback(
-                source, target, "normal", resolution, config
-            )
-            warnings.extend(transfer_warnings)
-            node = connect_texture_to_refined_material(material, bsdf, image, spec)
-        else:
-            image = bpy.data.images.new("refined_normal", width=resolution, height=resolution, alpha=False)
-            image.colorspace_settings.name = "Non-Color"
-            node = connect_texture_to_refined_material(material, bsdf, image, spec)
-            try:
-                bake_selected_to_active(source, target, "NORMAL", node, material, config)
-            except Exception as exc:
-                baked = False
-                fill_image(image, (0.5, 0.5, 1.0, 1.0))
-                warnings.append(f"normal bake failed; wrote neutral fallback: {exc}")
+        image, baked, transfer_stats, transfer_warnings = transfer_nearest_texture_with_fallback(
+            source, target, "normal", resolution, config
+        )
+        warnings.extend(transfer_warnings)
+        connect_texture_to_refined_material(material, bsdf, image, spec)
         path = texture_dir / "normal.png"
         save_image(image, path)
         textures.append({"type": "normal", "path": str(path), "resolution": [resolution, resolution], "baked": baked, "transfer": transfer_stats})
 
     if texture_cfg.get("enabled", True) and texture_cfg.get("bake_roughness", False):
-        transfer_method = transfer_method_for_texture(texture_cfg, "roughness")
-        transfer_stats: dict[str, Any] = {"method": transfer_method}
-        baked = True
         spec = pbr_texture_spec("roughness", texture_cfg)
-        if transfer_method == "nearest_surface_texture":
-            image, baked, transfer_stats, transfer_warnings = transfer_nearest_texture_with_fallback(
-                source, target, "roughness", resolution, config
-            )
-            warnings.extend(transfer_warnings)
-            node = connect_texture_to_refined_material(material, bsdf, image, spec)
-        else:
-            image = bpy.data.images.new("refined_roughness", width=resolution, height=resolution, alpha=False)
-            image.colorspace_settings.name = "Non-Color"
-            node = connect_texture_to_refined_material(material, bsdf, image, spec)
-            try:
-                bake_selected_to_active(source, target, "ROUGHNESS", node, material, config)
-            except Exception as exc:
-                baked = False
-                value = float(texture_cfg.get("neutral_roughness", 0.65) or 0.65)
-                fill_image(image, (value, value, value, 1.0))
-                warnings.append(f"roughness bake failed; wrote neutral fallback: {exc}")
+        image, baked, transfer_stats, transfer_warnings = transfer_nearest_texture_with_fallback(
+            source, target, "roughness", resolution, config
+        )
+        warnings.extend(transfer_warnings)
+        connect_texture_to_refined_material(material, bsdf, image, spec)
         path = texture_dir / "roughness.png"
         save_image(image, path)
         textures.append({"type": "roughness", "path": str(path), "resolution": [resolution, resolution], "baked": baked, "transfer": transfer_stats})
@@ -1900,6 +1828,7 @@ def report_status(checks: list[dict[str, Any]]) -> str:
 
 
 def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
+    """Main Blender-side refinement pipeline."""
     input_path = Path(args.input).resolve()
     output_dir = Path(args.output).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)

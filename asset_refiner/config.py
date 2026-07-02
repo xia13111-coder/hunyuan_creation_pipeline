@@ -52,18 +52,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "polygon_type": "quadrilateral",
             "face_level": "high",
         },
-        "uv": {
-            "enabled": True,
-        },
-        "texture": {
-            "enabled": False,
-            "model": "3.1",
-            "prompt": None,
-            "image_url": None,
-            "enable_pbr": False,
-        },
         "local_postprocess": {
-            "enabled": False,
+            "enabled": True,
         },
     },
     "cleanup": {
@@ -109,11 +99,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "textures": {
         "enabled": True,
         "resolution": 2048,
-        "samples": 64,
-        "margin": 16,
-        "cage_extrusion": 0.02,
-        "max_ray_distance": 0.0,
-        "base_color_transfer": "blender_bake",
         "transfer_max_distance": 0.004,
         "transfer_normal_dot_min": 0.1,
         "transfer_dilate_iterations": 16,
@@ -126,7 +111,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "bake_metallic": False,
         "bake_ao": False,
         "bake_emissive": False,
-        "pbr_transfer": "nearest_surface_texture",
         "pbr_repaint": False,
         "neutral_roughness": 0.65,
         "neutral_metallic": 0.0,
