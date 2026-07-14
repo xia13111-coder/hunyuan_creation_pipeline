@@ -13,13 +13,22 @@ __pycache__/
 
 downloads/
 downloads_*/
+sam3d_downloads/
+outputs/
 output/
 output_*/
+sam3d_output_*/
 manual_output_*/
+manual_cad_usd*/
+*_cad_usd/
 pipeline_result.json
 pipeline_*_result.json
+*_pipeline_result.json
 manual_pipeline_result*.json
 *.log
+
+# Local third-party SAM3D checkouts and model weights.
+/tools/sam3d/third_party/
 
 data/*
 !data/.gitkeep

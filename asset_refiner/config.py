@@ -43,6 +43,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "submit_retry_error_codes": [
             "ResourceInsufficient",
             "InternalError",
+            "RequestTimeout",
             "FailedOperation.ResourceInsufficient",
         ],
         "normalize_result_to_source_bbox": True,
@@ -162,7 +163,9 @@ def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
     return deep_merge(config, loaded)
 
 
-def apply_overrides(config: dict[str, Any], overrides: dict[str, Any] | None) -> dict[str, Any]:
+def apply_overrides(
+    config: dict[str, Any], overrides: dict[str, Any] | None
+) -> dict[str, Any]:
     if not overrides:
         return copy.deepcopy(config)
     return deep_merge(config, overrides)

@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="620" viewBox="0 0 1800 620">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#475569"/>
+    </marker>
+    <style>
+      .bg { fill: #ffffff; }
+      .node { fill: #f8fafc; stroke: #64748b; stroke-width: 2; rx: 6; }
+      .source { fill: #eef6ff; stroke: #3973a8; }
+      .refine { fill: #f4f0ff; stroke: #7658a8; }
+      .cad { fill: #fff7e8; stroke: #9a681f; }
+      .physics { fill: #edf8f1; stroke: #397a50; }
+      .final { fill: #e8f5ee; stroke: #276640; stroke-width: 3; }
+      .edge { fill: none; stroke: #475569; stroke-width: 2.5; marker-end: url(#arrow); }
+      .label { fill: #172033; font-family: "Droid Sans Fallback"; font-size: 21px; text-anchor: middle; dominant-baseline: middle; }
+      .title { fill: #111827; font-family: "Droid Sans Fallback"; font-size: 28px; font-weight: 700; }
+      .branch { fill: #64748b; font-family: "Droid Sans Fallback"; font-size: 17px; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="1800" height="620"/>
+  <text class="title" x="40" y="38">资产创建总体流程</text>
+
+  <path class="edge" d="M220 92 H270"/>
+  <path class="edge" d="M450 92 H490 V222 H540"/>
+  <path class="edge" d="M220 222 H270"/>
+  <path class="edge" d="M450 222 H540"/>
+  <path class="edge" d="M220 352 H490 V222 H540"/>
+  <path class="edge" d="M740 222 H790"/>
+  <path class="edge" d="M1030 222 H1080"/>
+  <path class="edge" d="M1260 222 H1310"/>
+  <path class="edge" d="M1530 222 H1580"/>
+
+  <path class="edge" d="M240 462 H300"/>
+  <path class="edge" d="M480 462 H540"/>
+  <path class="edge" d="M790 462 H1260 V222 H1310"/>
+
+  <rect class="node source" x="40" y="60" width="180" height="64"/>
+  <text class="label" x="130" y="92">Hunyuan 图片或文本</text>
+
+  <rect class="node" x="270" y="60" width="180" height="64"/>
+  <text class="label" x="360" y="92">Hunyuan 生成</text>
+
+  <rect class="node source" x="40" y="190" width="180" height="64"/>
+  <text class="label" x="130" y="222">SAM3D 图片</text>
+
+  <rect class="node" x="270" y="190" width="180" height="64"/>
+  <text class="label" x="360" y="222">SAM3D 重建</text>
+
+  <rect class="node source" x="40" y="320" width="180" height="64"/>
+  <text class="label" x="130" y="352">已有 GLB</text>
+
+  <rect class="node refine" x="540" y="190" width="200" height="64"/>
+  <text class="label" x="640" y="222">可选 Hunyuan refine</text>
+
+  <rect class="node" x="790" y="180" width="240" height="84"/>
+  <text class="label" x="910" y="211">
+    <tspan x="910" dy="0">Blender 坐标轴、尺寸</tspan>
+    <tspan x="910" dy="28">和居中</tspan>
+  </text>
+
+  <rect class="node" x="1080" y="190" width="180" height="64"/>
+  <text class="label" x="1170" y="222">GLB 转 Z-up USD</text>
+
+  <rect class="node source cad" x="40" y="430" width="200" height="64"/>
+  <text class="label" x="140" y="462">手工 STEP 或 STP</text>
+
+  <rect class="node cad" x="300" y="430" width="180" height="64"/>
+  <text class="label" x="390" y="462">CAD 转 USD</text>
+
+  <rect class="node cad" x="540" y="420" width="250" height="84"/>
+  <text class="label" x="665" y="451">
+    <tspan x="665" dy="0">CAD 单位、原点</tspan>
+    <tspan x="665" dy="28">和面序清理</tspan>
+  </text>
+
+  <rect class="node physics" x="1310" y="180" width="220" height="84"/>
+  <text class="label" x="1420" y="211">
+    <tspan x="1420" dy="0">Isaac collision、刚体</tspan>
+    <tspan x="1420" dy="28">和质量</tspan>
+  </text>
+
+  <rect class="node final" x="1580" y="190" width="180" height="64"/>
+  <text class="label" x="1670" y="222">最终 USD 资产</text>
+
+  <text class="branch" x="820" y="296">GLB 路径</text>
+  <text class="branch" x="820" y="493">CAD 路径</text>
+</svg>

@@ -1,0 +1,108 @@
+ARG PIPELINE_ENV_IMAGE=hunyuan-sam3d-env:latest
+ARG ISAACSIM_BASE_IMAGE=nvcr.io/nvidia/isaac-sim:5.0.0
+
+FROM ${PIPELINE_ENV_IMAGE} AS pipeline_env
+FROM ${ISAACSIM_BASE_IMAGE}
+
+USER root
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG CONDA_DIR=/opt/conda
+ARG CONDA_ENV_NAME=hunyuan_sam3d
+ARG APP_UID=1234
+ARG APP_GID=1234
+ARG BLENDER_VERSION=4.5.0
+ARG BLENDER_SERIES=4.5
+ARG BLENDER_ARCHIVE=blender-${BLENDER_VERSION}-linux-x64.tar.xz
+ARG BLENDER_URL=https://download.blender.org/release/Blender${BLENDER_SERIES}/${BLENDER_ARCHIVE}
+
+ENV CONDA_DIR=${CONDA_DIR}
+ENV CONDA_ENV_NAME=${CONDA_ENV_NAME}
+ENV PYTHONUNBUFFERED=1
+ENV PIP_DEFAULT_TIMEOUT=120
+ENV PIP_RETRIES=10
+ENV PIP_RESUME_RETRIES=10
+ENV PIP_CONFIG_FILE=/dev/null
+ENV PIP_INDEX_URL=https://pypi.org/simple
+ENV PIP_EXTRA_INDEX_URL=
+ENV PIP_FIND_LINKS=
+ENV PATH=${CONDA_DIR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV ISAACSIM_ROOT=/isaac-sim
+ENV ISAAC_PYTHON=/isaac-sim/python.sh
+ENV BLENDER_HOME=/opt/blender
+ENV BLENDER_BIN=/opt/blender/blender
+ENV ROOT_DIR=/workspace/hunyuan3.0_assets_creation
+ENV HOME=/home/pipeline
+
+SHELL ["/bin/bash", "-lc"]
+
+RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -print0 \
+    | xargs -0 sed -i \
+        -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
+        -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
+        -e 's|http://nexus.rd.ubtrobot.com/repository/ubuntu-proxy/|https://archive.ubuntu.com/ubuntu|g' \
+    || true; \
+    rm -f /etc/apt/sources.list.d/ubt.list
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    bzip2 \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxfixes3 \
+    libxi6 \
+    libxkbcommon0 \
+    libxrender1 \
+    libxxf86vm1 \
+    xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN if [ ! -e /isaac-sim ] && [ -d /opt/isaac-sim ]; then \
+        ln -s /opt/isaac-sim /isaac-sim; \
+    fi \
+    && test -x /isaac-sim/python.sh
+
+RUN curl -fsSL "${BLENDER_URL}" -o "/tmp/${BLENDER_ARCHIVE}" \
+    && mkdir -p /opt \
+    && tar -xJf "/tmp/${BLENDER_ARCHIVE}" -C /opt \
+    && mv "/opt/blender-${BLENDER_VERSION}-linux-x64" "${BLENDER_HOME}" \
+    && ln -sf "${BLENDER_BIN}" /usr/local/bin/blender \
+    && rm -f "/tmp/${BLENDER_ARCHIVE}"
+
+# The Isaac base image exports Python 3.11 site-packages. The pipeline uses
+# Python 3.10 in Conda, while Isaac's python.sh configures its own path.
+ENV PYTHONPATH=
+
+COPY --from=pipeline_env ${CONDA_DIR} ${CONDA_DIR}
+
+ENV PATH=${CONDA_DIR}/envs/${CONDA_ENV_NAME}/bin:${CONDA_DIR}/bin:${BLENDER_HOME}:${PATH}
+
+RUN if ! getent group "${APP_GID}" >/dev/null; then \
+        groupadd --gid "${APP_GID}" pipeline; \
+    fi \
+    && if ! getent passwd "${APP_UID}" >/dev/null; then \
+        useradd --uid "${APP_UID}" --gid "${APP_GID}" --home-dir "${HOME}" \
+            --no-create-home --shell /bin/bash pipeline; \
+    fi \
+    && mkdir -p "${HOME}" /workspace/hunyuan3.0_assets_creation \
+    && chown -R "${APP_UID}:${APP_GID}" "${HOME}" /workspace
+
+COPY --chown=${APP_UID}:${APP_GID} . /workspace/hunyuan3.0_assets_creation
+COPY --chown=${APP_UID}:${APP_GID} docker/docker-entrypoint.full.sh /usr/local/bin/docker-entrypoint.full.sh
+
+RUN chmod +x /usr/local/bin/docker-entrypoint.full.sh
+
+WORKDIR /workspace/hunyuan3.0_assets_creation
+
+USER ${APP_UID}:${APP_GID}
+
+EXPOSE 8000
+
+ENTRYPOINT ["docker-entrypoint.full.sh"]
+CMD ["python", "-m", "uvicorn", "asset_pipeline.api:app", "--host", "0.0.0.0", "--port", "8000"]

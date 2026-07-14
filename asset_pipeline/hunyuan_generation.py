@@ -36,11 +36,13 @@ except ImportError:
     class TencentCloudSDKException(Exception):
         pass
 
+
 try:
     from tencentcloud.sts.v20180813 import sts_client, models as sts_models
 except ImportError:
     sts_client = None
     sts_models = None
+
 
 # =========================
 # 基础工具
@@ -56,6 +58,7 @@ def setup_logger(verbosity: int):
         format="%(asctime)s | %(levelname)s | %(message)s",
         datefmt="%H:%M:%S",
     )
+
 
 def build_requests_session(total_retries=3, backoff=0.5) -> requests.Session:
     session = requests.Session()
@@ -74,6 +77,7 @@ def build_requests_session(total_retries=3, backoff=0.5) -> requests.Session:
     session.mount("https://", adapter)
     return session
 
+
 def require_ascii_credential(name: str, value: str):
     try:
         value.encode("ascii")
@@ -83,12 +87,17 @@ def require_ascii_credential(name: str, value: str):
             f"请重新 export 真实的腾讯云密钥。"
         ) from exc
 
+
 def load_credentials():
     sid = os.getenv("TENCENTCLOUD_SECRET_ID")
     skey = os.getenv("TENCENTCLOUD_SECRET_KEY")
     if not sid or not skey:
-        logging.error("找不到云凭证环境变量: TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY")
-        logging.error("请先执行: export TENCENTCLOUD_SECRET_ID=你的ID; export TENCENTCLOUD_SECRET_KEY=你的KEY")
+        logging.error(
+            "找不到云凭证环境变量: TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY"
+        )
+        logging.error(
+            "请先执行: export TENCENTCLOUD_SECRET_ID=你的ID; export TENCENTCLOUD_SECRET_KEY=你的KEY"
+        )
         raise SystemExit(2)
     require_ascii_credential("TENCENTCLOUD_SECRET_ID", sid)
     require_ascii_credential("TENCENTCLOUD_SECRET_KEY", skey)
@@ -96,11 +105,13 @@ def load_credentials():
         raise RuntimeError("当前环境缺少腾讯云 SDK，请安装 tencentcloud-sdk-python")
     return credential.Credential(sid, skey)
 
+
 def get_sdk_error_code(exc: TencentCloudSDKException) -> str:
     getter = getattr(exc, "get_code", None)
     if callable(getter):
         return getter() or ""
     return getattr(exc, "code", "") or ""
+
 
 def get_sdk_error_message(exc: TencentCloudSDKException) -> str:
     getter = getattr(exc, "get_message", None)
@@ -108,7 +119,10 @@ def get_sdk_error_message(exc: TencentCloudSDKException) -> str:
         return getter() or str(exc)
     return getattr(exc, "message", str(exc)) or str(exc)
 
-def validate_credentials(region: str, endpoint: str = "sts.tencentcloudapi.com") -> dict:
+
+def validate_credentials(
+    region: str, endpoint: str = "sts.tencentcloudapi.com"
+) -> dict:
     """
     通过 STS GetCallerIdentity 校验当前环境变量中的腾讯云密钥。
     该接口只查询调用者身份，不会提交混元3D生成任务。
@@ -136,6 +150,7 @@ def validate_credentials(region: str, endpoint: str = "sts.tencentcloudapi.com")
     data = json.loads(resp.to_json_string())
     return data.get("Response") or data
 
+
 def init_client(region: str, endpoint: str) -> ai3d_client.Ai3dClient:
     if (
         credential is None
@@ -144,7 +159,9 @@ def init_client(region: str, endpoint: str) -> ai3d_client.Ai3dClient:
         or ai3d_client is None
         or models is None
     ):
-        raise RuntimeError("当前环境缺少腾讯云 AI3D SDK，请安装 tencentcloud-sdk-python-ai3d")
+        raise RuntimeError(
+            "当前环境缺少腾讯云 AI3D SDK，请安装 tencentcloud-sdk-python-ai3d"
+        )
 
     hp = HttpProfile()
     hp.endpoint = endpoint
@@ -156,12 +173,15 @@ def init_client(region: str, endpoint: str) -> ai3d_client.Ai3dClient:
     cred = load_credentials()
     return ai3d_client.Ai3dClient(cred, region, cp)
 
+
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
+
 
 def is_image_file(path: str) -> bool:
     ext = os.path.splitext(path)[1].lower()
     return ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
 
 def get_format_field_mapping():
     # 以 ResultFile3Ds 为主（极速/专业版都兼容）
@@ -173,6 +193,7 @@ def get_format_field_mapping():
         "USDZ": ["ResultFile3Ds"],
         "MP4": ["ResultFile3Ds"],
     }
+
 
 # =========================
 # 请求载荷构造
@@ -204,6 +225,7 @@ def build_payload_single_rapid(
             payload["ImageBase64"] = base64.b64encode(f.read()).decode("utf-8")
 
     return {k: v for k, v in payload.items() if v is not None}
+
 
 def build_payload_single_pro(
     image_path: Optional[str],
@@ -240,6 +262,7 @@ def build_payload_single_pro(
 
     return {k: v for k, v in payload.items() if v is not None}
 
+
 def submit_job_with_retry(
     client: ai3d_client.Ai3dClient,
     payload: dict,
@@ -263,18 +286,27 @@ def submit_job_with_retry(
             data = json.loads(resp.to_json_string())
             job_id = data.get("JobId") or (data.get("Response") or {}).get("JobId")
             if not job_id:
-                raise RuntimeError(f"接口未返回JobId，响应: {json.dumps(data, ensure_ascii=False)[:300]}...")
-            logging.info(f"任务提交成功 | {version} | 格式={result_format} | JobId={job_id} | 重试次数={retry_count}")
+                raise RuntimeError(
+                    f"接口未返回JobId，响应: {json.dumps(data, ensure_ascii=False)[:300]}..."
+                )
+            logging.info(
+                f"任务提交成功 | {version} | 格式={result_format} | JobId={job_id} | 重试次数={retry_count}"
+            )
             return job_id
 
         except TencentCloudSDKException as e:
-            logging.warning(f"提交失败[{getattr(e, 'code', '')}]: {getattr(e, 'message', str(e))} | {retry_interval}s后重试（剩余{max_retry - retry_count - 1}次）")
+            logging.warning(
+                f"提交失败[{getattr(e, 'code', '')}]: {getattr(e, 'message', str(e))} | {retry_interval}s后重试（剩余{max_retry - retry_count - 1}次）"
+            )
             time.sleep(retry_interval)
             continue
         except Exception as e:
-            logging.error(f"任务提交异常 | 格式={result_format} | 原因={str(e)}", exc_info=True)
+            logging.error(
+                f"任务提交异常 | 格式={result_format} | 原因={str(e)}", exc_info=True
+            )
             raise
     raise RuntimeError(f"超过最大重试次数（{max_retry}次）| 格式={result_format}")
+
 
 def query_job(client: ai3d_client.Ai3dClient, job_id: str, version: str) -> dict:
     if version == "rapid":
@@ -286,6 +318,7 @@ def query_job(client: ai3d_client.Ai3dClient, job_id: str, version: str) -> dict
         req.from_json_string(json.dumps({"JobId": job_id}))
         resp = client.QueryHunyuanTo3DProJob(req)
     return json.loads(resp.to_json_string())
+
 
 def poll_until_done(
     client: ai3d_client.Ai3dClient,
@@ -304,7 +337,9 @@ def poll_until_done(
         attempt += 1
         elapsed = time.time() - start
         if elapsed > timeout:
-            raise TimeoutError(f"任务超时({timeout:.0f}s) | 格式={result_format} | JobId={job_id}")
+            raise TimeoutError(
+                f"任务超时({timeout:.0f}s) | 格式={result_format} | JobId={job_id}"
+            )
 
         try:
             job_info = query_job(client, job_id, version)
@@ -315,12 +350,19 @@ def poll_until_done(
 
         body = job_info.get("Response") or job_info
         status = (body.get("Status") or "UNKNOWN").upper()
-        logging.info(f"[{job_id}] 第{attempt}次查询 | {version} | 状态={status} | 耗时={int(elapsed)}s")
+        logging.info(
+            f"[{job_id}] 第{attempt}次查询 | {version} | 状态={status} | 耗时={int(elapsed)}s"
+        )
 
         if status in {"DONE", "SUCCEED", "SUCCESS", "FINISHED"}:
             return body
         if status in {"FAIL", "FAILED", "ERROR", "CANCELLED"}:
-            reason = body.get("ErrorMessage") or body.get("Message") or body.get("ErrorCode") or "未知原因"
+            reason = (
+                body.get("ErrorMessage")
+                or body.get("Message")
+                or body.get("ErrorCode")
+                or "未知原因"
+            )
             raise RuntimeError(f"任务失败 | 格式={result_format} | 原因={reason}")
 
         time.sleep(interval)
@@ -442,7 +484,9 @@ def process_single_view_with_multi_formats(
     resubmit_backoff: float = 30.0,
     download_preview: bool = False,
 ):
-    img_name = os.path.basename(image_path) if image_path else (image_url or prompt or "job")
+    img_name = (
+        os.path.basename(image_path) if image_path else (image_url or prompt or "job")
+    )
     stem = os.path.splitext(img_name)[0]
     out_dir = os.path.join(output_root, stem)
     ensure_dir(out_dir)
@@ -476,7 +520,9 @@ def process_single_view_with_multi_formats(
                 job_info = poll_until_done(
                     client, job_id, fmt, poll_interval, poll_timeout, version
                 )
-                saved = download_single_format_results(session, job_info, fmt, out_dir, stem)
+                saved = download_single_format_results(
+                    session, job_info, fmt, out_dir, stem
+                )
                 preview_saved = []
                 if download_preview:
                     preview_saved = download_single_format_previews(
@@ -493,8 +539,12 @@ def process_single_view_with_multi_formats(
             except RuntimeError as e:
                 msg = str(e)
                 # 内部错误时尝试重提
-                if ("服务内部错误" in msg or "Internal" in msg) and attempt <= resubmit + 1:
-                    logging.warning(f"{fmt} 失败原因：{msg} | 将在 {resubmit_backoff:.0f}s 后重提（第{attempt-1}/{resubmit}次重提）")
+                if (
+                    "服务内部错误" in msg or "Internal" in msg
+                ) and attempt <= resubmit + 1:
+                    logging.warning(
+                        f"{fmt} 失败原因：{msg} | 将在 {resubmit_backoff:.0f}s 后重提（第{attempt - 1}/{resubmit}次重提）"
+                    )
                     time.sleep(resubmit_backoff)
                     continue
                 logging.error(f"{fmt} 最终失败：{msg}")
@@ -504,50 +554,113 @@ def process_single_view_with_multi_formats(
                 logging.error(f"{fmt} 异常：{str(e)}", exc_info=True)
                 break  # 进入下一格式
 
+
 # =========================
 # CLI
 # =========================
 def main():
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--input", "-i", default="./data/", help="输入目录：放单视角图片（jpg/png/jpeg/webp）")
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        "--input",
+        "-i",
+        default="./data/",
+        help="输入目录：放单视角图片（jpg/png/jpeg/webp）",
+    )
     parser.add_argument("--output", "-o", default="./downloads/", help="输出目录")
     parser.add_argument("--region", default="ap-guangzhou", help="腾讯云区域")
-    parser.add_argument("--endpoint", default="ai3d.tencentcloudapi.com", help="API 端点")
-    parser.add_argument("--check-key", action="store_true",
-                        help="仅校验腾讯云密钥是否有效，不提交混元3D任务")
-    parser.add_argument("--sts-endpoint", default="sts.tencentcloudapi.com",
-                        help="密钥校验使用的 STS API 端点")
-    parser.add_argument("--result-formats", "-f", nargs="+", default=["GLB"],
-                        choices=["GLB", "OBJ", "FBX", "STL", "USDZ", "MP4"],
-                        help="输出格式（多格式会分别提交多个任务）")
-    parser.add_argument("--no-pbr", action="store_false", dest="pbr", default=True,
-                        help="禁用PBR材质（默认启用）")
-    parser.add_argument("--interval", type=float, default=30.0, help="任务查询间隔（秒）")
-    parser.add_argument("--timeout", type=float, default=900.0, help="单任务超时时间（秒）")
-    parser.add_argument("--retry-interval", type=int, default=60, help="提交失败时的重试间隔（秒）")
-    parser.add_argument("--max-retry", type=int, default=10, help="提交失败的最大重试次数")
-    parser.add_argument("--http-retries", type=int, default=5, help="HTTP下载重试次数（requests层）")
-    parser.add_argument("--version", choices=["rapid", "pro"], default="pro",
-                        help="选择 API 版本: rapid（极速版） / pro（专业版）")
+    parser.add_argument(
+        "--endpoint", default="ai3d.tencentcloudapi.com", help="API 端点"
+    )
+    parser.add_argument(
+        "--check-key",
+        action="store_true",
+        help="仅校验腾讯云密钥是否有效，不提交混元3D任务",
+    )
+    parser.add_argument(
+        "--sts-endpoint",
+        default="sts.tencentcloudapi.com",
+        help="密钥校验使用的 STS API 端点",
+    )
+    parser.add_argument(
+        "--result-formats",
+        "-f",
+        nargs="+",
+        default=["GLB"],
+        choices=["GLB", "OBJ", "FBX", "STL", "USDZ", "MP4"],
+        help="输出格式（多格式会分别提交多个任务）",
+    )
+    parser.add_argument(
+        "--no-pbr",
+        action="store_false",
+        dest="pbr",
+        default=True,
+        help="禁用PBR材质（默认启用）",
+    )
+    parser.add_argument(
+        "--interval", type=float, default=30.0, help="任务查询间隔（秒）"
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=900.0, help="单任务超时时间（秒）"
+    )
+    parser.add_argument(
+        "--retry-interval", type=int, default=60, help="提交失败时的重试间隔（秒）"
+    )
+    parser.add_argument(
+        "--max-retry", type=int, default=10, help="提交失败的最大重试次数"
+    )
+    parser.add_argument(
+        "--http-retries", type=int, default=5, help="HTTP下载重试次数（requests层）"
+    )
+    parser.add_argument(
+        "--version",
+        choices=["rapid", "pro"],
+        default="pro",
+        help="选择 API 版本: rapid（极速版） / pro（专业版）",
+    )
     # Pro 版可选参数
-    parser.add_argument("--face-count", type=int, default=None,
-                        help="专业版面数（示例：150000）")
-    parser.add_argument("--gen-type", type=str, default=None,
-                        help="专业版生成类型（如：Normal/LowPoly/Geometry/Sketch）")
+    parser.add_argument(
+        "--face-count", type=int, default=None, help="专业版面数（示例：150000）"
+    )
+    parser.add_argument(
+        "--gen-type",
+        type=str,
+        default=None,
+        help="专业版生成类型（如：Normal/LowPoly/Geometry/Sketch）",
+    )
     # Prompt / 图片URL（可替代本地图片）
-    parser.add_argument("--prompt", type=str, default=None,
-                        help="文生3D提示词（提供后忽略本地图片）")
-    parser.add_argument("--image-url", type=str, default=None,
-                        help="图片URL（提供后忽略本地图片）")
-    parser.add_argument("--download-preview", action="store_true",
-                        help="下载腾讯云返回的PreviewImageUrl预览图")
+    parser.add_argument(
+        "--prompt", type=str, default=None, help="文生3D提示词（提供后忽略本地图片）"
+    )
+    parser.add_argument(
+        "--image-url", type=str, default=None, help="图片URL（提供后忽略本地图片）"
+    )
+    parser.add_argument(
+        "--download-preview",
+        action="store_true",
+        help="下载腾讯云返回的PreviewImageUrl预览图",
+    )
     # 失败后自动重提
-    parser.add_argument("--resubmit", type=int, default=1,
-                        help="遇到服务内部错误时的自动重提交次数（默认1）")
-    parser.add_argument("--resubmit-backoff", type=float, default=30.0,
-                        help="自动重提交的退避秒数（默认30）")
-    parser.add_argument("-v", "--verbose", action="count", default=0,
-                        help="日志详细程度: -v=INFO, -vv=DEBUG")
+    parser.add_argument(
+        "--resubmit",
+        type=int,
+        default=1,
+        help="遇到服务内部错误时的自动重提交次数（默认1）",
+    )
+    parser.add_argument(
+        "--resubmit-backoff",
+        type=float,
+        default=30.0,
+        help="自动重提交的退避秒数（默认30）",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="日志详细程度: -v=INFO, -vv=DEBUG",
+    )
 
     args = parser.parse_args()
     setup_logger(args.verbose)
@@ -630,7 +743,8 @@ def main():
     images = [
         os.path.join(args.input, f)
         for f in os.listdir(args.input)
-        if os.path.isfile(os.path.join(args.input, f)) and is_image_file(os.path.join(args.input, f))
+        if os.path.isfile(os.path.join(args.input, f))
+        and is_image_file(os.path.join(args.input, f))
     ]
     if not images:
         logging.warning(f"输入目录 {args.input} 下无有效图片")
@@ -659,6 +773,7 @@ def main():
         )
 
     logging.info(f"\n所有任务处理完毕！最终结果目录: {args.output}")
+
 
 if __name__ == "__main__":
     main()

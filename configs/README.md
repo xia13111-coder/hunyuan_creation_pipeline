@@ -24,12 +24,18 @@ python -m asset_refiner \
 The local postprocess step migrates PBR texture channels to the new UV layout:
 `base_color.png`, `normal.png`, `roughness.png`, and `metallic.png`.
 
+Raw SAM3D GLBs may have no image texture and store appearance in the mesh
+`COLOR_0` vertex attribute. For the `base_color` channel, the Blender worker
+automatically falls back to interpolating those vertex colors and bakes them to
+the new UV layout. See [`docs/modules/sam3d.md`](../docs/modules/sam3d.md) for the complete
+SAM3D input and refine path.
+
 For large GLBs, upload a geometry-only proxy to Hunyuan while keeping the
 original file as the local texture source:
 
 ```bash
 blender --background --factory-startup \
-  --python tools/create_hunyuan_upload_proxy.py -- \
+  --python tools/blender/create_hunyuan_upload_proxy.py -- \
   --input ./input/1_phys.glb \
   --output ./output/1_phys_hunyuan_upload_proxy.glb
 

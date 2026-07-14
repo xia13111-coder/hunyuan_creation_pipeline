@@ -1,0 +1,15 @@
+flowchart LR
+    H[Hunyuan 图片或文本] --> HG[Hunyuan 生成]
+    HG --> R[可选 Hunyuan refine]
+    S[SAM3D 图片] --> SG[SAM3D 重建]
+    SG --> R
+    E[已有 GLB] --> R
+    R --> B[Blender 坐标轴、尺寸和居中]
+    B --> U[GLB 转 Z-up USD]
+
+    C[手工 STEP 或 STP] --> CU[CAD 转 USD]
+    CU --> CP[CAD 单位、原点和面序清理]
+
+    U --> P[Isaac collision、刚体和质量]
+    CP --> P
+    P --> F[收集最终 USD 资产]

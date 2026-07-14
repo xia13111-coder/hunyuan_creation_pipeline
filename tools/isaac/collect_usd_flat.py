@@ -3,7 +3,10 @@
 import os
 import argparse
 
-from omni.isaac.kit import SimulationApp
+from isaac_sim_compat import get_simulation_app_class
+
+
+SimulationApp = get_simulation_app_class()
 
 # ---------- 基础 ----------
 
@@ -28,7 +31,7 @@ args = parse_args()
 sim = SimulationApp({"headless": args.headless})
 
 # 这里开始才能 import kit 相关的模块
-import omni.usd  # noqa: E402
+import omni.usd  # noqa: E402,F401 - initializes the USD extension before collector imports
 from omni.kit.usd.collect import Collector, FlatCollectionTextureOptions  # noqa: E402
 from omni.kit.async_engine import run_coroutine  # noqa: E402
 
@@ -36,6 +39,9 @@ from omni.kit.async_engine import run_coroutine  # noqa: E402
 # ---------- 工具函数 ----------
 
 def find_usd_files(root):
+    if os.path.isfile(root):
+        return [root] if root.lower().endswith((".usd", ".usda", ".usdc")) else []
+
     usd_list = []
     for r, _, fs in os.walk(root):
         for n in fs:

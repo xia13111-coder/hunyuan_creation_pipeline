@@ -90,7 +90,11 @@ def import_asset(path: Path) -> list[bpy.types.Object]:
     else:
         raise ValueError(f"Unsupported input format: {path.suffix}")
 
-    meshes = [obj for obj in bpy.context.scene.objects if obj.type == "MESH" and obj not in before]
+    meshes = [
+        obj
+        for obj in bpy.context.scene.objects
+        if obj.type == "MESH" and obj not in before
+    ]
     if not meshes:
         raise ValueError(f"No mesh objects were imported from: {path}")
     return meshes
@@ -215,7 +219,11 @@ def remove_small_components(obj: bpy.types.Object, cleanup_cfg: dict[str, Any]) 
     bm = bmesh.new()
     bm.from_mesh(mesh)
     bm.faces.ensure_lookup_table()
-    faces = [bm.faces[index] for index in sorted(delete_face_indices) if index < len(bm.faces)]
+    faces = [
+        bm.faces[index]
+        for index in sorted(delete_face_indices)
+        if index < len(bm.faces)
+    ]
     bmesh.ops.delete(bm, geom=faces, context="FACES")
     loose_verts = [vert for vert in bm.verts if not vert.link_edges]
     if loose_verts:
@@ -226,11 +234,15 @@ def remove_small_components(obj: bpy.types.Object, cleanup_cfg: dict[str, Any]) 
     return len(delete_face_indices)
 
 
-def clean_source_surface(obj: bpy.types.Object, config: dict[str, Any]) -> dict[str, Any]:
+def clean_source_surface(
+    obj: bpy.types.Object, config: dict[str, Any]
+) -> dict[str, Any]:
     before_faces = len(obj.data.polygons)
     edit_cleanup(obj, config.get("cleanup", {}))
     removed_faces = remove_small_components(obj, config.get("cleanup", {}))
-    shade_smooth_by_angle(obj, float(config.get("source", {}).get("normal_angle_degrees", 60.0)))
+    shade_smooth_by_angle(
+        obj, float(config.get("source", {}).get("normal_angle_degrees", 60.0))
+    )
     return {
         "input_faces": before_faces,
         "removed_small_component_faces": removed_faces,
@@ -276,12 +288,26 @@ def bbox_dimensions(obj: bpy.types.Object) -> tuple[float, float, float]:
 
 def bbox_center_and_diagonal(obj: bpy.types.Object) -> tuple[Vector, float]:
     corners = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
-    minimum = Vector((min(c.x for c in corners), min(c.y for c in corners), min(c.z for c in corners)))
-    maximum = Vector((max(c.x for c in corners), max(c.y for c in corners), max(c.z for c in corners)))
+    minimum = Vector(
+        (
+            min(c.x for c in corners),
+            min(c.y for c in corners),
+            min(c.z for c in corners),
+        )
+    )
+    maximum = Vector(
+        (
+            max(c.x for c in corners),
+            max(c.y for c in corners),
+            max(c.z for c in corners),
+        )
+    )
     return (minimum + maximum) * 0.5, (maximum - minimum).length
 
 
-def normalize_external_target_to_source_bbox(source: bpy.types.Object, target: bpy.types.Object) -> dict[str, Any]:
+def normalize_external_target_to_source_bbox(
+    source: bpy.types.Object, target: bpy.types.Object
+) -> dict[str, Any]:
     source_center, source_diagonal = bbox_center_and_diagonal(source)
     target_center, target_diagonal = bbox_center_and_diagonal(target)
     if source_diagonal <= 0 or target_diagonal <= 0:
@@ -335,8 +361,12 @@ def apply_modifier(obj: bpy.types.Object, modifier: bpy.types.Modifier) -> bool:
         return False
 
 
-def choose_retopology_method(source: bpy.types.Object, retopo_cfg: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    requested = str(retopo_cfg.get("method", "voxel_remesh_project") or "voxel_remesh_project")
+def choose_retopology_method(
+    source: bpy.types.Object, retopo_cfg: dict[str, Any]
+) -> tuple[str, dict[str, Any]]:
+    requested = str(
+        retopo_cfg.get("method", "voxel_remesh_project") or "voxel_remesh_project"
+    )
     if requested != "auto":
         return requested, {"requested_method": requested, "selected_method": requested}
 
@@ -346,7 +376,9 @@ def choose_retopology_method(source: bpy.types.Object, retopo_cfg: dict[str, Any
     edge_count = max(1, len(counts))
     boundary_ratio = boundary_edges / edge_count
     component_threshold = int(retopo_cfg.get("auto_component_threshold", 32) or 32)
-    boundary_threshold = float(retopo_cfg.get("auto_boundary_edge_ratio_threshold", 0.02) or 0.02)
+    boundary_threshold = float(
+        retopo_cfg.get("auto_boundary_edge_ratio_threshold", 0.02) or 0.02
+    )
     selected = (
         "decimate_project"
         if components > component_threshold or boundary_ratio > boundary_threshold
@@ -371,14 +403,18 @@ def apply_optional_projection(
     projection_steps = int(retopo_cfg.get("shrinkwrap_iterations", 1) or 1)
     projection_offset = float(retopo_cfg.get("projection_offset", 0.0) or 0.0)
     for index in range(max(1, projection_steps)):
-        shrinkwrap = retopo.modifiers.new(f"whole_asset_source_projection_{index + 1}", "SHRINKWRAP")
+        shrinkwrap = retopo.modifiers.new(
+            f"whole_asset_source_projection_{index + 1}", "SHRINKWRAP"
+        )
         shrinkwrap.target = source
         shrinkwrap.wrap_method = "NEAREST_SURFACEPOINT"
         shrinkwrap.offset = projection_offset
         apply_modifier(retopo, shrinkwrap)
 
 
-def apply_optional_smoothing(retopo: bpy.types.Object, retopo_cfg: dict[str, Any]) -> None:
+def apply_optional_smoothing(
+    retopo: bpy.types.Object, retopo_cfg: dict[str, Any]
+) -> None:
     smooth_iterations = int(retopo_cfg.get("smooth_iterations", 0) or 0)
     smooth_factor = float(retopo_cfg.get("smooth_factor", 0.18) or 0.18)
     if smooth_iterations > 0:
@@ -415,10 +451,15 @@ def whole_asset_voxel_retopology(
         remesh.use_remove_disconnected = False
     remesh_ok = apply_modifier(retopo, remesh)
 
-    if retopo_cfg.get("decimate_after_remesh", True) and len(retopo.data.polygons) > target_faces:
+    if (
+        retopo_cfg.get("decimate_after_remesh", True)
+        and len(retopo.data.polygons) > target_faces
+    ):
         decimate = retopo.modifiers.new("whole_asset_face_budget_decimate", "DECIMATE")
         decimate.decimate_type = "COLLAPSE"
-        decimate.ratio = max(0.01, min(1.0, target_faces / max(1, len(retopo.data.polygons))))
+        decimate.ratio = max(
+            0.01, min(1.0, target_faces / max(1, len(retopo.data.polygons)))
+        )
         apply_modifier(retopo, decimate)
 
     apply_optional_smoothing(retopo, retopo_cfg)
@@ -470,11 +511,15 @@ def whole_asset_decimate_project_retopology(
     decimate_ok = False
     decimate_ratio = max(0.01, min(1.0, target_faces / source_faces))
     if decimate_ratio < 0.999:
-        decimate = retopo.modifiers.new("whole_asset_shape_preserving_decimate", "DECIMATE")
+        decimate = retopo.modifiers.new(
+            "whole_asset_shape_preserving_decimate", "DECIMATE"
+        )
         decimate.decimate_type = "COLLAPSE"
         decimate.ratio = decimate_ratio
         if hasattr(decimate, "use_collapse_triangulate"):
-            decimate.use_collapse_triangulate = bool(effective_cfg.get("decimate_triangulate", True))
+            decimate.use_collapse_triangulate = bool(
+                effective_cfg.get("decimate_triangulate", True)
+            )
         decimate_ok = apply_modifier(retopo, decimate)
 
     apply_optional_smoothing(retopo, effective_cfg)
@@ -488,8 +533,12 @@ def whole_asset_decimate_project_retopology(
         "decimate_ratio": decimate_ratio,
         "decimate_modifier_applied": decimate_ok,
         "topology_modifier_applied": decimate_ok,
-        "effective_smooth_iterations": int(effective_cfg.get("smooth_iterations", 0) or 0),
-        "effective_shrinkwrap_iterations": int(effective_cfg.get("shrinkwrap_iterations", 0) or 0),
+        "effective_smooth_iterations": int(
+            effective_cfg.get("smooth_iterations", 0) or 0
+        ),
+        "effective_shrinkwrap_iterations": int(
+            effective_cfg.get("shrinkwrap_iterations", 0) or 0
+        ),
         "output_faces": len(retopo.data.polygons),
         "output_vertices": len(retopo.data.vertices),
     }
@@ -564,9 +613,15 @@ def protected_vertices_for_boundary_safe_decimate(
     return protected, stats
 
 
-def create_decimate_allowed_vertex_group(obj: bpy.types.Object, protected_vertices: set[int]) -> tuple[str, int]:
+def create_decimate_allowed_vertex_group(
+    obj: bpy.types.Object, protected_vertices: set[int]
+) -> tuple[str, int]:
     group = obj.vertex_groups.new(name="decimate_allowed_interior")
-    allowed = [vertex.index for vertex in obj.data.vertices if vertex.index not in protected_vertices]
+    allowed = [
+        vertex.index
+        for vertex in obj.data.vertices
+        if vertex.index not in protected_vertices
+    ]
     if allowed:
         group.add(allowed, 1.0, "ADD")
     return group.name, len(allowed)
@@ -579,50 +634,69 @@ def whole_asset_boundary_safe_decimate_project_retopology(
 ) -> tuple[bpy.types.Object, dict[str, Any]]:
     retopo_cfg = config.get("retopology", {})
     source_faces = max(1, len(source.data.polygons))
-    target_faces = max(100, min(int(retopo_cfg.get("target_faces", 300000) or 300000), source_faces - 1))
+    target_faces = max(
+        100,
+        min(int(retopo_cfg.get("target_faces", 300000) or 300000), source_faces - 1),
+    )
     retopo = duplicate_object(source, "refined_whole_asset_retopology")
     retopo.data.materials.clear()
 
-    protected_vertices, protection_stats = protected_vertices_for_boundary_safe_decimate(
-        retopo,
-        int(retopo_cfg.get("preserve_boundary_rings", 2) or 0),
-        int(retopo_cfg.get("preserve_small_component_faces", 0) or 0),
+    protected_vertices, protection_stats = (
+        protected_vertices_for_boundary_safe_decimate(
+            retopo,
+            int(retopo_cfg.get("preserve_boundary_rings", 2) or 0),
+            int(retopo_cfg.get("preserve_small_component_faces", 0) or 0),
+        )
     )
-    group_name, allowed_vertex_count = create_decimate_allowed_vertex_group(retopo, protected_vertices)
+    group_name, allowed_vertex_count = create_decimate_allowed_vertex_group(
+        retopo, protected_vertices
+    )
 
     decimate_ok = False
     decimate_ratio = max(0.01, min(1.0, target_faces / source_faces))
     if decimate_ratio < 0.999 and allowed_vertex_count > 0:
-        decimate = retopo.modifiers.new("whole_asset_boundary_safe_decimate", "DECIMATE")
+        decimate = retopo.modifiers.new(
+            "whole_asset_boundary_safe_decimate", "DECIMATE"
+        )
         decimate.decimate_type = "COLLAPSE"
         decimate.ratio = decimate_ratio
         decimate.vertex_group = group_name
-        decimate.vertex_group_factor = float(retopo_cfg.get("vertex_group_factor", 1.0) or 1.0)
+        decimate.vertex_group_factor = float(
+            retopo_cfg.get("vertex_group_factor", 1.0) or 1.0
+        )
         decimate.invert_vertex_group = False
         if hasattr(decimate, "use_collapse_triangulate"):
-            decimate.use_collapse_triangulate = bool(retopo_cfg.get("decimate_triangulate", True))
+            decimate.use_collapse_triangulate = bool(
+                retopo_cfg.get("decimate_triangulate", True)
+            )
         decimate_ok = apply_modifier(retopo, decimate)
 
     apply_optional_projection(source, retopo, retopo_cfg)
     apply_final_normals(retopo)
 
-    stats = method_info | protection_stats | {
-        "method": "boundary_safe_decimate_project",
-        "target_faces": target_faces,
-        "source_faces": source_faces,
-        "decimate_ratio": decimate_ratio,
-        "allowed_vertex_count": allowed_vertex_count,
-        "decimate_modifier_applied": decimate_ok,
-        "topology_modifier_applied": decimate_ok,
-        "output_faces": len(retopo.data.polygons),
-        "output_vertices": len(retopo.data.vertices),
-    }
+    stats = (
+        method_info
+        | protection_stats
+        | {
+            "method": "boundary_safe_decimate_project",
+            "target_faces": target_faces,
+            "source_faces": source_faces,
+            "decimate_ratio": decimate_ratio,
+            "allowed_vertex_count": allowed_vertex_count,
+            "decimate_modifier_applied": decimate_ok,
+            "topology_modifier_applied": decimate_ok,
+            "output_faces": len(retopo.data.polygons),
+            "output_vertices": len(retopo.data.vertices),
+        }
+    )
     return retopo, stats
 
 
 def resolve_target_path(target_path: str | None) -> Path:
     if not target_path:
-        raise ValueError("retopology.target_path is required for external_target_project")
+        raise ValueError(
+            "retopology.target_path is required for external_target_project"
+        )
     path = Path(target_path).expanduser()
     if not path.is_absolute():
         path = Path.cwd() / path
@@ -679,14 +753,27 @@ def whole_asset_external_target_project_retopology(
     return retopo, stats
 
 
-def whole_asset_retopology(source: bpy.types.Object, config: dict[str, Any]) -> tuple[bpy.types.Object, dict[str, Any]]:
+def whole_asset_retopology(
+    source: bpy.types.Object, config: dict[str, Any]
+) -> tuple[bpy.types.Object, dict[str, Any]]:
     retopo_cfg = config.get("retopology", {})
     selected_method, method_info = choose_retopology_method(source, retopo_cfg)
     if selected_method in {"external_target_project", "existing_target_project"}:
-        return whole_asset_external_target_project_retopology(source, config, method_info)
-    if selected_method in {"boundary_safe_decimate_project", "hole_safe_decimate_project"}:
-        return whole_asset_boundary_safe_decimate_project_retopology(source, config, method_info)
-    if selected_method in {"decimate_project", "preserve_shape_decimate_project", "quadric_decimate_project"}:
+        return whole_asset_external_target_project_retopology(
+            source, config, method_info
+        )
+    if selected_method in {
+        "boundary_safe_decimate_project",
+        "hole_safe_decimate_project",
+    }:
+        return whole_asset_boundary_safe_decimate_project_retopology(
+            source, config, method_info
+        )
+    if selected_method in {
+        "decimate_project",
+        "preserve_shape_decimate_project",
+        "quadric_decimate_project",
+    }:
         return whole_asset_decimate_project_retopology(source, config, method_info)
     if selected_method == "voxel_remesh_project":
         return whole_asset_voxel_retopology(source, config, method_info)
@@ -713,22 +800,32 @@ def generate_uv(obj: bpy.types.Object, config: dict[str, Any]) -> dict[str, Any]
         )
     else:
         bpy.ops.uv.smart_project(
-            angle_limit=math.radians(float(uv_cfg.get("angle_limit_degrees", 66.0) or 66.0)),
+            angle_limit=math.radians(
+                float(uv_cfg.get("angle_limit_degrees", 66.0) or 66.0)
+            ),
             island_margin=float(uv_cfg.get("island_margin", 0.02) or 0.02),
             area_weight=float(uv_cfg.get("area_weight", 0.0) or 0.0),
         )
-    if method != "lightmap_pack" and bool(uv_cfg.get("pack_islands_after_smart_project", False)):
+    if method != "lightmap_pack" and bool(
+        uv_cfg.get("pack_islands_after_smart_project", False)
+    ):
         bpy.ops.mesh.select_all(action="SELECT")
         bpy.ops.uv.pack_islands(
             rotate=bool(uv_cfg.get("pack_rotate", True)),
             scale=bool(uv_cfg.get("pack_scale", True)),
             merge_overlap=False,
             margin_method=str(uv_cfg.get("pack_margin_method", "SCALED") or "SCALED"),
-            margin=float(uv_cfg.get("pack_margin", uv_cfg.get("island_margin", 0.02)) or 0.02),
+            margin=float(
+                uv_cfg.get("pack_margin", uv_cfg.get("island_margin", 0.02)) or 0.02
+            ),
         )
     bpy.ops.object.mode_set(mode="OBJECT")
     obj.data.update(calc_edges=True)
-    return {"method": method, "uv_layer": obj.data.uv_layers.active.name, "uv_layers": len(obj.data.uv_layers)}
+    return {
+        "method": method,
+        "uv_layer": obj.data.uv_layers.active.name,
+        "uv_layers": len(obj.data.uv_layers),
+    }
 
 
 def find_principled_bsdf(material: bpy.types.Material) -> bpy.types.Node | None:
@@ -740,7 +837,9 @@ def find_principled_bsdf(material: bpy.types.Material) -> bpy.types.Node | None:
     return None
 
 
-def fill_image(image: bpy.types.Image, color: tuple[float, float, float, float]) -> None:
+def fill_image(
+    image: bpy.types.Image, color: tuple[float, float, float, float]
+) -> None:
     pixel_count = image.size[0] * image.size[1]
     values = array.array("f", color * pixel_count)
     image.pixels.foreach_set(values)
@@ -799,7 +898,9 @@ def linked_image_source_from_socket(
     if not socket.is_linked:
         return None
     for link in socket.links:
-        result = linked_image_source_from_node_output(link.from_node, link.from_socket, channel, visited)
+        result = linked_image_source_from_node_output(
+            link.from_node, link.from_socket, channel, visited
+        )
         if result is not None:
             return result
     return None
@@ -843,7 +944,9 @@ def linked_image_source_from_node_output(
     return None
 
 
-def find_bsdf_input(bsdf: bpy.types.Node | None, names: list[str]) -> bpy.types.NodeSocket | None:
+def find_bsdf_input(
+    bsdf: bpy.types.Node | None, names: list[str]
+) -> bpy.types.NodeSocket | None:
     if bsdf is None:
         return None
     for name in names:
@@ -852,20 +955,29 @@ def find_bsdf_input(bsdf: bpy.types.Node | None, names: list[str]) -> bpy.types.
     return None
 
 
-def socket_default_color(socket: bpy.types.NodeSocket | None, fallback: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+def socket_default_color(
+    socket: bpy.types.NodeSocket | None, fallback: tuple[float, float, float, float]
+) -> tuple[float, float, float, float]:
     if socket is None:
         return fallback
     value = getattr(socket, "default_value", None)
     if value is None:
         return fallback
     try:
-        return (float(value[0]), float(value[1]), float(value[2]), float(value[3]) if len(value) > 3 else 1.0)
+        return (
+            float(value[0]),
+            float(value[1]),
+            float(value[2]),
+            float(value[3]) if len(value) > 3 else 1.0,
+        )
     except (TypeError, IndexError, ValueError):
         scalar = float(value)
         return (scalar, scalar, scalar, 1.0)
 
 
-def socket_default_scalar(socket: bpy.types.NodeSocket | None, fallback: float) -> tuple[float, float, float, float]:
+def socket_default_scalar(
+    socket: bpy.types.NodeSocket | None, fallback: float
+) -> tuple[float, float, float, float]:
     if socket is None:
         return (fallback, fallback, fallback, 1.0)
     value = getattr(socket, "default_value", None)
@@ -979,7 +1091,72 @@ def pbr_texture_spec(texture_type: str, texture_cfg: dict[str, Any]) -> dict[str
             "bsdf_target_inputs": ["Emission Color", "Emission"],
         },
     }
-    return specs[texture_type]
+    spec = specs[texture_type]
+    spec["texture_type"] = texture_type
+    return spec
+
+
+def source_color_attribute(mesh: bpy.types.Mesh):
+    color_attributes = getattr(mesh, "color_attributes", None)
+    if color_attributes:
+        active = getattr(color_attributes, "active_color", None)
+        if active is not None and getattr(active, "domain", None) in {
+            "CORNER",
+            "POINT",
+        }:
+            return active
+        for attribute in color_attributes:
+            if getattr(attribute, "domain", None) in {"CORNER", "POINT"}:
+                return attribute
+
+    vertex_colors = getattr(mesh, "vertex_colors", None)
+    if vertex_colors:
+        active = getattr(vertex_colors, "active", None)
+        if active is not None:
+            return active
+        for attribute in vertex_colors:
+            return attribute
+    return None
+
+
+def color_tuple(value) -> tuple[float, float, float, float]:
+    rgba = [0.0, 0.0, 0.0, 1.0]
+    try:
+        value_len = len(value)
+    except TypeError:
+        return rgba[0], rgba[1], rgba[2], rgba[3]
+    for index in range(min(4, value_len)):
+        try:
+            rgba[index] = max(0.0, min(1.0, float(value[index])))
+        except (TypeError, ValueError):
+            return rgba[0], rgba[1], rgba[2], rgba[3]
+    return rgba[0], rgba[1], rgba[2], rgba[3]
+
+
+def sample_source_color_attribute(
+    color_attribute,
+    poly: bpy.types.MeshPolygon,
+    bary: tuple[float, float, float],
+) -> tuple[float, float, float, float] | None:
+    if color_attribute is None:
+        return None
+
+    domain = getattr(color_attribute, "domain", "CORNER")
+    try:
+        if domain == "POINT":
+            indices = list(poly.vertices[:3])
+        else:
+            indices = list(poly.loop_indices[:3])
+        colors = [color_tuple(color_attribute.data[index].color) for index in indices]
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return None
+
+    return (
+        bary[0] * colors[0][0] + bary[1] * colors[1][0] + bary[2] * colors[2][0],
+        bary[0] * colors[0][1] + bary[1] * colors[1][1] + bary[2] * colors[2][1],
+        bary[0] * colors[0][2] + bary[1] * colors[1][2] + bary[2] * colors[2][2],
+        bary[0] * colors[0][3] + bary[1] * colors[1][3] + bary[2] * colors[2][3],
+    )
 
 
 def material_texture_source(
@@ -988,7 +1165,9 @@ def material_texture_source(
 ) -> dict[str, Any]:
     bsdf = find_principled_bsdf(material) if material is not None else None
     socket = find_bsdf_input(bsdf, list(spec.get("bsdf_inputs", [])))
-    image_source = linked_image_source_from_socket(socket) if socket is not None else None
+    image_source = (
+        linked_image_source_from_socket(socket) if socket is not None else None
+    )
     if image_source is None:
         image_source = find_named_image_source_for_material(
             material,
@@ -998,16 +1177,30 @@ def material_texture_source(
 
     default_kind = str(spec.get("default_kind") or "fixed")
     if default_kind == "color":
-        fallback = socket_default_color(socket, spec.get("fallback", (0.0, 0.0, 0.0, 1.0)))
+        fallback = socket_default_color(
+            socket, spec.get("fallback", (0.0, 0.0, 0.0, 1.0))
+        )
     elif default_kind == "scalar":
-        fallback = socket_default_scalar(socket, float(spec.get("fallback_scalar", 0.0) or 0.0))
+        fallback = socket_default_scalar(
+            socket, float(spec.get("fallback_scalar", 0.0) or 0.0)
+        )
     else:
         fallback = spec.get("fallback", (0.0, 0.0, 0.0, 1.0))
 
     if image_source is None:
-        return {"image": None, "pixels": None, "channel": spec.get("default_channel"), "fallback": fallback}
+        return {
+            "image": None,
+            "pixels": None,
+            "channel": spec.get("default_channel"),
+            "fallback": fallback,
+        }
     image, channel = image_source
-    return {"image": image, "pixels": image_to_numpy(image), "channel": channel, "fallback": fallback}
+    return {
+        "image": image,
+        "pixels": image_to_numpy(image),
+        "channel": channel,
+        "fallback": fallback,
+    }
 
 
 def build_material_texture_sources(
@@ -1027,7 +1220,9 @@ def build_material_texture_sources(
     return records, found_image
 
 
-def texture_sample_to_color(sample, record: dict[str, Any], spec: dict[str, Any]) -> tuple[float, float, float, float]:
+def texture_sample_to_color(
+    sample, record: dict[str, Any], spec: dict[str, Any]
+) -> tuple[float, float, float, float]:
     if str(spec.get("kind")) == "scalar":
         channel = record.get("channel")
         channel_index = int(channel) if channel is not None else 0
@@ -1056,7 +1251,9 @@ def sample_image_nearest(image_pixels, uv: tuple[float, float]):
     return image_pixels[y, x]
 
 
-def dilate_texture_pixels(colors, mask, iterations: int, limit_mask=None, fill_remaining: bool = False):
+def dilate_texture_pixels(
+    colors, mask, iterations: int, limit_mask=None, fill_remaining: bool = False
+):
     import numpy as np
 
     if iterations <= 0:
@@ -1103,6 +1300,7 @@ def nearest_source_texture_sample(
     source: bpy.types.Object,
     tree: BVHTree,
     source_uv,
+    source_color_attr,
     material_sources: dict[int, dict[str, Any]],
     spec: dict[str, Any],
     point: Vector,
@@ -1127,7 +1325,11 @@ def nearest_source_texture_sample(
             continue
         if max_distance > 0 and distance > max_distance:
             continue
-        dot = normal.dot(source_normal.normalized()) if normal.length > 0 and source_normal.length > 0 else 1.0
+        dot = (
+            normal.dot(source_normal.normalized())
+            if normal.length > 0 and source_normal.length > 0
+            else 1.0
+        )
         if dot < min_dot:
             continue
         score = dot - distance * 10.0
@@ -1141,7 +1343,9 @@ def nearest_source_texture_sample(
             if location is not None and face_index is not None
         ]
         if fallback_candidates:
-            location, face_index, _distance = min(fallback_candidates, key=lambda item: item[2])
+            location, face_index, _distance = min(
+                fallback_candidates, key=lambda item: item[2]
+            )
             best = (location, face_index)
     if best is None:
         return None
@@ -1157,16 +1361,26 @@ def nearest_source_texture_sample(
         record = material_sources.get(0)
     if record is None:
         return None
-    image_pixels = record.get("pixels")
-    if image_pixels is None:
-        fallback = record.get("fallback", spec.get("fallback", (0.0, 0.0, 0.0, 1.0)))
-        return (float(fallback[0]), float(fallback[1]), float(fallback[2]), float(fallback[3]))
-    if source_uv is None:
-        return None
     vertex_indices = list(poly.vertices[:3])
     tri = [source.data.vertices[index].co for index in vertex_indices]
     bary = barycentric_3d(location, tri)
     if bary is None:
+        return None
+
+    image_pixels = record.get("pixels")
+    if image_pixels is None:
+        if spec.get("texture_type") == "base_color":
+            color = sample_source_color_attribute(source_color_attr, poly, bary)
+            if color is not None:
+                return color
+        fallback = record.get("fallback", spec.get("fallback", (0.0, 0.0, 0.0, 1.0)))
+        return (
+            float(fallback[0]),
+            float(fallback[1]),
+            float(fallback[2]),
+            float(fallback[3]),
+        )
+    if source_uv is None:
         return None
     loops = list(poly.loop_indices[:3])
     uvs = [source_uv.data[loop_index].uv for loop_index in loops]
@@ -1196,10 +1410,17 @@ def transfer_texture_nearest_surface(
         raise RuntimeError("nearest_surface_texture transfer requires target UVs")
 
     material_sources, found_source_image = build_material_texture_sources(source, spec)
+    source_color_attr = (
+        source_color_attribute(source.data) if texture_type == "base_color" else None
+    )
     if found_source_image and source_uv is None:
-        raise RuntimeError("nearest_surface_texture transfer requires source UVs when source images are used")
+        raise RuntimeError(
+            "nearest_surface_texture transfer requires source UVs when source images are used"
+        )
     if not material_sources:
-        raise RuntimeError(f"Could not prepare source material data for {texture_type} transfer")
+        raise RuntimeError(
+            f"Could not prepare source material data for {texture_type} transfer"
+        )
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
     tree = BVHTree.FromObject(source, depsgraph)
@@ -1210,16 +1431,24 @@ def transfer_texture_nearest_surface(
     colors = np.zeros((resolution, resolution, 4), dtype=np.float32)
     mask = np.zeros((resolution, resolution), dtype=bool)
     coverage = np.zeros((resolution, resolution), dtype=bool)
-    max_distance = float(config.get("textures", {}).get("transfer_max_distance", 0.004) or 0.0)
-    min_dot = float(config.get("textures", {}).get("transfer_normal_dot_min", 0.1) or -1.0)
-    allow_nearest_fallback = bool(config.get("textures", {}).get("transfer_allow_nearest_fallback", True))
+    max_distance = float(
+        config.get("textures", {}).get("transfer_max_distance", 0.004) or 0.0
+    )
+    min_dot = float(
+        config.get("textures", {}).get("transfer_normal_dot_min", 0.1) or -1.0
+    )
+    allow_nearest_fallback = bool(
+        config.get("textures", {}).get("transfer_allow_nearest_fallback", True)
+    )
     sampled = 0
     missed = 0
 
     matrix = target.matrix_world
-    normal_matrix = matrix.to_3x3()
     for tri in target.data.loop_triangles:
-        uv_coords = [(float(target_uv.data[loop].uv.x), float(target_uv.data[loop].uv.y)) for loop in tri.loops]
+        uv_coords = [
+            (float(target_uv.data[loop].uv.x), float(target_uv.data[loop].uv.y))
+            for loop in tri.loops
+        ]
         min_u = max(0.0, min(coord[0] for coord in uv_coords))
         max_u = min(1.0, max(coord[0] for coord in uv_coords))
         min_v = max(0.0, min(coord[1] for coord in uv_coords))
@@ -1242,11 +1471,16 @@ def transfer_texture_nearest_surface(
                 if bary is None:
                     continue
                 coverage[y, x] = True
-                point = positions[0] * bary[0] + positions[1] * bary[1] + positions[2] * bary[2]
+                point = (
+                    positions[0] * bary[0]
+                    + positions[1] * bary[1]
+                    + positions[2] * bary[2]
+                )
                 color = nearest_source_texture_sample(
                     source,
                     tree,
                     source_uv,
+                    source_color_attr,
                     material_sources,
                     spec,
                     point,
@@ -1262,9 +1496,15 @@ def transfer_texture_nearest_surface(
                 mask[y, x] = True
                 sampled += 1
 
-    iterations = int(config.get("textures", {}).get("transfer_dilate_iterations", 16) or 0)
-    fill_uncovered = bool(config.get("textures", {}).get("transfer_fill_uncovered", True))
-    fill_iterations = int(config.get("textures", {}).get("transfer_fill_max_iterations", 512) or 0)
+    iterations = int(
+        config.get("textures", {}).get("transfer_dilate_iterations", 16) or 0
+    )
+    fill_uncovered = bool(
+        config.get("textures", {}).get("transfer_fill_uncovered", True)
+    )
+    fill_iterations = int(
+        config.get("textures", {}).get("transfer_fill_max_iterations", 512) or 0
+    )
     initial_uncovered = int((coverage & ~mask).sum())
     if fill_uncovered and initial_uncovered:
         colors = dilate_texture_pixels(
@@ -1278,7 +1518,12 @@ def transfer_texture_nearest_surface(
     colors = dilate_texture_pixels(colors, mask, iterations)
     colors[:, :, 3] = 1.0
 
-    image = bpy.data.images.new(f"refined_{texture_type}_nearest_surface", width=resolution, height=resolution, alpha=True)
+    image = bpy.data.images.new(
+        f"refined_{texture_type}_nearest_surface",
+        width=resolution,
+        height=resolution,
+        alpha=True,
+    )
     image.colorspace_settings.name = str(spec.get("colorspace") or "Non-Color")
     image.pixels.foreach_set(colors.reshape(-1))
     image.update()
@@ -1294,6 +1539,10 @@ def transfer_texture_nearest_surface(
         "transfer_fill_max_iterations": fill_iterations,
         "transfer_allow_nearest_fallback": allow_nearest_fallback,
         "source_images_found": found_source_image,
+        "source_vertex_color_found": source_color_attr is not None,
+        "source_vertex_color_name": getattr(source_color_attr, "name", None)
+        if source_color_attr is not None
+        else None,
         "transfer_max_distance": max_distance,
         "transfer_normal_dot_min": min_dot,
         "transfer_dilate_iterations": iterations,
@@ -1307,7 +1556,9 @@ def transfer_base_color_nearest_surface(
     resolution: int,
     config: dict[str, Any],
 ) -> tuple[bpy.types.Image, dict[str, Any]]:
-    return transfer_texture_nearest_surface(source, target, resolution, config, "base_color")
+    return transfer_texture_nearest_surface(
+        source, target, resolution, config, "base_color"
+    )
 
 
 def create_fallback_texture_image(
@@ -1316,7 +1567,9 @@ def create_fallback_texture_image(
     resolution: int,
     color: tuple[float, float, float, float],
 ) -> bpy.types.Image:
-    image = bpy.data.images.new(f"refined_{texture_type}", width=resolution, height=resolution, alpha=True)
+    image = bpy.data.images.new(
+        f"refined_{texture_type}", width=resolution, height=resolution, alpha=True
+    )
     image.colorspace_settings.name = str(spec.get("colorspace") or "Non-Color")
     fill_image(image, color)
     return image
@@ -1328,7 +1581,9 @@ def connect_texture_to_refined_material(
     image: bpy.types.Image,
     spec: dict[str, Any],
 ) -> bpy.types.Node:
-    node = create_texture_node(material, image, str(spec.get("label") or f"{image.name}_Target"))
+    node = create_texture_node(
+        material, image, str(spec.get("label") or f"{image.name}_Target")
+    )
     if spec.get("normal_map"):
         normal_map = material.node_tree.nodes.new(type="ShaderNodeNormalMap")
         material.node_tree.links.new(node.outputs["Color"], normal_map.inputs["Color"])
@@ -1340,7 +1595,9 @@ def connect_texture_to_refined_material(
     target_socket = find_bsdf_input(bsdf, list(spec.get("bsdf_target_inputs", [])))
     if target_socket is not None:
         material.node_tree.links.new(node.outputs["Color"], target_socket)
-    if "Emission Color" in spec.get("bsdf_target_inputs", []) or "Emission" in spec.get("bsdf_target_inputs", []):
+    if "Emission Color" in spec.get("bsdf_target_inputs", []) or "Emission" in spec.get(
+        "bsdf_target_inputs", []
+    ):
         emission_strength = find_bsdf_input(bsdf, ["Emission Strength"])
         if emission_strength is not None:
             emission_strength.default_value = 1.0
@@ -1358,7 +1615,9 @@ def transfer_nearest_texture_with_fallback(
     spec = pbr_texture_spec(texture_type, texture_cfg)
     warnings: list[str] = []
     try:
-        image, transfer_stats = transfer_texture_nearest_surface(source, target, resolution, config, texture_type)
+        image, transfer_stats = transfer_texture_nearest_surface(
+            source, target, resolution, config, texture_type
+        )
         return image, True, transfer_stats, warnings
     except Exception as exc:
         image = create_fallback_texture_image(
@@ -1367,12 +1626,23 @@ def transfer_nearest_texture_with_fallback(
             resolution,
             spec.get("fallback", (0.0, 0.0, 0.0, 1.0)),
         )
-        transfer_stats = {"method": "nearest_surface_texture", "texture_type": texture_type, "failed": True}
-        warnings.append(f"{texture_type} nearest-surface transfer failed; wrote fallback texture: {exc}")
+        transfer_stats = {
+            "method": "nearest_surface_texture",
+            "texture_type": texture_type,
+            "failed": True,
+        }
+        warnings.append(
+            f"{texture_type} nearest-surface transfer failed; wrote fallback texture: {exc}"
+        )
         return image, False, transfer_stats, warnings
 
 
-def migrate_textures(source: bpy.types.Object, target: bpy.types.Object, output_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
+def migrate_textures(
+    source: bpy.types.Object,
+    target: bpy.types.Object,
+    output_dir: Path,
+    config: dict[str, Any],
+) -> dict[str, Any]:
     """Create target material and write migrated PBR textures into output_dir."""
     texture_cfg = config.get("textures", {})
     texture_dir = output_dir / "textures"
@@ -1391,7 +1661,9 @@ def migrate_textures(source: bpy.types.Object, target: bpy.types.Object, output_
         baked = True
         transfer_stats: dict[str, Any] = {"method": "nearest_surface_texture"}
         try:
-            image, transfer_stats = transfer_base_color_nearest_surface(source, target, resolution, config)
+            image, transfer_stats = transfer_base_color_nearest_surface(
+                source, target, resolution, config
+            )
         except Exception as exc:
             baked = False
             image = create_fallback_texture_image(
@@ -1400,40 +1672,74 @@ def migrate_textures(source: bpy.types.Object, target: bpy.types.Object, output_
                 resolution,
                 spec.get("fallback", (0.8, 0.8, 0.8, 1.0)),
             )
-            warnings.append(f"base_color nearest-surface transfer failed; wrote fallback texture: {exc}")
+            warnings.append(
+                f"base_color nearest-surface transfer failed; wrote fallback texture: {exc}"
+            )
         connect_texture_to_refined_material(material, bsdf, image, spec)
         path = texture_dir / "base_color.png"
         save_image(image, path)
-        textures.append({"type": "base_color", "path": str(path), "resolution": [resolution, resolution], "baked": baked, "transfer": transfer_stats})
+        textures.append(
+            {
+                "type": "base_color",
+                "path": str(path),
+                "resolution": [resolution, resolution],
+                "baked": baked,
+                "transfer": transfer_stats,
+            }
+        )
 
     if texture_cfg.get("enabled", True) and texture_cfg.get("bake_normal", True):
         spec = pbr_texture_spec("normal", texture_cfg)
-        image, baked, transfer_stats, transfer_warnings = transfer_nearest_texture_with_fallback(
-            source, target, "normal", resolution, config
+        image, baked, transfer_stats, transfer_warnings = (
+            transfer_nearest_texture_with_fallback(
+                source, target, "normal", resolution, config
+            )
         )
         warnings.extend(transfer_warnings)
         connect_texture_to_refined_material(material, bsdf, image, spec)
         path = texture_dir / "normal.png"
         save_image(image, path)
-        textures.append({"type": "normal", "path": str(path), "resolution": [resolution, resolution], "baked": baked, "transfer": transfer_stats})
+        textures.append(
+            {
+                "type": "normal",
+                "path": str(path),
+                "resolution": [resolution, resolution],
+                "baked": baked,
+                "transfer": transfer_stats,
+            }
+        )
 
     if texture_cfg.get("enabled", True) and texture_cfg.get("bake_roughness", False):
         spec = pbr_texture_spec("roughness", texture_cfg)
-        image, baked, transfer_stats, transfer_warnings = transfer_nearest_texture_with_fallback(
-            source, target, "roughness", resolution, config
+        image, baked, transfer_stats, transfer_warnings = (
+            transfer_nearest_texture_with_fallback(
+                source, target, "roughness", resolution, config
+            )
         )
         warnings.extend(transfer_warnings)
         connect_texture_to_refined_material(material, bsdf, image, spec)
         path = texture_dir / "roughness.png"
         save_image(image, path)
-        textures.append({"type": "roughness", "path": str(path), "resolution": [resolution, resolution], "baked": baked, "transfer": transfer_stats})
+        textures.append(
+            {
+                "type": "roughness",
+                "path": str(path),
+                "resolution": [resolution, resolution],
+                "baked": baked,
+                "transfer": transfer_stats,
+            }
+        )
 
     for texture_type in ("metallic", "ao", "emissive"):
-        if not texture_cfg.get("enabled", True) or not texture_cfg.get(f"bake_{texture_type}", False):
+        if not texture_cfg.get("enabled", True) or not texture_cfg.get(
+            f"bake_{texture_type}", False
+        ):
             continue
         spec = pbr_texture_spec(texture_type, texture_cfg)
-        image, baked, transfer_stats, transfer_warnings = transfer_nearest_texture_with_fallback(
-            source, target, texture_type, resolution, config
+        image, baked, transfer_stats, transfer_warnings = (
+            transfer_nearest_texture_with_fallback(
+                source, target, texture_type, resolution, config
+            )
         )
         warnings.extend(transfer_warnings)
         connect_texture_to_refined_material(material, bsdf, image, spec)
@@ -1456,22 +1762,39 @@ def migrate_textures(source: bpy.types.Object, target: bpy.types.Object, output_
             ("roughness_repaint", roughness, "Roughness"),
             ("metallic_repaint", metallic, "Metallic"),
         ]:
-            image = bpy.data.images.new(f"refined_{name}", width=resolution, height=resolution, alpha=False)
+            image = bpy.data.images.new(
+                f"refined_{name}", width=resolution, height=resolution, alpha=False
+            )
             image.colorspace_settings.name = "Non-Color"
             fill_image(image, (value, value, value, 1.0))
             node = create_texture_node(material, image, f"{name}_Target")
             if input_name in bsdf.inputs:
-                material.node_tree.links.new(node.outputs["Color"], bsdf.inputs[input_name])
+                material.node_tree.links.new(
+                    node.outputs["Color"], bsdf.inputs[input_name]
+                )
             path = texture_dir / f"{name}.png"
             save_image(image, path)
-            textures.append({"type": name, "path": str(path), "resolution": [resolution, resolution], "baked": False})
+            textures.append(
+                {
+                    "type": name,
+                    "path": str(path),
+                    "resolution": [resolution, resolution],
+                    "baked": False,
+                }
+            )
 
-    return {"enabled": bool(texture_cfg.get("enabled", True)), "textures": textures, "warnings": warnings}
+    return {
+        "enabled": bool(texture_cfg.get("enabled", True)),
+        "textures": textures,
+        "warnings": warnings,
+    }
 
 
 def edge_face_counts(mesh: bpy.types.Mesh) -> list[int]:
     mesh.update(calc_edges=True)
-    edge_index_by_key = {tuple(sorted(edge.vertices)): edge.index for edge in mesh.edges}
+    edge_index_by_key = {
+        tuple(sorted(edge.vertices)): edge.index for edge in mesh.edges
+    }
     counts = [0 for _ in mesh.edges]
     for poly in mesh.polygons:
         for key in poly.edge_keys:
@@ -1500,7 +1823,9 @@ def point_in_triangle(px: float, py: float, tri: list[tuple[float, float]]) -> b
     return u >= -1e-8 and v >= -1e-8 and (u + v) <= 1.0 + 1e-8
 
 
-def barycentric_2d(px: float, py: float, tri: list[tuple[float, float]]) -> tuple[float, float, float] | None:
+def barycentric_2d(
+    px: float, py: float, tri: list[tuple[float, float]]
+) -> tuple[float, float, float] | None:
     (ax, ay), (bx, by), (cx, cy) = tri
     v0x, v0y = bx - ax, by - ay
     v1x, v1y = cx - ax, cy - ay
@@ -1516,7 +1841,9 @@ def barycentric_2d(px: float, py: float, tri: list[tuple[float, float]]) -> tupl
     return u, v, w
 
 
-def barycentric_3d(point: Vector, tri: list[Vector]) -> tuple[float, float, float] | None:
+def barycentric_3d(
+    point: Vector, tri: list[Vector]
+) -> tuple[float, float, float] | None:
     a, b, c = tri
     v0 = b - a
     v1 = c - a
@@ -1556,7 +1883,10 @@ def uv_metrics(obj: bpy.types.Object, grid: int) -> dict[str, Any]:
     uv_area = 0.0
 
     for tri in mesh.loop_triangles:
-        coords = [(float(uv_data[loop_index].uv.x), float(uv_data[loop_index].uv.y)) for loop_index in tri.loops]
+        coords = [
+            (float(uv_data[loop_index].uv.x), float(uv_data[loop_index].uv.y))
+            for loop_index in tri.loops
+        ]
         for u, v in coords:
             total_loop_count += 1
             if u < -1e-6 or u > 1.0 + 1e-6 or v < -1e-6 or v > 1.0 + 1e-6:
@@ -1595,17 +1925,23 @@ def uv_metrics(obj: bpy.types.Object, grid: int) -> dict[str, Any]:
         "approx_uv_area": uv_area,
         "overlap_ratio": overlap_cells / occupied_cells if occupied_cells else 0.0,
         "used_grid_ratio": occupied_cells / float(grid * grid),
-        "out_of_bounds_fraction": out_of_bounds_count / total_loop_count if total_loop_count else 0.0,
+        "out_of_bounds_fraction": out_of_bounds_count / total_loop_count
+        if total_loop_count
+        else 0.0,
         "grid_resolution": grid,
     }
 
 
-def mesh_metrics(obj: bpy.types.Object, config: dict[str, Any] | None = None) -> dict[str, Any]:
+def mesh_metrics(
+    obj: bpy.types.Object, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
     mesh = obj.data
     mesh.update(calc_edges=True)
     mesh.calc_loop_triangles()
     counts = edge_face_counts(mesh)
-    vertices_with_edges = {vertex_index for edge in mesh.edges for vertex_index in edge.vertices}
+    vertices_with_edges = {
+        vertex_index for edge in mesh.edges for vertex_index in edge.vertices
+    }
     components = connected_components(mesh)
     dims = bbox_dimensions(obj)
     uv_grid = int((config or {}).get("qc", {}).get("uv_overlap_grid", 128) or 128)
@@ -1622,16 +1958,22 @@ def mesh_metrics(obj: bpy.types.Object, config: dict[str, Any] | None = None) ->
         "bbox_dimensions": list(dims),
         "bbox_diagonal": math.sqrt(sum(value * value for value in dims)),
         "connected_components": len(components),
-        "component_face_counts": [component["face_count"] for component in components[:10]],
+        "component_face_counts": [
+            component["face_count"] for component in components[:10]
+        ],
         "boundary_edges": sum(1 for count in counts if count == 1),
         "nonmanifold_edges": sum(1 for count in counts if count == 0 or count > 2),
         "open_or_nonmanifold_edges": sum(1 for count in counts if count != 2),
-        "loose_vertices": sum(1 for vert in mesh.vertices if vert.index not in vertices_with_edges),
+        "loose_vertices": sum(
+            1 for vert in mesh.vertices if vert.index not in vertices_with_edges
+        ),
         "uv": uv_metrics(obj, uv_grid),
     }
 
 
-def projection_metrics(source: bpy.types.Object, target: bpy.types.Object) -> dict[str, Any]:
+def projection_metrics(
+    source: bpy.types.Object, target: bpy.types.Object
+) -> dict[str, Any]:
     depsgraph = bpy.context.evaluated_depsgraph_get()
     tree = BVHTree.FromObject(source, depsgraph)
     if tree is None or not target.data.vertices:
@@ -1648,18 +1990,27 @@ def projection_metrics(source: bpy.types.Object, target: bpy.types.Object) -> di
         return {"sample_count": 0, "mean": None, "rms": None, "max": None}
     mean = sum(distances) / len(distances)
     rms = math.sqrt(sum(distance * distance for distance in distances) / len(distances))
-    return {"sample_count": len(distances), "mean": mean, "rms": rms, "max": max(distances)}
+    return {
+        "sample_count": len(distances),
+        "mean": mean,
+        "rms": rms,
+        "max": max(distances),
+    }
 
 
 def export_intermediate(obj: bpy.types.Object, output_dir: Path, filename: str) -> str:
     path = output_dir / "intermediate" / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     select_only([obj])
-    bpy.ops.export_scene.gltf(filepath=str(path), export_format="GLB", use_selection=True, export_apply=True)
+    bpy.ops.export_scene.gltf(
+        filepath=str(path), export_format="GLB", use_selection=True, export_apply=True
+    )
     return str(path)
 
 
-def export_final(obj: bpy.types.Object, output_dir: Path, config: dict[str, Any]) -> list[dict[str, Any]]:
+def export_final(
+    obj: bpy.types.Object, output_dir: Path, config: dict[str, Any]
+) -> list[dict[str, Any]]:
     export_cfg = config.get("export", {})
     formats = export_cfg.get("formats", ["glb"])
     exports: list[dict[str, Any]] = []
@@ -1668,21 +2019,55 @@ def export_final(obj: bpy.types.Object, output_dir: Path, config: dict[str, Any]
         normalized = str(fmt).lower()
         if normalized == "glb":
             path = output_dir / str(export_cfg.get("glb_filename", "refined_asset.glb"))
-            bpy.ops.export_scene.gltf(filepath=str(path), export_format="GLB", use_selection=True, export_apply=True)
-            exports.append({"format": "glb", "path": str(path), "exists": path.exists(), "bytes": path.stat().st_size if path.exists() else 0})
+            bpy.ops.export_scene.gltf(
+                filepath=str(path),
+                export_format="GLB",
+                use_selection=True,
+                export_apply=True,
+            )
+            exports.append(
+                {
+                    "format": "glb",
+                    "path": str(path),
+                    "exists": path.exists(),
+                    "bytes": path.stat().st_size if path.exists() else 0,
+                }
+            )
         elif normalized == "obj":
             path = output_dir / str(export_cfg.get("obj_filename", "refined_asset.obj"))
             if hasattr(bpy.ops.wm, "obj_export"):
                 bpy.ops.wm.obj_export(filepath=str(path), export_selected_objects=True)
             else:
                 bpy.ops.export_scene.obj(filepath=str(path), use_selection=True)
-            exports.append({"format": "obj", "path": str(path), "exists": path.exists(), "bytes": path.stat().st_size if path.exists() else 0})
+            exports.append(
+                {
+                    "format": "obj",
+                    "path": str(path),
+                    "exists": path.exists(),
+                    "bytes": path.stat().st_size if path.exists() else 0,
+                }
+            )
         else:
-            exports.append({"format": normalized, "path": None, "exists": False, "bytes": 0, "error": "unsupported_export_format"})
+            exports.append(
+                {
+                    "format": normalized,
+                    "path": None,
+                    "exists": False,
+                    "bytes": 0,
+                    "error": "unsupported_export_format",
+                }
+            )
     return exports
 
 
-def add_check(checks: list[dict[str, Any]], check_id: str, passed: bool, severity: str, value: Any, threshold: Any = None) -> None:
+def add_check(
+    checks: list[dict[str, Any]],
+    check_id: str,
+    passed: bool,
+    severity: str,
+    value: Any,
+    threshold: Any = None,
+) -> None:
     checks.append(
         {
             "id": check_id,
@@ -1707,15 +2092,36 @@ def build_qc_checks(
     thresholds = config.get("qc", {}).get("thresholds", {})
     checks: list[dict[str, Any]] = []
     final_faces = int(final["faces"])
-    adaptive_thresholds = bool(config.get("qc", {}).get("adapt_thresholds_to_selected_method", True))
+    adaptive_thresholds = bool(
+        config.get("qc", {}).get("adapt_thresholds_to_selected_method", True)
+    )
     max_face_threshold = int(thresholds.get("max_faces", 10**12))
     max_open = int(thresholds.get("max_open_or_nonmanifold_edges", 10**12))
     if adaptive_thresholds and retopo_stats.get("method") == "decimate_project":
-        max_face_threshold = max(max_face_threshold, int(retopo_stats.get("target_faces", final_faces) * 1.1) + 100)
-        max_open = max(max_open, int(source_after.get("open_or_nonmanifold_edges", 0) * 1.1) + 100)
+        max_face_threshold = max(
+            max_face_threshold,
+            int(retopo_stats.get("target_faces", final_faces) * 1.1) + 100,
+        )
+        max_open = max(
+            max_open, int(source_after.get("open_or_nonmanifold_edges", 0) * 1.1) + 100
+        )
 
-    add_check(checks, "whole_asset_export_count", len(exports) >= 1, "error", len(exports), ">=1")
-    add_check(checks, "single_mesh_final_asset", final.get("object_name") == "refined_whole_asset_retopology", "error", final.get("object_name"), "refined_whole_asset_retopology")
+    add_check(
+        checks,
+        "whole_asset_export_count",
+        len(exports) >= 1,
+        "error",
+        len(exports),
+        ">=1",
+    )
+    add_check(
+        checks,
+        "single_mesh_final_asset",
+        final.get("object_name") == "refined_whole_asset_retopology",
+        "error",
+        final.get("object_name"),
+        "refined_whole_asset_retopology",
+    )
     add_check(
         checks,
         "new_topology_generated",
@@ -1729,11 +2135,39 @@ def build_qc_checks(
         },
         "whole-asset topology modifier applied",
     )
-    add_check(checks, "source_used_as_high_reference", projection.get("sample_count", 0) > 0, "error", projection.get("sample_count", 0), ">0")
-    add_check(checks, "min_faces", final_faces >= int(thresholds.get("min_faces", 1)), "warning", final_faces, thresholds.get("min_faces"))
-    add_check(checks, "max_faces", final_faces <= max_face_threshold, "warning", final_faces, max_face_threshold)
+    add_check(
+        checks,
+        "source_used_as_high_reference",
+        projection.get("sample_count", 0) > 0,
+        "error",
+        projection.get("sample_count", 0),
+        ">0",
+    )
+    add_check(
+        checks,
+        "min_faces",
+        final_faces >= int(thresholds.get("min_faces", 1)),
+        "warning",
+        final_faces,
+        thresholds.get("min_faces"),
+    )
+    add_check(
+        checks,
+        "max_faces",
+        final_faces <= max_face_threshold,
+        "warning",
+        final_faces,
+        max_face_threshold,
+    )
 
-    add_check(checks, "open_or_nonmanifold_edges", int(final["open_or_nonmanifold_edges"]) <= max_open, "warning", final["open_or_nonmanifold_edges"], max_open)
+    add_check(
+        checks,
+        "open_or_nonmanifold_edges",
+        int(final["open_or_nonmanifold_edges"]) <= max_open,
+        "warning",
+        final["open_or_nonmanifold_edges"],
+        max_open,
+    )
 
     source_area = float(source_after.get("surface_area", 0.0) or 0.0)
     final_area = float(final.get("surface_area", 0.0) or 0.0)
@@ -1759,7 +2193,9 @@ def build_qc_checks(
             else None
             for source_value, final_value in zip(source_dims, final_dims)
         ]
-        worst_axis_delta = max((value for value in axis_deltas if value is not None), default=None)
+        worst_axis_delta = max(
+            (value for value in axis_deltas if value is not None), default=None
+        )
         add_check(
             checks,
             "bbox_axis_relative_delta",
@@ -1770,30 +2206,71 @@ def build_qc_checks(
         )
 
     uv = final.get("uv", {})
-    add_check(checks, "uv_present", bool(uv.get("has_uv")), "error", uv.get("has_uv"), True)
+    add_check(
+        checks, "uv_present", bool(uv.get("has_uv")), "error", uv.get("has_uv"), True
+    )
     overlap_ratio = uv.get("overlap_ratio")
     max_overlap = float(thresholds.get("max_uv_overlap_ratio", 1.0))
-    add_check(checks, "uv_overlap_ratio", overlap_ratio is not None and overlap_ratio <= max_overlap, "warning", overlap_ratio, max_overlap)
+    add_check(
+        checks,
+        "uv_overlap_ratio",
+        overlap_ratio is not None and overlap_ratio <= max_overlap,
+        "warning",
+        overlap_ratio,
+        max_overlap,
+    )
     out_of_bounds = float(uv.get("out_of_bounds_fraction", 1.0))
     max_oob = float(thresholds.get("max_uv_out_of_bounds_fraction", 1.0))
-    add_check(checks, "uv_out_of_bounds_fraction", out_of_bounds <= max_oob, "warning", out_of_bounds, max_oob)
+    add_check(
+        checks,
+        "uv_out_of_bounds_fraction",
+        out_of_bounds <= max_oob,
+        "warning",
+        out_of_bounds,
+        max_oob,
+    )
 
     rms = projection.get("rms")
     max_rms = float(thresholds.get("max_projection_rms", 10**12))
-    add_check(checks, "projection_rms", rms is not None and rms <= max_rms, "warning", rms, max_rms)
+    add_check(
+        checks,
+        "projection_rms",
+        rms is not None and rms <= max_rms,
+        "warning",
+        rms,
+        max_rms,
+    )
     maximum = projection.get("max")
     max_projection = float(thresholds.get("max_projection_max", 10**12))
-    add_check(checks, "projection_max", maximum is not None and maximum <= max_projection, "warning", maximum, max_projection)
+    add_check(
+        checks,
+        "projection_max",
+        maximum is not None and maximum <= max_projection,
+        "warning",
+        maximum,
+        max_projection,
+    )
 
     texture_cfg = config.get("textures", {})
     texture_records = textures.get("textures", [])
     if texture_cfg.get("enabled", True):
-        add_check(checks, "texture_migration_output", len(texture_records) > 0, "error", len(texture_records), ">0")
+        add_check(
+            checks,
+            "texture_migration_output",
+            len(texture_records) > 0,
+            "error",
+            len(texture_records),
+            ">0",
+        )
         if texture_cfg.get("bake_base_color", True):
             add_check(
                 checks,
                 "base_color_texture_present",
-                any(item.get("type") == "base_color" and Path(item.get("path", "")).exists() for item in texture_records),
+                any(
+                    item.get("type") == "base_color"
+                    and Path(item.get("path", "")).exists()
+                    for item in texture_records
+                ),
                 "error",
                 [item.get("type") for item in texture_records],
                 "base_color",
@@ -1803,7 +2280,11 @@ def build_qc_checks(
                 add_check(
                     checks,
                     f"{texture_type}_texture_present",
-                    any(item.get("type") == texture_type and Path(item.get("path", "")).exists() for item in texture_records),
+                    any(
+                        item.get("type") == texture_type
+                        and Path(item.get("path", "")).exists()
+                        for item in texture_records
+                    ),
                     "error",
                     [item.get("type") for item in texture_records],
                     texture_type,
@@ -1811,15 +2292,48 @@ def build_qc_checks(
     else:
         add_check(checks, "texture_migration_enabled", False, "warning", False, True)
 
-    add_check(checks, "final_exports_exist", all(item.get("exists") and item.get("bytes", 0) > 0 for item in exports), "error", exports, "all exports exist")
-    add_check(checks, "source_not_semantically_split", True, "error", "whole asset joined and processed as one mesh", True)
-    add_check(checks, "tiny_fragment_cleanup_only", source_before.get("connected_components", 0) >= source_after.get("connected_components", 0), "warning", {"before": source_before.get("connected_components"), "after": source_after.get("connected_components")}, "after <= before")
+    add_check(
+        checks,
+        "final_exports_exist",
+        all(item.get("exists") and item.get("bytes", 0) > 0 for item in exports),
+        "error",
+        exports,
+        "all exports exist",
+    )
+    add_check(
+        checks,
+        "source_not_semantically_split",
+        True,
+        "error",
+        "whole asset joined and processed as one mesh",
+        True,
+    )
+    add_check(
+        checks,
+        "tiny_fragment_cleanup_only",
+        source_before.get("connected_components", 0)
+        >= source_after.get("connected_components", 0),
+        "warning",
+        {
+            "before": source_before.get("connected_components"),
+            "after": source_after.get("connected_components"),
+        },
+        "after <= before",
+    )
     return checks
 
 
 def report_status(checks: list[dict[str, Any]]) -> str:
-    failed_errors = [check for check in checks if not check["passed"] and check["severity"] == "error"]
-    failed_warnings = [check for check in checks if not check["passed"] and check["severity"] == "warning"]
+    failed_errors = [
+        check
+        for check in checks
+        if not check["passed"] and check["severity"] == "error"
+    ]
+    failed_warnings = [
+        check
+        for check in checks
+        if not check["passed"] and check["severity"] == "warning"
+    ]
     if failed_errors:
         return "fail"
     if failed_warnings:
@@ -1843,7 +2357,9 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
 
     intermediates: list[str] = []
     if config.get("backend", {}).get("keep_intermediate", True):
-        intermediates.append(export_intermediate(source, output_dir, "source_high_reference_cleaned.glb"))
+        intermediates.append(
+            export_intermediate(source, output_dir, "source_high_reference_cleaned.glb")
+        )
 
     retopo, retopo_stats = whole_asset_retopology(source, config)
     uv_stats = generate_uv(retopo, config)
@@ -1854,7 +2370,16 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
     source.hide_set(True)
     source.hide_render = True
     exports = export_final(retopo, output_dir, config)
-    checks = build_qc_checks(source_before, source_after, final_metrics, projection, texture_stats, exports, retopo_stats, config)
+    checks = build_qc_checks(
+        source_before,
+        source_after,
+        final_metrics,
+        projection,
+        texture_stats,
+        exports,
+        retopo_stats,
+        config,
+    )
 
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -1893,7 +2418,9 @@ def main() -> int:
     try:
         report = run_pipeline(args)
         write_json(report_path, report)
-        fail_on_error = bool(report.get("config", {}).get("qc", {}).get("fail_on_error"))
+        fail_on_error = bool(
+            report.get("config", {}).get("qc", {}).get("fail_on_error")
+        )
         return 2 if fail_on_error and report.get("status") == "fail" else 0
     except Exception as exc:
         error_report = {

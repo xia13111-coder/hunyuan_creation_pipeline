@@ -143,6 +143,16 @@ def npR_to_M4(R):
                    (R[2,0],R[2,1],R[2,2],0.0),
                    (0.0,0.0,0.0,1.0)))
 
+def make_mesh_data_single_user(objs):
+    copied = 0
+    for ob in objs:
+        if ob.type != "MESH" or not ob.data:
+            continue
+        if ob.data.users > 1:
+            ob.data = ob.data.copy()
+            copied += 1
+    return copied
+
 def apply_rotation_around(objs, R4, pivot):
     root = bpy.data.objects.new("AxisMapAlignRoot", None)
     bpy.context.collection.objects.link(root)
@@ -161,9 +171,15 @@ def apply_rotation_around(objs, R4, pivot):
     bpy.data.objects.remove(root, do_unlink=True)
 
     bpy.ops.object.select_all(action="DESELECT")
-    for ob in objs:
-        if ob.type=="MESH": ob.select_set(True)
-    bpy.context.view_layer.objects.active = objs[0]
+    mesh_objs = [ob for ob in objs if ob.type == "MESH"]
+    copied = make_mesh_data_single_user(mesh_objs)
+    if copied:
+        log(f"  已复制 {copied} 个共享 Mesh 数据块，避免 multi-user transform_apply 失败")
+    for ob in mesh_objs:
+        ob.select_set(True)
+    if not mesh_objs:
+        return
+    bpy.context.view_layer.objects.active = mesh_objs[0]
     bpy.ops.object.transform_apply(location=False, rotation=True, scale=False)
 
 # =========================

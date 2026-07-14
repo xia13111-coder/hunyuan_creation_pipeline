@@ -1,7 +1,12 @@
 """Add Isaac Sim physics authoring data to USD assets.
 
+The script also prepares imported CAD USD geometry for PhysX by normalizing
+units, optionally centering visible geometry at the world origin, centering
+mesh-local origins, fixing world-space mesh winding, and diagnosing topology
+that cannot define a reliable closed volume.
+
 Example:
-    /home/user/isaacsim500/python.sh ./add_physics.py \
+    /home/user/isaacsim500/python.sh ./tools/isaac/add_physics.py \
       --folder ./downloads_refined_mesh/postprocess_glbs \
       --material-file ./materials.json \
       --out-dir ./output_intermediate \
@@ -17,8 +22,10 @@ import math
 import os
 import re
 
+from isaac_sim_compat import get_simulation_app_class
 
-from omni.isaac.kit import SimulationApp
+
+SimulationApp = get_simulation_app_class()
 
 def log(*a):
     print(*a, flush=True)
@@ -29,21 +36,19 @@ def build_sim(headless):
 def parse_args():
     ap = argparse.ArgumentParser(description="批量为 USD 添加物理（动态刚体 + 支持 SDF/凸分解等碰撞体）")
     ap.add_argument("--folder", required=True, help="输入 USD 根目录（递归 .usd/.usda/.usdc）")
-    ap.add_argument("--config", help="规则 JSON（可选，支持 defaults / rules / material_name_map）")
-    ap.add_argument("--material-file", required=True, help="材质参数 JSON（必须，定义 materials 和可选 name_map）")
+    ap.add_argument("--config", help="规则 JSON（可选，支持 defaults / rules）")
+    ap.add_argument("--material-file", required=True, help="材质参数 JSON（必须，定义 materials）")
     ap.add_argument("--out-dir", help="输出根目录（镜像结构）；不填则覆盖到原目录旁（加后缀）")
     ap.add_argument("--suffix", default="_phys", help="输出文件名后缀（默认 _phys）")
     ap.add_argument("--headless", action="store_true", help="无界面运行")
 
-
     ap.add_argument("--set-mass", type=float, help="设置整个资产总质量(kg)，多刚体时按体积权重分配")
     ap.add_argument("--material", help="统一材质标签（如 steel/rubber/wood/...），覆盖密度/摩擦/回弹/组合模式")
-
+    ap.add_argument("--center-origin", action="store_true", help="把资产包围盒中心移动到世界原点")
 
     ap.add_argument("--approx", help="碰撞近似（sdf/convexHull/convexDecomposition/triangleMesh/meshSimplification/box/sphere）")
     ap.add_argument("--force-sdf", action="store_true",
-                    help="无论规则/命令行指定为何，动态刚体一律强制用SDF（避免回退与报错）")
-
+                    help="无论规则/命令行指定为何，动态刚体一律强制使用 SDF")
 
     ap.add_argument("--sdf-res", type=int, default=256, help="SDF 分辨率（sdfResolution）>0 才会启用 SDF（默认 256）")
     ap.add_argument("--sdf-subgrid", type=int, default=6, help="SDF subgrid（默认 6）")
@@ -52,11 +57,9 @@ def parse_args():
     ap.add_argument("--sdf-remesh", action="store_true", help="SDF 启用重网格（如可用）")
     ap.add_argument("--sdf-tri-reduce", type=float, default=1.0, help="SDF 三角面数缩减系数（如可用）")
 
-
     ap.add_argument("--vhacd-max-hulls", type=int, default=64)
     ap.add_argument("--vhacd-max-verts-per-hull", type=int, default=64)
     ap.add_argument("--vhacd-resolution", type=int, default=100_000)
-
 
     ap.add_argument("--contact-offset", type=float, default=0.01, help="接触偏移（默认 0.01）")
     ap.add_argument("--rest-offset", type=float, default=0.0, help="静止偏移（默认 0.0）")
@@ -75,12 +78,11 @@ from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
 
 def load_rules(path):
     if not path:
-        return {"defaults": {}, "rules": [], "material_name_map": []}
+        return {"defaults": {}, "rules": []}
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     data.setdefault("defaults", {})
     data.setdefault("rules", [])
-    data.setdefault("material_name_map", [])
     return data
 
 def load_materials(path):
@@ -88,7 +90,6 @@ def load_materials(path):
         data = json.load(f)
     if "materials" not in data or not isinstance(data["materials"], dict):
         raise ValueError("materials.json 缺少根键 'materials' 或其类型不是对象")
-    data.setdefault("name_map", [])
     return data
 
 RULES = load_rules(args.config)
@@ -139,6 +140,363 @@ def xform_has_geom(prim):
         if p.IsA(UsdGeom.Mesh) or p.IsA(UsdGeom.Cube) or p.IsA(UsdGeom.Sphere) or p.IsA(UsdGeom.Capsule):
             return True
     return False
+
+def deinstance_visible_subtree(root_prim):
+    """Make instanceable CAD assemblies editable before authoring physics."""
+    changed = 0
+    while True:
+        pass_changed = 0
+        for prim in list(Usd.PrimRange(root_prim)):
+            if prim.IsInstanceable():
+                prim.SetInstanceable(False)
+                pass_changed += 1
+        changed += pass_changed
+        if pass_changed == 0:
+            return changed
+
+def _path_is_under(path, parent_path):
+    path_str = path.pathString
+    parent_str = parent_path.pathString
+    return path_str == parent_str or path_str.startswith(parent_str + "/")
+
+def cleanup_exported_stage(out_path, prune_prototypes=False):
+    stage = Usd.Stage.Open(out_path, Usd.Stage.LoadAll)
+    if not stage:
+        return
+
+    changed = False
+    for path in (
+        Sdf.Path("/Render"),
+        Sdf.Path("/OmniverseKit_Persp"),
+        Sdf.Path("/OmniverseKit_Front"),
+        Sdf.Path("/OmniverseKit_Top"),
+        Sdf.Path("/OmniverseKit_Right"),
+    ):
+        if stage.GetPrimAtPath(path).IsValid():
+            stage.RemovePrim(path)
+            changed = True
+
+    if prune_prototypes:
+        proto_paths = [
+            prim.GetPath()
+            for prim in stage.TraverseAll()
+            if prim.GetName() == "Prototypes"
+        ]
+        if proto_paths:
+            kept_meshes = sum(
+                1
+                for prim in stage.TraverseAll()
+                if prim.IsA(UsdGeom.Mesh)
+                and not any(_path_is_under(prim.GetPath(), proto) for proto in proto_paths)
+            )
+            if kept_meshes > 0:
+                for proto_path in sorted(proto_paths, key=lambda p: len(p.pathString), reverse=True):
+                    stage.RemovePrim(proto_path)
+                remaining_meshes = sum(1 for prim in stage.TraverseAll() if prim.IsA(UsdGeom.Mesh))
+                if remaining_meshes == kept_meshes:
+                    log(f"  cleaned CAD Prototypes scope(s); kept {remaining_meshes} visible mesh(es)")
+                    changed = True
+                else:
+                    log("  [WARN] skipped Prototypes cleanup because visible mesh count changed unexpectedly")
+
+    if changed:
+        stage.Export(out_path)
+        log(f"  cleaned exported stage: {out_path}")
+
+def _scale_vec3_array(values, factor):
+    if not values:
+        return values
+    vec_type = type(values[0])
+    return [vec_type(float(v[0]) * factor, float(v[1]) * factor, float(v[2]) * factor) for v in values]
+
+def _scale_vec3_value(value, factor):
+    vec_type = type(value)
+    return vec_type(float(value[0]) * factor, float(value[1]) * factor, float(value[2]) * factor)
+
+def normalize_stage_units_to_meters(stage):
+    try:
+        current_mpu = float(UsdGeom.GetStageMetersPerUnit(stage))
+    except Exception:
+        current_mpu = 1.0
+
+    target_mpu = 1.0
+    if abs(current_mpu - target_mpu) < 1e-12:
+        return False
+
+    factor = current_mpu / target_mpu
+    scaled_points = 0
+    scaled_xforms = 0
+    scaled_prims = 0
+
+    for prim in stage.TraverseAll():
+        if prim.IsA(UsdGeom.Mesh):
+            mesh = UsdGeom.Mesh(prim)
+            points_attr = mesh.GetPointsAttr()
+            points = points_attr.Get()
+            if points:
+                points_attr.Set(_scale_vec3_array(points, factor))
+                scaled_points += 1
+
+        if prim.IsA(UsdGeom.Boundable):
+            extent_attr = UsdGeom.Boundable(prim).GetExtentAttr()
+            extent = extent_attr.Get()
+            if extent:
+                extent_attr.Set(_scale_vec3_array(extent, factor))
+
+        if prim.IsA(UsdGeom.Cube):
+            cube = UsdGeom.Cube(prim)
+            size = cube.GetSizeAttr().Get()
+            if size is not None:
+                cube.GetSizeAttr().Set(float(size) * factor)
+                scaled_prims += 1
+        elif prim.IsA(UsdGeom.Sphere):
+            sphere = UsdGeom.Sphere(prim)
+            radius = sphere.GetRadiusAttr().Get()
+            if radius is not None:
+                sphere.GetRadiusAttr().Set(float(radius) * factor)
+                scaled_prims += 1
+        elif prim.IsA(UsdGeom.Capsule):
+            capsule = UsdGeom.Capsule(prim)
+            radius = capsule.GetRadiusAttr().Get()
+            height = capsule.GetHeightAttr().Get()
+            if radius is not None:
+                capsule.GetRadiusAttr().Set(float(radius) * factor)
+            if height is not None:
+                capsule.GetHeightAttr().Set(float(height) * factor)
+            scaled_prims += 1
+        elif prim.IsA(UsdGeom.Cylinder):
+            cylinder = UsdGeom.Cylinder(prim)
+            radius = cylinder.GetRadiusAttr().Get()
+            height = cylinder.GetHeightAttr().Get()
+            if radius is not None:
+                cylinder.GetRadiusAttr().Set(float(radius) * factor)
+            if height is not None:
+                cylinder.GetHeightAttr().Set(float(height) * factor)
+            scaled_prims += 1
+        elif prim.IsA(UsdGeom.Cone):
+            cone = UsdGeom.Cone(prim)
+            radius = cone.GetRadiusAttr().Get()
+            height = cone.GetHeightAttr().Get()
+            if radius is not None:
+                cone.GetRadiusAttr().Set(float(radius) * factor)
+            if height is not None:
+                cone.GetHeightAttr().Set(float(height) * factor)
+            scaled_prims += 1
+
+        if prim.IsA(UsdGeom.Xformable):
+            xformable = UsdGeom.Xformable(prim)
+            for op in xformable.GetOrderedXformOps():
+                try:
+                    op_type = op.GetOpType()
+                    value = op.Get()
+                    if value is None:
+                        continue
+                    if op_type == UsdGeom.XformOp.TypeTranslate:
+                        op.Set(_scale_vec3_value(value, factor))
+                        scaled_xforms += 1
+                    elif op_type == UsdGeom.XformOp.TypeTransform:
+                        translation = value.ExtractTranslation()
+                        value.SetTranslateOnly(_scale_vec3_value(translation, factor))
+                        op.Set(value)
+                        scaled_xforms += 1
+                except Exception as exc:
+                    log(f"  [WARN] failed to scale xform op on {prim.GetPath().pathString}: {exc}")
+
+    UsdGeom.SetStageMetersPerUnit(stage, target_mpu)
+    log(
+        f"  normalized stage units: metersPerUnit {current_mpu:g} -> {target_mpu:g}, "
+        f"scale={factor:g}, mesh_points={scaled_points}, xform_ops={scaled_xforms}, primitives={scaled_prims}"
+    )
+    return True
+
+def center_stage_geometry_at_origin(stage, anchor_prim):
+    sank = _sink_root_center_origin_to_geometry(anchor_prim)
+    if sank:
+        log("  center-origin: moved existing root offset down to geometry child")
+
+    bbox = compute_world_aabb(stage, anchor_prim)
+    if not bbox:
+        log("  [WARN] skipped center-origin: failed to compute world bounds")
+        return False
+
+    center = bbox.GetMin() + (bbox.GetSize() * 0.5)
+    offset = Gf.Vec3d(-float(center[0]), -float(center[1]), -float(center[2]))
+    if max(abs(offset[0]), abs(offset[1]), abs(offset[2])) < 1e-9:
+        log("  center-origin: asset already centered")
+        return False
+
+    _translate_anchor_geometry(anchor_prim, offset)
+
+    new_bbox = compute_world_aabb(stage, anchor_prim)
+    if new_bbox:
+        new_center = new_bbox.GetMin() + (new_bbox.GetSize() * 0.5)
+        log(
+            "  center-origin: "
+            f"offset=({offset[0]:.6g}, {offset[1]:.6g}, {offset[2]:.6g}), "
+            f"new_center=({new_center[0]:.6g}, {new_center[1]:.6g}, {new_center[2]:.6g})"
+        )
+    else:
+        log(
+            "  center-origin: "
+            f"offset=({offset[0]:.6g}, {offset[1]:.6g}, {offset[2]:.6g})"
+        )
+    return True
+
+def _sink_root_center_origin_to_geometry(anchor_prim):
+    """Keep the top asset Xform at zero by moving old root offsets below it."""
+    if anchor_prim.IsA(UsdGeom.Mesh) or not anchor_prim.IsA(UsdGeom.Xformable):
+        return False
+
+    xformable = UsdGeom.Xformable(anchor_prim)
+    for op in xformable.GetOrderedXformOps():
+        if op.GetOpName() != "xformOp:translate:centerOrigin":
+            continue
+        current = op.Get() or Gf.Vec3d(0.0, 0.0, 0.0)
+        offset = Gf.Vec3d(float(current[0]), float(current[1]), float(current[2]))
+        if max(abs(offset[0]), abs(offset[1]), abs(offset[2])) > 1e-12:
+            _translate_anchor_geometry(anchor_prim, offset)
+            op.Set(Gf.Vec3d(0.0, 0.0, 0.0))
+            return True
+        op.Set(Gf.Vec3d(0.0, 0.0, 0.0))
+        return False
+    return False
+
+def _translate_anchor_geometry(anchor_prim, offset):
+    """Move geometry under the asset root while keeping the root transform zero."""
+    if anchor_prim.IsA(UsdGeom.Mesh):
+        _translate_mesh_points(UsdGeom.Mesh(anchor_prim), offset)
+        return
+
+    moved = 0
+    for child in anchor_prim.GetChildren():
+        if child.IsA(UsdGeom.Mesh) or xform_has_geom(child):
+            if _translate_prim_as_unit(child, offset):
+                moved += 1
+
+    if moved == 0:
+        log("  [WARN] center-origin: no geometry child found; asset root was not translated")
+
+def _translate_prim_as_unit(prim, offset):
+    if prim.IsA(UsdGeom.Mesh):
+        _translate_mesh_points(UsdGeom.Mesh(prim), offset)
+        return True
+
+    if not prim.IsA(UsdGeom.Xformable):
+        return False
+
+    xformable = UsdGeom.Xformable(prim)
+    op = None
+    for candidate in xformable.GetOrderedXformOps():
+        if candidate.GetOpName() == "xformOp:translate:centerOrigin":
+            op = candidate
+            break
+    if op is None:
+        op = xformable.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble, "centerOrigin")
+    _put_xform_op_first(xformable, op)
+
+    current = op.Get()
+    if current is None:
+        current = Gf.Vec3d(0.0, 0.0, 0.0)
+    op.Set(Gf.Vec3d(
+        float(current[0]) + float(offset[0]),
+        float(current[1]) + float(offset[1]),
+        float(current[2]) + float(offset[2]),
+    ))
+    return True
+
+def _put_xform_op_first(xformable, op):
+    ordered = list(xformable.GetOrderedXformOps())
+    reordered = [op] + [candidate for candidate in ordered if candidate.GetOpName() != op.GetOpName()]
+    try:
+        reset_stack = bool(xformable.GetResetXformStack())
+    except Exception:
+        reset_stack = False
+    try:
+        xformable.SetXformOpOrder(reordered, reset_stack)
+    except TypeError:
+        xformable.SetXformOpOrder(reordered)
+
+def _translate_mesh_points(mesh, offset):
+    points_attr = mesh.GetPointsAttr()
+    points = points_attr.Get()
+    if not points:
+        return
+    points_attr.Set([
+        type(point)(
+            float(point[0]) + float(offset[0]),
+            float(point[1]) + float(offset[1]),
+            float(point[2]) + float(offset[2]),
+        )
+        for point in points
+    ])
+
+def _offset_vec3_array(values, offset):
+    if not values:
+        return values
+    return [
+        type(value)(
+            float(value[0]) + float(offset[0]),
+            float(value[1]) + float(offset[1]),
+            float(value[2]) + float(offset[2]),
+        )
+        for value in values
+    ]
+
+def _points_bbox_center(points):
+    min_x = min(float(point[0]) for point in points)
+    min_y = min(float(point[1]) for point in points)
+    min_z = min(float(point[2]) for point in points)
+    max_x = max(float(point[0]) for point in points)
+    max_y = max(float(point[1]) for point in points)
+    max_z = max(float(point[2]) for point in points)
+    return Gf.Vec3d(
+        (min_x + max_x) * 0.5,
+        (min_y + max_y) * 0.5,
+        (min_z + max_z) * 0.5,
+    )
+
+def center_mesh_local_origins(root_prim):
+    """Move mesh points near their own local origins and compensate with xform ops."""
+    centered = 0
+    skipped = 0
+    for prim in Usd.PrimRange(root_prim):
+        if not prim.IsA(UsdGeom.Mesh):
+            continue
+
+        xformable = UsdGeom.Xformable(prim)
+        if xformable.GetOrderedXformOps():
+            skipped += 1
+            continue
+
+        mesh = UsdGeom.Mesh(prim)
+        points_attr = mesh.GetPointsAttr()
+        points = points_attr.Get()
+        if not points:
+            continue
+
+        center = _points_bbox_center(points)
+        if max(abs(center[0]), abs(center[1]), abs(center[2])) < 1e-12:
+            continue
+
+        negative_center = Gf.Vec3d(-center[0], -center[1], -center[2])
+        points_attr.Set(_offset_vec3_array(points, negative_center))
+
+        extent_attr = UsdGeom.Boundable(prim).GetExtentAttr()
+        extent = extent_attr.Get()
+        if extent:
+            extent_attr.Set(_offset_vec3_array(extent, negative_center))
+
+        xformable.AddTranslateOp(
+            UsdGeom.XformOp.PrecisionDouble,
+            "meshLocalOrigin",
+        ).Set(center)
+        centered += 1
+
+    if centered:
+        log(f"  centered mesh local origins: {centered} mesh(es)")
+    if skipped:
+        log(f"  mesh local origin centering skipped meshes with existing xform ops: {skipped}")
+    return centered
 
 def compute_world_aabb(stage, prim):
     try:
@@ -201,6 +559,194 @@ def _triangulate_counts_indices(counts, indices):
         i += c
     return tris
 
+def _mesh_signed_volume_units3(mesh, xform=None):
+    pts = mesh.GetPointsAttr().Get()
+    if not pts:
+        return 0.0
+    counts = mesh.GetFaceVertexCountsAttr().Get() or []
+    idx = mesh.GetFaceVertexIndicesAttr().Get() or []
+    tris = _triangulate_counts_indices(counts, idx)
+    if not tris:
+        return 0.0
+
+    if xform is not None:
+        points = [xform.Transform(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2]))) for p in pts]
+    else:
+        points = [Gf.Vec3d(float(p[0]), float(p[1]), float(p[2])) for p in pts]
+
+    vol = 0.0
+    for i0, i1, i2 in tris:
+        p0 = points[i0]
+        p1 = points[i1]
+        p2 = points[i2]
+        vol += Gf.Dot(p0, Gf.Cross(p1, p2))
+    return float(vol) / 6.0
+
+def _mesh_volume_epsilon(mesh, xform=None):
+    pts = mesh.GetPointsAttr().Get()
+    if not pts:
+        return 1e-15
+    if xform is not None:
+        points = [xform.Transform(Gf.Vec3d(float(p[0]), float(p[1]), float(p[2]))) for p in pts]
+    else:
+        points = [Gf.Vec3d(float(p[0]), float(p[1]), float(p[2])) for p in pts]
+    min_x = min(float(p[0]) for p in points)
+    min_y = min(float(p[1]) for p in points)
+    min_z = min(float(p[2]) for p in points)
+    max_x = max(float(p[0]) for p in points)
+    max_y = max(float(p[1]) for p in points)
+    max_z = max(float(p[2]) for p in points)
+    diag = math.sqrt((max_x - min_x) ** 2 + (max_y - min_y) ** 2 + (max_z - min_z) ** 2)
+    return max((diag ** 3) * 1e-12, 1e-15)
+
+def _reverse_mesh_face_winding(mesh):
+    counts = list(mesh.GetFaceVertexCountsAttr().Get() or [])
+    indices = list(mesh.GetFaceVertexIndicesAttr().Get() or [])
+    if not counts or not indices:
+        return False
+
+    reversed_indices = []
+    cursor = 0
+    for count in counts:
+        face = indices[cursor:cursor + count]
+        reversed_indices.extend(reversed(face))
+        cursor += count
+    if len(reversed_indices) != len(indices):
+        return False
+
+    mesh.GetFaceVertexIndicesAttr().Set(reversed_indices)
+    mesh.CreateOrientationAttr(UsdGeom.Tokens.rightHanded)
+    try:
+        mesh.GetNormalsAttr().Clear()
+    except Exception:
+        pass
+    try:
+        mesh.CreateDoubleSidedAttr(True)
+    except Exception:
+        pass
+    return True
+
+def _mesh_topology_status(mesh):
+    """Return boundary, non-manifold, and inconsistent shared-edge counts."""
+    counts = list(mesh.GetFaceVertexCountsAttr().Get() or [])
+    indices = list(mesh.GetFaceVertexIndicesAttr().Get() or [])
+    edge_uses = {}
+    cursor = 0
+    invalid_faces = 0
+
+    for count in counts:
+        face = indices[cursor:cursor + count]
+        cursor += count
+        if count < 3 or len(face) != count:
+            invalid_faces += 1
+            continue
+        for index, start in enumerate(face):
+            end = face[(index + 1) % count]
+            if start == end:
+                invalid_faces += 1
+                continue
+            key = (min(start, end), max(start, end))
+            direction = 1 if start < end else -1
+            edge_uses.setdefault(key, []).append(direction)
+
+    boundary_edges = sum(len(uses) == 1 for uses in edge_uses.values())
+    nonmanifold_edges = sum(len(uses) > 2 for uses in edge_uses.values())
+    inconsistent_edges = sum(
+        len(uses) == 2 and uses[0] == uses[1]
+        for uses in edge_uses.values()
+    )
+    return {
+        "boundary_edges": boundary_edges,
+        "nonmanifold_edges": nonmanifold_edges,
+        "inconsistent_edges": inconsistent_edges,
+        "invalid_faces": invalid_faces,
+        "watertight": bool(edge_uses)
+        and boundary_edges == 0
+        and nonmanifold_edges == 0
+        and inconsistent_edges == 0
+        and invalid_faces == 0,
+    }
+
+def _mesh_topology_problem(mesh):
+    status = _mesh_topology_status(mesh)
+    if status["watertight"]:
+        return None
+    return (
+        f"boundary={status['boundary_edges']}, "
+        f"nonmanifold={status['nonmanifold_edges']}, "
+        f"inconsistent={status['inconsistent_edges']}, "
+        f"invalid_faces={status['invalid_faces']}"
+    )
+
+def _mesh_sdf_problem(mesh):
+    topology_problem = _mesh_topology_problem(mesh)
+    if topology_problem:
+        return topology_problem
+    signed_volume = _mesh_signed_volume_units3(mesh)
+    if abs(signed_volume) <= _mesh_volume_epsilon(mesh):
+        return "closed volume is too small"
+    return None
+
+def fix_inverted_mesh_winding(stage, root_prim):
+    """Make closed CAD meshes outward-facing after hierarchy transforms."""
+    fixed = 0
+    skipped = 0
+    xcache = UsdGeom.XformCache(Usd.TimeCode.Default())
+    for prim in Usd.PrimRange(root_prim):
+        if not prim.IsA(UsdGeom.Mesh):
+            continue
+        mesh = UsdGeom.Mesh(prim)
+
+        # USD's leftHanded token changes the interpreted front face without
+        # changing indices. Normalize it before evaluating the actual winding.
+        if mesh.GetOrientationAttr().Get() == UsdGeom.Tokens.leftHanded:
+            mesh.CreateOrientationAttr(UsdGeom.Tokens.rightHanded)
+            try:
+                mesh.GetNormalsAttr().Clear()
+            except Exception:
+                pass
+
+        topology_problem = _mesh_topology_problem(mesh)
+        if topology_problem:
+            skipped += 1
+            log(
+                f"  [WARN] winding volume check skipped for {prim.GetPath().pathString}: "
+                f"{topology_problem}"
+            )
+            continue
+
+        world_xform = xcache.GetLocalToWorldTransform(prim)
+        signed_volume = _mesh_signed_volume_units3(mesh, world_xform)
+        if abs(signed_volume) <= _mesh_volume_epsilon(mesh, world_xform):
+            skipped += 1
+            log(
+                f"  [WARN] winding volume check skipped for {prim.GetPath().pathString}: "
+                "closed volume is too small"
+            )
+            continue
+        if signed_volume < 0.0 and _reverse_mesh_face_winding(mesh):
+            fixed += 1
+    if fixed:
+        log(f"  fixed inverted world-space mesh winding: {fixed} mesh(es)")
+    if skipped:
+        log(f"  mesh winding volume check skipped unsafe meshes: {skipped}")
+    return fixed
+
+def prepare_geometry_for_physics(stage, anchor_prim, center_origin=False):
+    """Normalize and clean imported geometry before authoring PhysX schemas."""
+    normalize_stage_units_to_meters(stage)
+
+    deinstanced = deinstance_visible_subtree(anchor_prim)
+    if deinstanced:
+        log(f"  de-instanced {deinstanced} instanceable prim(s) for editable CAD hierarchy")
+
+    if center_origin:
+        center_stage_geometry_at_origin(stage, anchor_prim)
+
+    center_mesh_local_origins(anchor_prim)
+    fix_inverted_mesh_winding(stage, anchor_prim)
+    return {"deinstanced": deinstanced}
+
 def _mat3_det_from_mat4(m4):
     a00, a01, a02 = m4[0][0], m4[0][1], m4[0][2]
     a10, a11, a12 = m4[1][0], m4[1][1], m4[1][2]
@@ -210,19 +756,7 @@ def _mat3_det_from_mat4(m4):
             + a02 * (a10 * a21 - a11 * a20))
 
 def _mesh_local_volume_units3(mesh):
-    pts = mesh.GetPointsAttr().Get()
-    if not pts:
-        return 0.0
-    counts = mesh.GetFaceVertexCountsAttr().Get() or []
-    idx = mesh.GetFaceVertexIndicesAttr().Get() or []
-    tris = _triangulate_counts_indices(counts, idx)
-    if not tris:
-        return 0.0
-    vol = 0.0
-    for i0, i1, i2 in tris:
-        p0 = Gf.Vec3d(*pts[i0]); p1 = Gf.Vec3d(*pts[i1]); p2 = Gf.Vec3d(*pts[i2])
-        vol += Gf.Dot(p0, Gf.Cross(p1, p2))
-    return abs(vol) / 6.0
+    return abs(_mesh_signed_volume_units3(mesh))
 
 def _meters_per_unit(stage):
     try:
@@ -336,42 +870,6 @@ def bind_mat_to_body_and_meshes(stage, body_prim, material):
                 material, UsdShade.Tokens.weakerThanDescendants, "physics"
             )
 
-def _get_bound_material_name(mesh_prim):
-    try:
-        mb = UsdShade.MaterialBindingAPI(mesh_prim)
-        res = mb.ComputeBoundMaterial()
-        if isinstance(res, tuple) and res and res[0]:
-            return res[0].GetPrim().GetName()
-        if hasattr(mb, "GetDirectBinding"):
-            db = mb.GetDirectBinding()
-            if db and db.GetMaterial():
-                return db.GetMaterial().GetPrim().GetName()
-    except Exception:
-        pass
-    return None
-
-def detect_material_tag(body_prim):
-    names = []
-    for p in Usd.PrimRange(body_prim):
-        if p.IsA(UsdGeom.Mesh):
-            n = _get_bound_material_name(p)
-            if n:
-                names.append(n)
-    if not names:
-        return None
-
-    def _scan_name_map(name_map, names_list):
-        for n in names_list:
-            for rule in (name_map or []):
-                if re.search(rule.get("regex", ""), n, flags=re.IGNORECASE):
-                    return str(rule.get("tag", "")).strip().lower() or None
-        return None
-
-    tag = _scan_name_map(MATS.get("name_map", []), names)
-    if tag:
-        return tag
-    return _scan_name_map(RULES.get("material_name_map", []), names)
-
 def normalize_mesh_approx(name):
     if not name:
         return "convexHull"
@@ -411,8 +909,16 @@ def _author_sdf_on_mesh(mesh_prim, params):
         sdf_api.CreateSdfNarrowBandThicknessAttr(float(params.get("sdf_band", args.sdf_band)))
     if hasattr(sdf_api, "CreateSdfMarginAttr"):
         sdf_api.CreateSdfMarginAttr(float(params.get("sdf_margin", args.sdf_margin)))
-    if "sdf_remesh" in params and hasattr(sdf_api, "CreateSdfEnableRemeshingAttr"):
-        sdf_api.CreateSdfEnableRemeshingAttr(bool(params["sdf_remesh"]))
+    sdf_remesh = bool(params.get("sdf_remesh", args.sdf_remesh))
+    if hasattr(sdf_api, "CreateSdfEnableRemeshingAttr"):
+        sdf_api.CreateSdfEnableRemeshingAttr(sdf_remesh)
+        if sdf_remesh:
+            log(f"  SDF remeshing enabled on {mesh_prim.GetPath().pathString}")
+    elif sdf_remesh:
+        log(
+            f"  [WARN] SDF remeshing requested but unsupported on "
+            f"{mesh_prim.GetPath().pathString}"
+        )
     if "sdf_tri_reduce" in params and hasattr(sdf_api, "CreateSdfTriangleCountReductionFactorAttr"):
         sdf_api.CreateSdfTriangleCountReductionFactorAttr(float(params["sdf_tri_reduce"]))
 
@@ -449,20 +955,29 @@ def add_rigid_and_collider(stage, body_prim, params):
         req_approx = "sdf"
 
     def _author_mesh(mesh_prim):
-        if req_approx == "sdf":
+        mesh_approx = req_approx
+        if mesh_approx == "sdf":
+            sdf_problem = _mesh_sdf_problem(UsdGeom.Mesh(mesh_prim))
+            if sdf_problem:
+                log(
+                    f"  [WARN] SDF topology warning on {mesh_prim.GetPath().pathString}: "
+                    f"{sdf_problem}; keeping requested sdf"
+                )
+
+        if mesh_approx == "sdf":
             _author_sdf_on_mesh(mesh_prim, params)
             used = "sdf"
-        elif req_approx == "convexDecomposition":
+        elif mesh_approx == "convexDecomposition":
             _author_convex_decomposition(mesh_prim)
             used = "convexDecomposition"
-        elif req_approx in ("convexHull", "boundingCube", "boundingSphere", "sphereApproximation"):
-            _set_approx_token(mesh_prim, req_approx)
+        elif mesh_approx in ("convexHull", "boundingCube", "boundingSphere", "sphereApproximation"):
+            _set_approx_token(mesh_prim, mesh_approx)
             UsdPhysics.CollisionAPI.Apply(mesh_prim)
             UsdPhysics.MeshCollisionAPI.Apply(mesh_prim)
             col = PhysxSchema.PhysxCollisionAPI.Apply(mesh_prim)
             if hasattr(col, "CreateContactOffsetAttr"): col.CreateContactOffsetAttr(float(params.get("contact_offset", args.contact_offset)))
             if hasattr(col, "CreateRestOffsetAttr"):    col.CreateRestOffsetAttr(float(params.get("rest_offset", args.rest_offset)))
-            used = req_approx
+            used = mesh_approx
         else:
             _author_sdf_on_mesh(mesh_prim, params)
             used = "sdf"
@@ -534,8 +1049,6 @@ def match_params(prim):
             params["material_tag"] = chosen
     else:
         rule_tag = normalize_tag(params.get("material_tag"))
-        if not rule_tag:
-            rule_tag = normalize_tag(detect_material_tag(prim))
         if rule_tag:
             preset = get_preset(rule_tag)
             if preset:
@@ -609,6 +1122,11 @@ def process_usd(in_path):
 
     anchor = get_anchor_root(stage)
     log("  anchor root =", anchor.GetPath().pathString)
+    geometry_prep = prepare_geometry_for_physics(
+        stage,
+        anchor,
+        center_origin=args.center_origin,
+    )
 
     records = []
     for prim in list(anchor.GetChildren()):
@@ -667,6 +1185,7 @@ def process_usd(in_path):
     try:
         stage.Export(out_path)
         log(f"  ✓ exported: {out_path}")
+        cleanup_exported_stage(out_path, prune_prototypes=bool(geometry_prep["deinstanced"]))
     except Exception as e:
         log(f"  !! export failed: {e}")
 

@@ -13,10 +13,5 @@
       "friction": 0.30,
       "restitution": 0.1,
       "dyn_ratio": 0.9}
-  },
-  "name_map": [
-    { "regex": "tire|rubber", "tag": "rubber" },
-    { "regex": "metal|steel", "tag": "steel" },
-    { "regex": "wood",        "tag": "wood" }
-  ]
+  }
 }
