@@ -14,10 +14,11 @@
 | Blender 后处理 | `jobs/blender.py`、`tools/blender/` | [Blender](./modules/blender.zh.md) |
 | Isaac Sim 物理 | `jobs/isaac.py`、`tools/isaac/` | [Physics](./modules/physics.zh.md) |
 | 手工 CAD | `workflows.run_stp_physics_job`、`convert_cad_to_usd.py` | [CAD](./modules/cad.zh.md) |
-| HTTP API / Docker | `asset_pipeline/api.py`、`docker/` | [API](./modules/api.zh.md) |
+| HTTP API / Docker | `asset_pipeline/api.py`、`docker/` | [API](./modules/api.zh.md) / [Docker](../docker/README.zh.md) |
 
 其他说明：
 
 - [Refine 配置文件说明](../configs/README.md)
 - [独立工具说明](../tools/README.md)
+- [Docker 操作手册](../docker/README.zh.md)
 - [英文项目 README](../README.md)

@@ -15,7 +15,7 @@
 | Blender 后处理 | 坐标轴、尺寸、居中和 GLB-to-USD | [Blender](./docs/modules/blender.zh.md) |
 | Isaac 物理 | collision、rigid body、材质、质量和最终收集 | [Physics](./docs/modules/physics.zh.md) |
 | 手工 CAD | STEP/STP 转 USD、单位/原点/层级清理和物理挂载 | [CAD](./docs/modules/cad.zh.md) |
-| HTTP API / Docker | 后台任务接口与容器部署 | [API](./docs/modules/api.zh.md) |
+| HTTP API / Docker | 后台任务接口与容器部署 | [API](./docs/modules/api.zh.md) / [Docker](./docker/README.zh.md) |
 
 ## 总体流程
 
@@ -141,13 +141,21 @@ export TENCENTCLOUD_SECRET_KEY="your-secret-key"
 按机器覆盖外部程序路径：
 
 ```bash
-export BLENDER_BIN="/opt/blender/blender"
-export ISAAC_PYTHON="/home/user/isaacsim500/python.sh"
+export BLENDER_BIN="$(command -v blender)"
+export ISAACSIM_ROOT="../isaacsim"
+export ISAAC_PYTHON="$ISAACSIM_ROOT/python.sh"
 ```
+
+示例假设 Isaac Sim 位于项目同级的 `../isaacsim`，请按本机目录关系替换这个相对路径。
+不要把某台机器的用户名或绝对安装路径提交到配置中。`BLENDER_BIN` 和
+`ISAACSIM_ROOT` 由每台机器在本地设置；Docker 用户不需要设置这两个变量。
 
 SAM3D 自动复用当前 `hunyuan_sam3d` 的 Python，不再单独配置 `SAM3D_PYTHON`。
 两个外部仓库统一放在 `./tools/sam3d/third_party/` 下，并从主仓库 git 和 Docker
 构建上下文中排除；目录布局见 [SAM3D 工具说明](./tools/sam3d/README.md)。
+
+容器部署见 [Docker 操作手册](./docker/README.zh.md)。当前完整镜像的验收目标是
+Isaac Sim 6.0.1，文档包含离线 tar 导出/导入、Hub/缓存挂载、CLI 与 API 操作和验收流程。
 
 ## 代码结构
 
@@ -196,4 +204,5 @@ docs/                          按模块拆分的说明文档
 - [代码架构与调用关系](./docs/architecture.zh.md)
 - [Refine 配置](./configs/README.md)
 - [工具目录](./tools/README.md)
-- [Docker 和 API](./docker/README.md)
+- [Docker 操作手册](./docker/README.zh.md)
+- [HTTP API](./docs/modules/api.zh.md)

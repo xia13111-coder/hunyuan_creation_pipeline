@@ -38,8 +38,12 @@ queued -> running -> succeeded / failed
 
 ## Example
 
+This Docker API example uses fixed container paths under `/workspace/assets`;
+they are not absolute paths from the target host. See the Docker operations
+guide for the host-directory mapping.
+
 ```bash
-curl -X POST http://127.0.0.1:8000/jobs/process-model \
+curl --noproxy '*' -X POST http://127.0.0.1:8000/jobs/process-model \
   -H 'Content-Type: application/json' \
   -d '{
     "input_path": "/workspace/assets/model.glb",
@@ -57,4 +61,11 @@ curl -X POST http://127.0.0.1:8000/jobs/process-model \
 
 ## Docker
 
-The full image starts `asset_pipeline.api:app` by default. See [docker/README.md](../../docker/README.md) for image builds, GPU setup, Isaac Sim cache mounts, and more curl examples.
+The full image starts `asset_pipeline.api:app` by default. The current validated
+container target uses Isaac Sim 6.0.1. The API exposes Hunyuan generation and
+existing-GLB processing; run SAM3D image reconstruction and manual STEP/STP jobs
+through the pipeline CLI inside the same container.
+
+See the [Docker operations guide](../../docker/README.md) for offline image
+export/import, GPU setup, Hub/cache mounts, CLI/API commands, lifecycle
+operations, and acceptance checks.

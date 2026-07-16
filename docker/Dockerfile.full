@@ -47,7 +47,6 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -print0 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     bzip2 \
-    build-essential \
     ca-certificates \
     curl \
     git \
@@ -81,8 +80,12 @@ ENV PYTHONPATH=
 
 COPY --from=pipeline_env ${CONDA_DIR} ${CONDA_DIR}
 
+ENV CONDA_PREFIX=${CONDA_DIR}/envs/${CONDA_ENV_NAME}
+ENV CONDA_DEFAULT_ENV=${CONDA_ENV_NAME}
 ENV PATH=${CONDA_DIR}/envs/${CONDA_ENV_NAME}/bin:${CONDA_DIR}/bin:${BLENDER_HOME}:${PATH}
 
+# The upstream SAM3D checkout defaults DINOv2 to this legacy cache path.
+# Keep it as an internal compatibility link; host paths remain configurable mounts.
 RUN if ! getent group "${APP_GID}" >/dev/null; then \
         groupadd --gid "${APP_GID}" pipeline; \
     fi \
@@ -90,7 +93,9 @@ RUN if ! getent group "${APP_GID}" >/dev/null; then \
         useradd --uid "${APP_UID}" --gid "${APP_GID}" --home-dir "${HOME}" \
             --no-create-home --shell /bin/bash pipeline; \
     fi \
-    && mkdir -p "${HOME}" /workspace/hunyuan3.0_assets_creation \
+    && mkdir -p "${HOME}/.cache/torch" /home/user/.cache/torch \
+        /workspace/hunyuan3.0_assets_creation \
+    && ln -sfn "${HOME}/.cache/torch/hub" /home/user/.cache/torch/hub \
     && chown -R "${APP_UID}:${APP_GID}" "${HOME}" /workspace
 
 COPY --chown=${APP_UID}:${APP_GID} . /workspace/hunyuan3.0_assets_creation
@@ -103,6 +108,9 @@ WORKDIR /workspace/hunyuan3.0_assets_creation
 USER ${APP_UID}:${APP_GID}
 
 EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+    CMD curl --fail --silent --show-error http://127.0.0.1:8000/health >/dev/null || exit 1
 
 ENTRYPOINT ["docker-entrypoint.full.sh"]
 CMD ["python", "-m", "uvicorn", "asset_pipeline.api:app", "--host", "0.0.0.0", "--port", "8000"]

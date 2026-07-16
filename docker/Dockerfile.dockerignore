@@ -20,3 +20,5 @@ pipeline_*_result.json
 manual_pipeline_result*.json
 *.log
 tools/sam3d/third_party/
+docker/runtime/
+docker/offline-images/

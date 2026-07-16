@@ -15,7 +15,7 @@ A production pipeline for Hunyuan image/text generation, SAM 3D Objects single/m
 | Blender postprocess | Axis mapping, sizing, centering, and GLB-to-USD | [Blender](./docs/modules/blender.md) |
 | Isaac physics | Collision, rigid body, materials, mass, and final collection | [Physics](./docs/modules/physics.md) |
 | Manual CAD | STEP/STP-to-USD, unit/origin/hierarchy cleanup, and physics | [CAD](./docs/modules/cad.md) |
-| HTTP API / Docker | Background job API and container deployment | [API](./docs/modules/api.md) |
+| HTTP API / Docker | Background job API and container deployment | [API](./docs/modules/api.md) / [Docker](./docker/README.md) |
 
 ## Pipeline Flow
 
@@ -140,14 +140,24 @@ export TENCENTCLOUD_SECRET_KEY="your-secret-key"
 Override external executables when needed:
 
 ```bash
-export BLENDER_BIN="/opt/blender/blender"
-export ISAAC_PYTHON="/home/user/isaacsim500/python.sh"
+export BLENDER_BIN="$(command -v blender)"
+export ISAACSIM_ROOT="../isaacsim"
+export ISAAC_PYTHON="$ISAACSIM_ROOT/python.sh"
 ```
+
+This example assumes Isaac Sim is at `../isaacsim` relative to the project;
+replace that relative path to match the local layout. Do not commit one
+machine's username or absolute installation path. Set `BLENDER_BIN` and
+`ISAACSIM_ROOT` locally on each host. Docker users do not need either variable.
 
 SAM3D automatically reuses the active `hunyuan_sam3d` Python; do not configure a
 separate `SAM3D_PYTHON`. Both external repositories live under
 `./tools/sam3d/third_party/` and are excluded from the main repository and Docker
 build context. See the [SAM3D tool layout](./tools/sam3d/README.md).
+
+For container deployment, use the [Docker operations guide](./docker/README.md).
+The current full-image acceptance target is Isaac Sim 6.0.1; the guide covers
+offline tar export/import, Hub/cache mounts, CLI and API operation, and validation.
 
 ## Code Layout
 
@@ -196,4 +206,5 @@ Generated results, model weights, local third-party checkouts, and caches are no
 - [Code architecture and call graph](./docs/architecture.md)
 - [Refine configuration](./configs/README.md)
 - [Tool directory](./tools/README.md)
-- [Docker and API](./docker/README.md)
+- [Docker operations](./docker/README.md)
+- [HTTP API](./docs/modules/api.md)

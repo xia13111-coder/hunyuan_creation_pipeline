@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 import asset_pipeline
 import pipeline_runner
 from asset_pipeline import runtime
@@ -66,6 +68,30 @@ class PipelineStructureTests(unittest.TestCase):
         materials = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(set(materials), {"materials"})
         self.assertIn("plastic", materials["materials"])
+
+    def test_tencent_sdk_versions_stay_aligned(self) -> None:
+        path = asset_pipeline.project_root() / "environment.yml"
+        environment = yaml.safe_load(path.read_text(encoding="utf-8"))
+        pip_dependencies = next(
+            item["pip"]
+            for item in environment["dependencies"]
+            if isinstance(item, dict) and "pip" in item
+        )
+        versions = {
+            name: version
+            for dependency in pip_dependencies
+            for name, separator, version in [dependency.partition("==")]
+            if separator and name.startswith("tencentcloud-sdk-python")
+        }
+
+        self.assertEqual(
+            versions,
+            {
+                "tencentcloud-sdk-python": "3.0.1462",
+                "tencentcloud-sdk-python-ai3d": "3.0.1462",
+                "tencentcloud-sdk-python-common": "3.0.1462",
+            },
+        )
 
     def test_sam3d_auto_mode_prepares_sorted_multiview_images(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

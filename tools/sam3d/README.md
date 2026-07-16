@@ -27,4 +27,6 @@ The defaults point to the two directories above. `SAM3D_SINGLE_VIEW_ROOT`,
 checkout or checkpoint is required. `third_party/` is intentionally ignored by the
 main Git repository and Docker build context because it contains upstream source,
 model weights, and generated native extensions. Docker runs must bind-mount the
-project directory so these local dependencies are visible in the container.
+project directory so these local dependencies are visible in the container. See
+the [Docker operations guide](../../docker/README.md) for source, model-cache,
+and multi-view visualization mounts.

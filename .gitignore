@@ -11,6 +11,10 @@ __pycache__/
 .env.*
 !.env.example
 
+# Local Docker runtime data and offline image bundles.
+/docker/runtime/
+/docker/offline-images/
+
 downloads/
 downloads_*/
 sam3d_downloads/

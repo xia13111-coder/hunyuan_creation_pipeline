@@ -38,8 +38,11 @@ queued -> running -> succeeded / failed
 
 ## 示例
 
+下面是 Docker API 示例，JSON 中的 `/workspace/assets/...` 是容器内部固定路径，
+不是目标电脑上的绝对路径。宿主机目录映射方式见 Docker 操作手册。
+
 ```bash
-curl -X POST http://127.0.0.1:8000/jobs/process-model \
+curl --noproxy '*' -X POST http://127.0.0.1:8000/jobs/process-model \
   -H 'Content-Type: application/json' \
   -d '{
     "input_path": "/workspace/assets/model.glb",
@@ -57,4 +60,9 @@ curl -X POST http://127.0.0.1:8000/jobs/process-model \
 
 ## Docker
 
-完整镜像默认启动 `asset_pipeline.api:app`。镜像构建、GPU、Isaac Sim 缓存挂载和更多 curl 示例见 [docker/README.md](../../docker/README.md)。
+完整镜像默认启动 `asset_pipeline.api:app`，当前通过验收的容器目标是 Isaac Sim 6.0.1。
+API 目前暴露 Hunyuan 生成和已有 GLB 后处理；SAM3D 图片重建与手工 STEP/STP 任务通过
+同一容器内的 pipeline CLI 运行。
+
+离线镜像导出/导入、GPU、Hub/缓存挂载、CLI/API 命令、容器维护和验收步骤见
+[Docker 操作手册](../../docker/README.zh.md)。

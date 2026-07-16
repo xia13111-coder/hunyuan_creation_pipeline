@@ -14,10 +14,11 @@ Documentation follows code ownership. The root README contains entry points and 
 | Blender postprocess | `jobs/blender.py`, `tools/blender/` | [Blender](./modules/blender.md) |
 | Isaac Sim physics | `jobs/isaac.py`, `tools/isaac/` | [Physics](./modules/physics.md) |
 | Manual CAD | `workflows.run_stp_physics_job`, `convert_cad_to_usd.py` | [CAD](./modules/cad.md) |
-| HTTP API / Docker | `asset_pipeline/api.py`, `docker/` | [API](./modules/api.md) |
+| HTTP API / Docker | `asset_pipeline/api.py`, `docker/` | [API](./modules/api.md) / [Docker](../docker/README.md) |
 
 Additional references:
 
 - [Refine configuration](../configs/README.md)
 - [Standalone tools](../tools/README.md)
+- [Docker operations](../docker/README.md)
 - [Chinese project README](../README.zh.md)
