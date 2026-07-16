@@ -21,6 +21,20 @@ HTTP API。本指南从目标机器已经拿到离线 tar 开始，依次完成�
 GitHub Release 的单附件不能超过 2 GiB，因此离线 tar 以 1900 MiB 分卷发布。这些
 分卷按文件名顺序拼接后就是标准 `docker save` tar，不是 17 个独立镜像。
 
+可以在浏览器登录有权限的 GitHub 账号后逐项下载。也可以在目标机器安装
+[GitHub CLI](https://cli.github.com/)，认证后一次下载全部附件：
+
+```bash
+mkdir -p hunyuan-docker-bundle
+cd hunyuan-docker-bundle
+gh auth login
+gh release download docker-isaac-6.0.1 \
+  --repo xia13111-coder/hunyuan_creation_pipeline \
+  --pattern 'hunyuan-pipeline-isaac-6.0.1-offline.*'
+```
+
+仓库为私有状态时，下载者必须先被授予仓库访问权限；未登录的公开链接会返回 `404`。
+
 当前离线包信息：
 
 | 项目 | 值 |

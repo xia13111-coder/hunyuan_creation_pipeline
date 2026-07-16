@@ -26,6 +26,22 @@ GitHub Release assets must each remain under 2 GiB, so the offline tar is
 published in 1900 MiB parts. Concatenating them in filename order recreates one
 standard `docker save` tar; they are not 17 independent images.
 
+Download each asset in a browser signed in to an authorized GitHub account. To
+download all assets at once, install [GitHub CLI](https://cli.github.com/) on the
+target and run:
+
+```bash
+mkdir -p hunyuan-docker-bundle
+cd hunyuan-docker-bundle
+gh auth login
+gh release download docker-isaac-6.0.1 \
+  --repo xia13111-coder/hunyuan_creation_pipeline \
+  --pattern 'hunyuan-pipeline-isaac-6.0.1-offline.*'
+```
+
+When the repository is private, the downloader must have repository access;
+anonymous release links return `404`.
+
 Current bundle information:
 
 | Item | Value |
