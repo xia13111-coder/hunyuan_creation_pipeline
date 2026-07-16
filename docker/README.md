@@ -15,20 +15,26 @@ computer.
 
 ## 1. Prepare the Tar and Target
 
-Place these files together in any directory on the target and open a terminal in
-that directory:
+Download all 17 `tar.part-*` files and the checksum manifest from
+[Docker Offline Bundle - Isaac Sim 6.0.1](https://github.com/xia13111-coder/hunyuan_creation_pipeline/releases/tag/docker-isaac-6.0.1),
+then place them together in any directory on the target:
 
-- `hunyuan-pipeline-isaac-6.0.1-offline.tar`
-- `hunyuan-pipeline-isaac-6.0.1-offline.tar.sha256`
+- `hunyuan-pipeline-isaac-6.0.1-offline.tar.part-001` through `part-017`
+- `hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256`
+
+GitHub Release assets must each remain under 2 GiB, so the offline tar is
+published in 1900 MiB parts. Concatenating them in filename order recreates one
+standard `docker save` tar; they are not 17 independent images.
 
 Current bundle information:
 
 | Item | Value |
 | --- | --- |
-| File size | `32,746,605,056` bytes, approximately 30.5 GiB |
-| SHA-256 | `9cd3b5fc2b0aaec90ca419fa55c84e9533052aaf9a50c58f7edea209ffa50d51` |
+| Total size | `32,746,894,336` bytes, approximately 30.5 GiB |
+| Parts | 17; the first 16 are 1900 MiB and the last is approximately 830 MiB |
 | Full image | `hunyuan-allinone:isaac-6.0.1` |
 | Hub image | `nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0` |
+| Tencent SDK | AI3D/common `3.0.1462` with Pro/Rapid request support |
 
 The target requires:
 
@@ -53,19 +59,28 @@ Run this from the bundle directory:
 ```bash
 export BUNDLE_DIR="$(pwd -P)"
 cd "$BUNDLE_DIR"
-ls -lh hunyuan-pipeline-isaac-6.0.1-offline.tar*
+ls -lh hunyuan-pipeline-isaac-6.0.1-offline.tar.part-*
 ```
 
-Verify it first; the result must be `OK`:
+Verify every part first; all 17 results must be `OK`:
 
 ```bash
-sha256sum -c hunyuan-pipeline-isaac-6.0.1-offline.tar.sha256
+sha256sum -c hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
 ```
 
-If it reports `FAILED`, copy the tar again and do not run `docker load`. After a
-successful checksum, load it:
+If any part reports `FAILED`, download that part again and do not run
+`docker load`. After a successful checksum, concatenate directly into
+`docker load` without allocating another full tar on disk:
 
 ```bash
+cat hunyuan-pipeline-isaac-6.0.1-offline.tar.part-* | docker load
+```
+
+To create one tar for external-drive distribution, merge it first:
+
+```bash
+cat hunyuan-pipeline-isaac-6.0.1-offline.tar.part-* \
+  > hunyuan-pipeline-isaac-6.0.1-offline.tar
 docker load -i hunyuan-pipeline-isaac-6.0.1-offline.tar
 ```
 
@@ -89,7 +104,7 @@ docker run --rm --gpus all \
   hunyuan-allinone:isaac-6.0.1
 ```
 
-Keep the offline tar and its `.sha256` file as the reusable installer for other
+Keep the offline parts and checksum manifest as the reusable installer for other
 computers. Delete this copy only when another verified backup exists.
 
 ## 3. Prepare Target Directories
@@ -355,15 +370,17 @@ publishing a new image:
 export PROJECT_ROOT="$(pwd -P)"
 export IMAGE_BUNDLE_DIR="${IMAGE_BUNDLE_DIR:-$PROJECT_ROOT/docker/offline-images}"
 mkdir -p "$IMAGE_BUNDLE_DIR"
+set -o pipefail
 
 docker save \
-  -o "$IMAGE_BUNDLE_DIR/hunyuan-pipeline-isaac-6.0.1-offline.tar" \
   hunyuan-allinone:isaac-6.0.1 \
-  nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0
+  nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0 \
+  | split --bytes=1900M --numeric-suffixes=1 --suffix-length=3 - \
+      "$IMAGE_BUNDLE_DIR/hunyuan-pipeline-isaac-6.0.1-offline.tar.part-"
 
 cd "$IMAGE_BUNDLE_DIR"
-sha256sum hunyuan-pipeline-isaac-6.0.1-offline.tar \
-  > hunyuan-pipeline-isaac-6.0.1-offline.tar.sha256
+sha256sum hunyuan-pipeline-isaac-6.0.1-offline.tar.part-* \
+  > hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
 ```
 
 Do not add `nvcr.io/nvidia/isaac-sim:6.0.1` or
@@ -383,7 +400,9 @@ curl --noproxy '*' --fail http://127.0.0.1:8000/health
 
 ### Hunyuan Pro/Rapid SDK Compatibility
 
-The earlier offline tar contains `tencentcloud-sdk-python-ai3d==3.0.1424` and
+GitHub Release `docker-isaac-6.0.1` already contains AI3D/common `3.0.1462`, so
+this section is unnecessary for that bundle. The earlier offline tar contains
+`tencentcloud-sdk-python-ai3d==3.0.1424` and
 `tencentcloud-sdk-python-common==3.0.1443`, while the current code uses the
 Pro/Rapid APIs. If the log reports
 `models has no attribute SubmitHunyuanTo3DProJobRequest`, run once in the current

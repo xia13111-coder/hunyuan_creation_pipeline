@@ -154,8 +154,10 @@ SAM3D 自动复用当前 `hunyuan_sam3d` 的 Python，不再单独配置 `SAM3D_
 两个外部仓库统一放在 `./tools/sam3d/third_party/` 下，并从主仓库 git 和 Docker
 构建上下文中排除；目录布局见 [SAM3D 工具说明](./tools/sam3d/README.md)。
 
-容器部署见 [Docker 操作手册](./docker/README.zh.md)。当前完整镜像的验收目标是
-Isaac Sim 6.0.1，文档包含离线 tar 导出/导入、Hub/缓存挂载、CLI 与 API 操作和验收流程。
+容器部署见 [Docker 操作手册](./docker/README.zh.md)，离线镜像分卷可从
+[GitHub Release](https://github.com/xia13111-coder/hunyuan_creation_pipeline/releases/tag/docker-isaac-6.0.1)
+下载。当前完整镜像的验收目标是 Isaac Sim 6.0.1，文档包含分卷校验与导入、Hub/缓存
+挂载、CLI 与 API 操作和验收流程。
 
 ## 代码结构
 

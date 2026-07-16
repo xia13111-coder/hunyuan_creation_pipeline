@@ -155,9 +155,11 @@ separate `SAM3D_PYTHON`. Both external repositories live under
 `./tools/sam3d/third_party/` and are excluded from the main repository and Docker
 build context. See the [SAM3D tool layout](./tools/sam3d/README.md).
 
-For container deployment, use the [Docker operations guide](./docker/README.md).
+For container deployment, use the [Docker operations guide](./docker/README.md)
+and download the offline image parts from the
+[GitHub Release](https://github.com/xia13111-coder/hunyuan_creation_pipeline/releases/tag/docker-isaac-6.0.1).
 The current full-image acceptance target is Isaac Sim 6.0.1; the guide covers
-offline tar export/import, Hub/cache mounts, CLI and API operation, and validation.
+part verification and loading, Hub/cache mounts, CLI and API operation, and validation.
 
 ## Code Layout
 

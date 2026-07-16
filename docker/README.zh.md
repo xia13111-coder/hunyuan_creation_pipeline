@@ -12,19 +12,24 @@ HTTP API。本指南从目标机器已经拿到离线 tar 开始，依次完成�
 
 ## 1. 准备 tar 和目标机器
 
-把下面两个文件放到目标机器的任意同一目录，并在该目录打开终端：
+从 [Docker Offline Bundle - Isaac Sim 6.0.1](https://github.com/xia13111-coder/hunyuan_creation_pipeline/releases/tag/docker-isaac-6.0.1)
+下载全部 17 个 `tar.part-*` 分卷和校验文件，并放到目标机器的同一目录：
 
-- `hunyuan-pipeline-isaac-6.0.1-offline.tar`
-- `hunyuan-pipeline-isaac-6.0.1-offline.tar.sha256`
+- `hunyuan-pipeline-isaac-6.0.1-offline.tar.part-001` 到 `part-017`
+- `hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256`
+
+GitHub Release 的单附件不能超过 2 GiB，因此离线 tar 以 1900 MiB 分卷发布。这些
+分卷按文件名顺序拼接后就是标准 `docker save` tar，不是 17 个独立镜像。
 
 当前离线包信息：
 
 | 项目 | 值 |
 | --- | --- |
-| 文件大小 | `32,746,605,056` 字节，约 30.5 GiB |
-| SHA-256 | `9cd3b5fc2b0aaec90ca419fa55c84e9533052aaf9a50c58f7edea209ffa50d51` |
+| 总大小 | `32,746,894,336` 字节，约 30.5 GiB |
+| 分卷 | 17 个；前 16 个为 1900 MiB，最后一个约 830 MiB |
 | 完整镜像 | `hunyuan-allinone:isaac-6.0.1` |
 | Hub 镜像 | `nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0` |
+| 腾讯云 SDK | AI3D/common `3.0.1462`，支持 Pro/Rapid 请求 |
 
 目标机器需要：
 
@@ -49,18 +54,27 @@ docker info >/dev/null
 ```bash
 export BUNDLE_DIR="$(pwd -P)"
 cd "$BUNDLE_DIR"
-ls -lh hunyuan-pipeline-isaac-6.0.1-offline.tar*
+ls -lh hunyuan-pipeline-isaac-6.0.1-offline.tar.part-*
 ```
 
-先校验文件，必须显示 `OK`：
+先校验全部分卷，17 项都必须显示 `OK`：
 
 ```bash
-sha256sum -c hunyuan-pipeline-isaac-6.0.1-offline.tar.sha256
+sha256sum -c hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
 ```
 
-如果提示 `FAILED`，不要执行 `docker load`，应重新复制 tar。校验通过后导入：
+如果任何一项提示 `FAILED`，不要执行 `docker load`，应重新下载对应分卷。校验通过后，
+可以直接拼接到 `docker load`，不额外占用一个完整 tar 的磁盘空间：
 
 ```bash
+cat hunyuan-pipeline-isaac-6.0.1-offline.tar.part-* | docker load
+```
+
+如需得到单个 tar 文件用于移动硬盘分发，可以先合并再导入：
+
+```bash
+cat hunyuan-pipeline-isaac-6.0.1-offline.tar.part-* \
+  > hunyuan-pipeline-isaac-6.0.1-offline.tar
 docker load -i hunyuan-pipeline-isaac-6.0.1-offline.tar
 ```
 
@@ -84,7 +98,7 @@ docker run --rm --gpus all \
   hunyuan-allinone:isaac-6.0.1
 ```
 
-离线 tar 是重新部署到其他电脑时使用的安装包，建议和 `.sha256` 文件一起长期保留。
+离线分卷是重新部署到其他电脑时使用的安装包，建议和校验文件一起长期保留。
 只有确认存在另一份已校验备份时，才考虑删除当前副本。
 
 ## 3. 在目标机器准备目录
@@ -340,15 +354,17 @@ docker rm hunyuan-pipeline-601
 export PROJECT_ROOT="$(pwd -P)"
 export IMAGE_BUNDLE_DIR="${IMAGE_BUNDLE_DIR:-$PROJECT_ROOT/docker/offline-images}"
 mkdir -p "$IMAGE_BUNDLE_DIR"
+set -o pipefail
 
 docker save \
-  -o "$IMAGE_BUNDLE_DIR/hunyuan-pipeline-isaac-6.0.1-offline.tar" \
   hunyuan-allinone:isaac-6.0.1 \
-  nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0
+  nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0 \
+  | split --bytes=1900M --numeric-suffixes=1 --suffix-length=3 - \
+      "$IMAGE_BUNDLE_DIR/hunyuan-pipeline-isaac-6.0.1-offline.tar.part-"
 
 cd "$IMAGE_BUNDLE_DIR"
-sha256sum hunyuan-pipeline-isaac-6.0.1-offline.tar \
-  > hunyuan-pipeline-isaac-6.0.1-offline.tar.sha256
+sha256sum hunyuan-pipeline-isaac-6.0.1-offline.tar.part-* \
+  > hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
 ```
 
 离线包不需要额外包含 `nvcr.io/nvidia/isaac-sim:6.0.1` 或
@@ -368,6 +384,7 @@ curl --noproxy '*' --fail http://127.0.0.1:8000/health
 
 ### Hunyuan Pro/Rapid SDK 兼容修复
 
+GitHub Release `docker-isaac-6.0.1` 已包含 AI3D/common `3.0.1462`，不需要执行本节。
 早期离线 tar 内含 `tencentcloud-sdk-python-ai3d==3.0.1424` 和
 `tencentcloud-sdk-python-common==3.0.1443`，但当前代码使用 Pro/Rapid 接口。如果日志出现
 `models has no attribute SubmitHunyuanTo3DProJobRequest`，在现有容器中执行一次：
