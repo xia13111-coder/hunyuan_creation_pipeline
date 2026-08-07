@@ -2,33 +2,24 @@
 
 [English](./README.md) | [中文](./README.zh.md) | [Project README](../README.md)
 
-The full image contains `hunyuan_sam3d`, Blender 4.5.0, Isaac Sim 6.0.1, the
-pipeline CLI, and the HTTP API. This guide starts after the offline tar has
-arrived on the target and covers verification, loading, configuration, startup,
-and pipeline operation. The target does not rebuild or log in to NGC.
+The offline image contains the pipeline runtime, shared visual-model
+dependencies, Blender 4.5.0, Isaac Sim 6.0.1, the CLI, and the HTTP API. The
+separate Qwen3.5 runtime, model weights, NVIDIA Base observation bank, and
+NVIDIA Materials remain host mounts. Paths under `/workspace`, `/isaac-sim`, `/opt/blender`, and
+`/home/pipeline` are container paths and do not change between hosts.
 
-No host username, disk mount point, or checkout location is hard-coded below.
-Host directories are derived from the current project directory. Paths beginning
-with `/workspace`, `/isaac-sim`, `/opt/blender`, or `/home/pipeline` are fixed
-paths inside the image and do not change when the bundle moves to another
-computer.
+## 1. Load the offline bundle
 
-## 1. Prepare the Tar and Target
+Download all 17 parts and the checksum manifest from
+[Docker Offline Bundle - Isaac Sim 6.0.1](https://github.com/xia13111-coder/hunyuan_creation_pipeline/releases/tag/docker-isaac-6.0.1):
 
-Download all 17 `tar.part-*` files and the checksum manifest from
-[Docker Offline Bundle - Isaac Sim 6.0.1](https://github.com/xia13111-coder/hunyuan_creation_pipeline/releases/tag/docker-isaac-6.0.1),
-then place them together in any directory on the target:
+```text
+hunyuan-pipeline-isaac-6.0.1-offline.tar.part-000 ... part-016
+hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
+```
 
-- `hunyuan-pipeline-isaac-6.0.1-offline.tar.part-001` through `part-017`
-- `hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256`
-
-GitHub Release assets must each remain under 2 GiB, so the offline tar is
-published in 1900 MiB parts. Concatenating them in filename order recreates one
-standard `docker save` tar; they are not 17 independent images.
-
-Download each asset in a browser signed in to an authorized GitHub account. To
-download all assets at once, install [GitHub CLI](https://cli.github.com/) on the
-target and run:
+The repository may require an authorized GitHub account. To download with the
+[GitHub CLI](https://cli.github.com/):
 
 ```bash
 mkdir -p hunyuan-docker-bundle
@@ -39,101 +30,45 @@ gh release download docker-isaac-6.0.1 \
   --pattern 'hunyuan-pipeline-isaac-6.0.1-offline.*'
 ```
 
-When the repository is private, the downloader must have repository access;
-anonymous release links return `404`.
-
-Current bundle information:
+Bundle details:
 
 | Item | Value |
 | --- | --- |
-| Total size | `32,746,894,336` bytes, approximately 30.5 GiB |
-| Parts | 17; the first 16 are 1900 MiB and the last is approximately 830 MiB |
-| Full image | `hunyuan-allinone:isaac-6.0.1` |
+| Total size | `32,108,196,352` bytes (about 29.9 GiB) |
+| Parts | 17; 1900 MiB each except the final part |
+| Full image | `hunyuan-allinone:isaac-6.0.1-materials` |
+| Full image ID | `sha256:913fe7c41298e99ec12701afdecc4a784f2e3f07b534c1b0bc9db77099f86855` |
 | Hub image | `nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0` |
-| Tencent SDK | AI3D/common `3.0.1462` with Pro/Rapid request support |
+| Tencent SDK | AI3D/common `3.0.1462` |
 
-The target requires:
-
-- Linux and an RTX-capable NVIDIA GPU
-- Docker Engine
-- NVIDIA Container Toolkit
-- `acl` installed (`setfacl` is used for shared asset-directory permissions)
-- At least 40 GB for the tar, plus Docker image and cache space; keep at least
-  80 GB free while loading when the tar and Docker data root share a filesystem
-- A project checkout, mounted read-only for current source and configuration
+The host needs Linux, an RTX-capable NVIDIA GPU, Docker Engine, NVIDIA Container
+Toolkit, `acl`, and enough disk space. Keep at least 80 GB free when the bundle
+and Docker data root share a filesystem.
 
 ```bash
 nvidia-smi
 docker --version
 docker info >/dev/null
-```
-
-## 2. Verify and Load the Tar
-
-Run this from the bundle directory:
-
-```bash
-export BUNDLE_DIR="$(pwd -P)"
-cd "$BUNDLE_DIR"
-ls -lh hunyuan-pipeline-isaac-6.0.1-offline.tar.part-*
-```
-
-Verify every part first; all 17 results must be `OK`:
-
-```bash
 sha256sum -c hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
-```
-
-If any part reports `FAILED`, download that part again and do not run
-`docker load`. After a successful checksum, concatenate directly into
-`docker load` without allocating another full tar on disk:
-
-```bash
 cat hunyuan-pipeline-isaac-6.0.1-offline.tar.part-* | docker load
 ```
 
-To create one tar for external-drive distribution, merge it first:
+Do not load the bundle if any checksum fails. Verify the images and GPU access:
 
 ```bash
-cat hunyuan-pipeline-isaac-6.0.1-offline.tar.part-* \
-  > hunyuan-pipeline-isaac-6.0.1-offline.tar
-docker load -i hunyuan-pipeline-isaac-6.0.1-offline.tar
-```
-
-Expected output includes:
-
-```text
-Loaded image: nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0
-Loaded image: hunyuan-allinone:isaac-6.0.1
-```
-
-Check both tags and container GPU access:
-
-```bash
-docker image inspect hunyuan-allinone:isaac-6.0.1 \
+docker image inspect hunyuan-allinone:isaac-6.0.1-materials \
   --format '{{index .RepoTags 0}} {{.Id}}'
 docker image inspect nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0 \
   --format '{{index .RepoTags 0}} {{.Id}}'
-
-docker run --rm --gpus all \
-  --entrypoint nvidia-smi \
-  hunyuan-allinone:isaac-6.0.1
+docker run --rm --gpus all --entrypoint nvidia-smi \
+  hunyuan-allinone:isaac-6.0.1-materials
 ```
 
-Keep the offline parts and checksum manifest as the reusable installer for other
-computers. Delete this copy only when another verified backup exists.
+Keep the checksum manifest with any archived copy of the bundle.
 
-## 3. Prepare Target Directories
+## 2. Prepare host directories
 
-The tar contains Docker images only. Also prepare:
-
-- Current project source and configuration; the run command mounts it read-only.
-- Complete `tools/sam3d/third_party/` when SAM3D is used.
-- Hugging Face and Torch Hub model caches for offline SAM3D.
-- Inputs, runtime credentials, and output directories.
-
-Targets that do not run SAM3D do not need its `third_party` or model caches.
-Enter the project root first, then run:
+Run from the project root:
 
 ```bash
 export PROJECT_ROOT="$(pwd -P)"
@@ -144,98 +79,93 @@ export MODEL_CACHE_ROOT="${MODEL_CACHE_ROOT:-$RUNTIME_ROOT/model-cache}"
 
 mkdir -p "$ASSET_ROOT"/{input,sam3d-visualization}
 mkdir -p "$ISAAC_CACHE_ROOT"/{cache/main,cache/computecache,config,data,logs,pkg}
-mkdir -p "$MODEL_CACHE_ROOT"/{ov-hub,huggingface,torch-hub}
+mkdir -p "$MODEL_CACHE_ROOT"/{ov-hub,huggingface,torch-hub,models,mvinverse,nvidia-materials,retrieval,nvidia_base_observation_bank_v1}
 ```
 
-`PROJECT_ROOT` must be the current project root. Other directories default to
-`./docker/runtime/`; set the corresponding environment variable before running
-the block to place one on another disk. `pwd -P` supplies the explicit host path
-required by Docker bind mounts without depending on a particular username or
-directory layout.
-
-| Host variable | Default location | Purpose |
+| Variable | Default | Purpose |
 | --- | --- | --- |
-| `PROJECT_ROOT` | Current project directory | Read-only source and configuration |
-| `ASSET_ROOT` | `./docker/runtime/assets` | Inputs, outputs, and SAM3D visualization |
-| `ISAAC_CACHE_ROOT` | `./docker/runtime/isaac-sim-6.0.1` | Writable Isaac Sim caches |
-| `MODEL_CACHE_ROOT` | `./docker/runtime/model-cache` | Hub, Hugging Face, and Torch Hub caches |
+| `PROJECT_ROOT` | Current directory | Read-only source and configuration |
+| `ASSET_ROOT` | `docker/runtime/assets` | Inputs and outputs |
+| `ISAAC_CACHE_ROOT` | `docker/runtime/isaac-sim-6.0.1` | Writable Isaac Sim caches |
+| `MODEL_CACHE_ROOT` | `docker/runtime/model-cache` | Model and Hub caches |
 
-For offline SAM3D, place the prepared Hugging Face and Torch Hub cache contents
-under `$MODEL_CACHE_ROOT/huggingface` and `$MODEL_CACHE_ROOT/torch-hub`.
-
-The full image runs as `1234:1234`. Keep the asset directory owned by the host
-user and grant container UID 1234 access through ACLs, so the host can add inputs
-while the container creates outputs. Isaac and Hub caches belong to the container.
+SAM3D additionally needs `tools/sam3d/third_party/` and populated Hugging Face
+and Torch Hub caches. The image runs as UID/GID `1234:1234`; grant it access to
+writable mounts:
 
 ```bash
 command -v setfacl >/dev/null || sudo apt-get install -y acl
-
 sudo chown -R "$(id -u):$(id -g)" "$ASSET_ROOT"
-sudo chown -R 1234:1234 "$ISAAC_CACHE_ROOT" "$MODEL_CACHE_ROOT/ov-hub"
-
+sudo chown -R 1234:1234 \
+  "$ISAAC_CACHE_ROOT" "$MODEL_CACHE_ROOT/ov-hub" "$MODEL_CACHE_ROOT/retrieval"
 find "$ASSET_ROOT" -type d -exec setfacl \
   -m "u:$(id -u):rwx,u:1234:rwx,d:u:$(id -u):rwx,d:u:1234:rwx" {} +
 find "$ASSET_ROOT" -type f -exec setfacl \
   -m "u:$(id -u):rw-,u:1234:rw-" {} +
 ```
 
-The source checkout is mounted read-only. Put inputs in `$ASSET_ROOT/input`; all
-outputs remain under `$ASSET_ROOT`. Hugging Face and Torch Hub caches are reused
-read-only.
+Put inputs in `$ASSET_ROOT/input`. Source, model weights, the observation bank,
+and NVIDIA Materials are mounted read-only. Outputs and the Isaac, Hub, and
+visual-retrieval caches are writable.
 
-## 4. Runtime Environment
+## 3. Configure and start
 
-Create the runtime file, restrict its permissions, and open it in an editor:
+Create the local credential file:
 
 ```bash
-touch docker/.env.runtime
+cp docker/env.runtime.example docker/.env.runtime
 chmod 600 docker/.env.runtime
 ${EDITOR:-nano} docker/.env.runtime
 ```
 
-Enter the following content in the editor. Do not paste this `dotenv` block into
-the shell one line at a time:
+Do not commit `.env.runtime`. Tencent credentials are required for Hunyuan and
+refine jobs, but not for manual STEP/STP or existing GLB jobs with
+`--skip-refine`.
 
-```dotenv
-ACCEPT_EULA=Y
-PRIVACY_CONSENT=Y
-REFINE_MESH_TEMP_UPLOAD=uguu
-PIPELINE_MAX_WORKERS=1
-PIPELINE_MAX_LOG_LINES=2000
-
-# Add these for Hunyuan generation or refine:
-# TENCENTCLOUD_SECRET_ID=your-secret-id
-# TENCENTCLOUD_SECRET_KEY=your-secret-key
-```
-
-Manual STEP/STP and existing GLB jobs with `--skip-refine` do not need Tencent
-credentials. Hunyuan generation, SAM3D's following refine stage, and default GLB
-refine do require them.
-
-## 5. Start Hub
-
-If the target already has an `isaac-hub-cache` container, start it:
+Start the Isaac Hub cache. Create the container only if it does not exist:
 
 ```bash
-docker start isaac-hub-cache
-docker ps --filter name=isaac-hub-cache
-```
-
-If the container does not exist but the Hub image is local, create it once:
-
-```bash
-docker run --name isaac-hub-cache \
-  --restart unless-stopped \
-  --network=host \
-  -u 1234:1234 \
+docker start isaac-hub-cache 2>/dev/null || docker run --name isaac-hub-cache \
+  --restart unless-stopped --network=host -u 1234:1234 \
   -v "$MODEL_CACHE_ROOT/ov-hub:/var/cache/hub:rw" \
   -d nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0
 ```
 
-Keep Hub running before Isaac Sim 6.0.1 starts. Without it, `SimulationApp` may
-exit or segfault.
+Isaac Sim can exit or segfault when Hub is unavailable.
 
-## 6. Start the Full Container
+Set the model, observation-bank, cache, and material paths. When
+`ASSET_MODEL_VOLUME="$MODEL_CACHE_ROOT"` is set, the Qwen3.5 setup script creates
+the `env/` and `model/` directories under this runtime root. The runtime is
+mounted at the same absolute path so its Python environment keeps its original
+prefix.
+
+```bash
+export QWEN35_RUNTIME_DIR="${QWEN35_RUNTIME_DIR:-$MODEL_CACHE_ROOT/qwen35_4b_runtime}"
+export QWEN35_PYTHON="${QWEN35_PYTHON:-$QWEN35_RUNTIME_DIR/env/bin/python}"
+export QWEN35_MODEL_DIR="${QWEN35_MODEL_DIR:-$QWEN35_RUNTIME_DIR/model}"
+export SIGLIP2_MODEL_DIR="${SIGLIP2_MODEL_DIR:-$MODEL_CACHE_ROOT/models/siglip2-base-patch16-224}"
+export DINOV2_MODEL_DIR="${DINOV2_MODEL_DIR:-$MODEL_CACHE_ROOT/models/dinov2-with-registers-large}"
+export MVINVERSE_MODEL_DIR="${MVINVERSE_MODEL_DIR:-$MODEL_CACHE_ROOT/mvinverse/model}"
+export NVIDIA_MATERIAL_DIR="${NVIDIA_MATERIAL_DIR:-$MODEL_CACHE_ROOT/nvidia-materials}"
+export NVIDIA_BASE_BANK_DIR="${NVIDIA_BASE_BANK_DIR:-$MODEL_CACHE_ROOT/nvidia_base_observation_bank_v1}"
+export VISUAL_RETRIEVAL_CACHE_DIR="${VISUAL_RETRIEVAL_CACHE_DIR:-$MODEL_CACHE_ROOT/retrieval}"
+
+test -x "$QWEN35_PYTHON"
+test -f "$QWEN35_MODEL_DIR/config.json"
+test -f "$SIGLIP2_MODEL_DIR/config.json"
+test -f "$DINOV2_MODEL_DIR/config.json"
+test -f "$MVINVERSE_MODEL_DIR/config.json"
+test -d "$NVIDIA_MATERIAL_DIR/Base"
+test -f "$NVIDIA_BASE_BANK_DIR/index_manifest.json"
+test -d "$VISUAL_RETRIEVAL_CACHE_DIR"
+```
+
+The observation bank records the material-root and retrieval-model identities
+used when it was built. Build it against the same container destinations shown
+below; a bank created against different host paths is rejected rather than
+silently reused.
+
+Start the pipeline container:
 
 ```bash
 docker run --name hunyuan-pipeline-601 \
@@ -255,33 +185,43 @@ docker run --name hunyuan-pipeline-601 \
   -v "$MODEL_CACHE_ROOT/ov-hub:/var/cache/hub:rw" \
   -v "$MODEL_CACHE_ROOT/huggingface:/home/pipeline/.cache/huggingface:ro" \
   -v "$MODEL_CACHE_ROOT/torch-hub:/home/pipeline/.cache/torch/hub:ro" \
-  -d hunyuan-allinone:isaac-6.0.1
+  -v "$QWEN35_RUNTIME_DIR:$QWEN35_RUNTIME_DIR:ro" \
+  -e QWEN35_PYTHON="$QWEN35_PYTHON" \
+  -e QWEN35_MODEL_PATH="$QWEN35_MODEL_DIR" \
+  -v "$SIGLIP2_MODEL_DIR:/workspace/models/siglip2:ro" \
+  -e SIGLIP2_MODEL_PATH=/workspace/models/siglip2 \
+  -v "$DINOV2_MODEL_DIR:/workspace/models/dinov2:ro" \
+  -e DINOV2_MODEL_PATH=/workspace/models/dinov2 \
+  -v "$MVINVERSE_MODEL_DIR:/workspace/hunyuan3.0_assets_creation/tools/qwen_material_pipeline/models/mvinverse/model:ro" \
+  -v "$NVIDIA_MATERIAL_DIR:/workspace/materials/nvidia:ro" \
+  -e VISUAL_MATERIAL_ROOT=/workspace/materials/nvidia \
+  -v "$NVIDIA_BASE_BANK_DIR:/workspace/models/nvidia_base_observation_bank_v1:ro" \
+  -e NVIDIA_BASE_OBSERVATION_BANK=/workspace/models/nvidia_base_observation_bank_v1 \
+  -v "$VISUAL_RETRIEVAL_CACHE_DIR:/workspace/cache/visual-retrieval:rw" \
+  -e VISUAL_RETRIEVAL_CACHE=/workspace/cache/visual-retrieval \
+  -d hunyuan-allinone:isaac-6.0.1-materials
 ```
 
-On each `-v` option, variables such as `$PROJECT_ROOT` and `$ASSET_ROOT` are
-dynamic target-host paths. Paths after the colon, including `/workspace` and
-`/isaac-sim`, are internal container paths. On another computer, rerun the
-variable block in section 3 and leave the container paths unchanged.
-
-The container starts the HTTP API. Host networking is required for Hub, so no
-port mapping is needed; the API is at `http://127.0.0.1:8000`.
+In every `-v` argument, the path before `:` is on the host and the path after it
+is inside the container. The API uses host networking and listens at
+`http://127.0.0.1:8000`.
 
 ```bash
-docker ps --filter name=hunyuan-pipeline-601
 docker logs --tail 100 hunyuan-pipeline-601
-curl --noproxy '*' http://127.0.0.1:8000/health
+curl --noproxy '*' --fail http://127.0.0.1:8000/health
+docker exec hunyuan-pipeline-601 qwen-material base-bank verify \
+  --material-root /workspace/materials/nvidia/Base \
+  --output-dir /workspace/models/nvidia_base_observation_bank_v1
 ```
 
-The first Isaac job may take several minutes to initialize plugins and GPU
-caches.
+The first Isaac job can take several minutes while caches are initialized.
 
-## 7. Run Pipeline CLI Jobs
+## 4. Run CLI jobs
 
-Use internal container paths under `/workspace/assets` in CLI arguments, not
-paths from the target host. Do not run an API job and a CLI job concurrently on
-the same GPU.
+Use container paths under `/workspace/assets`. Do not run API and CLI jobs on the
+same GPU at the same time.
 
-### Existing GLB
+Existing GLB:
 
 ```bash
 docker exec hunyuan-pipeline-601 python run_asset_pipeline.py \
@@ -291,13 +231,12 @@ docker exec hunyuan-pipeline-601 python run_asset_pipeline.py \
   --final-output-dir /workspace/assets/glb/final \
   --result-json /workspace/assets/glb/result.json \
   --len-x 0.4 --len-y 0.3 --len-z 0.8 \
-  --orientation "X=L,Y=M,Z=S" \
-  --material plastic --approx sdf
+  --orientation "X=L,Y=M,Z=S" --material plastic --approx sdf
 ```
 
-Add `--skip-refine` when refine is not needed.
+Add `--skip-refine` when refinement is not required.
 
-### Manual STEP/STP
+Manual STEP/STP without automatic visual materials:
 
 ```bash
 docker exec hunyuan-pipeline-601 python run_asset_pipeline.py \
@@ -306,81 +245,72 @@ docker exec hunyuan-pipeline-601 python run_asset_pipeline.py \
   --intermediate-output-dir /workspace/assets/manual/intermediate \
   --final-output-dir /workspace/assets/manual/final \
   --result-json /workspace/assets/manual/result.json \
-  --material steel \
-  --approx sdf \
-  --manual-sdf-resolution 32
+  --material steel --approx sdf --manual-sdf-resolution 32
 ```
 
-### SAM3D Images
+SAM3D images:
 
 ```bash
 docker exec hunyuan-pipeline-601 python run_asset_pipeline.py \
   --sam3d-input /workspace/assets/input/sam3d_images \
-  --sam3d-mode auto \
-  --sam3d-prompt "goods shelves" \
+  --sam3d-mode auto --sam3d-prompt "storage shelves" \
   --output-dir /workspace/assets/sam3d/work \
   --refine-config-path configs/hunyuan_reduce_local_postprocess.yaml \
   --intermediate-output-dir /workspace/assets/sam3d/intermediate \
   --final-output-dir /workspace/assets/sam3d/final \
   --result-json /workspace/assets/sam3d/result.json \
   --len-x 0.4 --len-y 0.3 --len-z 0.8 \
-  --orientation "X=L,Y=M,Z=S" \
-  --material plastic --approx sdf
+  --orientation "X=L,Y=M,Z=S" --material plastic --approx sdf
 ```
 
-See the [project README](../README.md) for Hunyuan commands and the
-[module documentation](../docs/README.md) for SAM3D, refine, CAD, and physics
-parameters.
+See the [project README](../README.md) and [module index](../docs/README.md) for
+other inputs and parameters.
 
-## 8. HTTP API
+## 5. HTTP API and maintenance
 
-The API currently supports Hunyuan generation and existing-GLB processing. Use
-the CLI above for SAM3D images and STEP/STP.
+The API supports Hunyuan, existing GLB, and manual STEP/STP jobs. Use the CLI for
+SAM3D images. Automatic visual materials require Qwen3.5, SAM3, MVInverse,
+SigLIP2, DINOv2, the Base observation bank, and NVIDIA Materials. Project-local
+SAM3 and MVInverse code is supplied by the read-only source mount; the remaining
+runtime paths are configured above.
 
 ```bash
-# Health and Tencent credential status
 curl --noproxy '*' http://127.0.0.1:8000/health
 curl --noproxy '*' http://127.0.0.1:8000/credentials/tencent-cloud
-
-# Jobs and logs
 curl --noproxy '*' http://127.0.0.1:8000/jobs
 curl --noproxy '*' http://127.0.0.1:8000/jobs/<job_id>
 curl --noproxy '*' 'http://127.0.0.1:8000/jobs/<job_id>/logs?tail=200'
 ```
 
-See the [HTTP API guide](../docs/modules/api.md) for request examples and fields.
-Jobs live in process memory and disappear after a container restart.
-
-## 9. Container Maintenance
+Jobs are kept in process memory and disappear after restart. See the
+[HTTP API guide](../docs/modules/api.md) for request bodies.
 
 ```bash
-# Logs and shell
 docker logs -f --tail 200 hunyuan-pipeline-601
 docker exec -it hunyuan-pipeline-601 bash
-
-# Stop, start, restart, and inspect health
 docker stop hunyuan-pipeline-601
 docker start hunyuan-pipeline-601
 docker restart hunyuan-pipeline-601
 docker inspect hunyuan-pipeline-601 --format '{{json .State.Health}}'
 ```
 
-The source is bind-mounted read-only. New CLI processes see host source changes
-immediately; restart the container for the API to reload them. Rebuild only when
-`environment.yml`, a Dockerfile, Blender, or the Isaac Sim version changes.
+New CLI processes see changes in the source mount immediately; restart the
+container for the API to reload them. Rebuild only after dependency, Dockerfile,
+Blender, or Isaac Sim changes.
 
-Recreating the container does not delete host assets or caches:
+## 6. Build or publish images
+
+The current bundle needs no target-side build. If only the older
+`hunyuan-allinone:isaac-6.0.1` base is available, build the visual-material layer:
 
 ```bash
-docker stop hunyuan-pipeline-601
-docker rm hunyuan-pipeline-601
-# Rerun the docker run command in section 6.
+DOCKER_BUILDKIT=1 docker build \
+  -f docker/Dockerfile.visual-materials \
+  -t hunyuan-allinone:isaac-6.0.1-materials .
 ```
 
-## 10. Appendix: Create the Tar on the Source
-
-The target does not run this section. Run it only on the source machine when
-publishing a new image:
+To publish a new complete bundle, build from the current clean source tree and
+split the two runtime images:
 
 ```bash
 export PROJECT_ROOT="$(pwd -P)"
@@ -388,10 +318,14 @@ export IMAGE_BUNDLE_DIR="${IMAGE_BUNDLE_DIR:-$PROJECT_ROOT/docker/offline-images
 mkdir -p "$IMAGE_BUNDLE_DIR"
 set -o pipefail
 
+DOCKER_BUILDKIT=1 docker build \
+  -f docker/Dockerfile.full \
+  -t hunyuan-allinone:isaac-6.0.1-materials .
+
 docker save \
-  hunyuan-allinone:isaac-6.0.1 \
+  hunyuan-allinone:isaac-6.0.1-materials \
   nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0 \
-  | split --bytes=1900M --numeric-suffixes=1 --suffix-length=3 - \
+  | split --bytes=1900M --numeric-suffixes=0 --suffix-length=3 - \
       "$IMAGE_BUNDLE_DIR/hunyuan-pipeline-isaac-6.0.1-offline.tar.part-"
 
 cd "$IMAGE_BUNDLE_DIR"
@@ -399,12 +333,11 @@ sha256sum hunyuan-pipeline-isaac-6.0.1-offline.tar.part-* \
   > hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
 ```
 
-Do not add `nvcr.io/nvidia/isaac-sim:6.0.1` or
-`hunyuan-sam3d-env:latest`; the full image already contains their runtime layers.
+Do not add build-stage images to the bundle. Do not run `apt upgrade` in the
+final `Dockerfile.full` stage; replacing libc from the Isaac image can break
+Vulkan initialization.
 
-## 11. Acceptance and Troubleshooting
-
-Run basic acceptance checks after loading and starting the container:
+## 7. Acceptance and troubleshooting
 
 ```bash
 docker exec hunyuan-pipeline-601 python -m unittest discover -s tests -v
@@ -414,15 +347,9 @@ docker exec hunyuan-pipeline-601 /isaac-sim/python.sh -c \
 curl --noproxy '*' --fail http://127.0.0.1:8000/health
 ```
 
-### Hunyuan Pro/Rapid SDK Compatibility
-
-GitHub Release `docker-isaac-6.0.1` already contains AI3D/common `3.0.1462`, so
-this section is unnecessary for that bundle. The earlier offline tar contains
-`tencentcloud-sdk-python-ai3d==3.0.1424` and
-`tencentcloud-sdk-python-common==3.0.1443`, while the current code uses the
-Pro/Rapid APIs. If the log reports
-`models has no attribute SubmitHunyuanTo3DProJobRequest`, run once in the current
-container:
+The current release contains Tencent AI3D/common `3.0.1462`. For an older image
+that reports `models has no attribute SubmitHunyuanTo3DProJobRequest`, upgrade
+both packages together, then restart the container:
 
 ```bash
 docker exec -u 0 hunyuan-pipeline-601 \
@@ -430,64 +357,20 @@ docker exec -u 0 hunyuan-pipeline-601 \
   --no-cache-dir --no-deps --upgrade \
   tencentcloud-sdk-python-ai3d==3.0.1462 \
   tencentcloud-sdk-python-common==3.0.1462
-```
-
-Verify both versions and all four request classes:
-
-```bash
-docker exec hunyuan-pipeline-601 python -c '
-import importlib.metadata as metadata
-from tencentcloud.ai3d.v20250513 import models
-print("ai3d", metadata.version("tencentcloud-sdk-python-ai3d"))
-print("common", metadata.version("tencentcloud-sdk-python-common"))
-for name in (
-    "SubmitHunyuanTo3DProJobRequest", "QueryHunyuanTo3DProJobRequest",
-    "SubmitHunyuanTo3DRapidJobRequest", "QueryHunyuanTo3DRapidJobRequest",
-):
-    print(name, hasattr(models, name))
-'
-```
-
-Both versions must be `3.0.1462`, and all four checks must be `True`. Restart the
-container and wait for it to become healthy:
-
-```bash
 docker restart hunyuan-pipeline-601
-until [ "$(docker inspect hunyuan-pipeline-601 \
-  --format '{{.State.Health.Status}}')" = healthy ]; do sleep 2; done
-curl --noproxy '*' --fail http://127.0.0.1:8000/health
 ```
 
-Optionally remove empty output from the failed attempt before rerunning the same
-pipeline command:
-
-```bash
-docker exec hunyuan-pipeline-601 rm -rf \
-  /workspace/assets/hunyuan/downloads \
-  /workspace/assets/hunyuan/intermediate \
-  /workspace/assets/hunyuan/final \
-  /workspace/assets/hunyuan/result.json
-```
-
-This repair lives only in the current container's writable layer and must be
-repeated after recreating a container from the old tar. The project
-`environment.yml` now pins both AI3D and common to `3.0.1462`; rebuild the image
-and create a new tar for a permanent fix. Do not use `docker commit` on a running
-container that carries Tencent credentials, because they can enter image
-configuration metadata.
+This repair is lost when an old container is recreated. Rebuild from the current
+source for a permanent fix; do not `docker commit` a container carrying secrets.
 
 | Problem | Action |
 | --- | --- |
-| The host cannot write `$ASSET_ROOT` | Repeat the owner and ACL commands in section 3 so both the host UID and container UID 1234 have access. |
-| Container cache `Permission denied` | Ensure UID 1234 can write `$ISAAC_CACHE_ROOT` and `$MODEL_CACHE_ROOT/ov-hub`. |
-| `SimulationApp` exits or segfaults | Confirm `isaac-hub-cache` runs with host networking. |
-| SAM3D module or weights are missing | Check the host `tools/sam3d/third_party/` directory. |
-| SAM3D native extension fails | Its CUDA, PyTorch, Python, and system ABI must match the image. |
-| `SubmitHunyuanTo3DProJobRequest` is missing | Apply the SDK compatibility procedure above to upgrade AI3D and common together. |
-| Hunyuan/refine credentials are missing | Update `docker/.env.runtime` and restart the container. |
-| API is unreachable | Check logs, health, and whether host port 8000 is already used. |
-| Disk is full | Run `docker system df`, then remove only reviewed build cache or old images. |
-
-Do not run `apt upgrade` in the final `Dockerfile.full` stage. Replacing libc
-packages pinned by the official Isaac image can cause Vulkan initialization
-crashes.
+| Host cannot write `$ASSET_ROOT` | Repeat the ACL commands in section 2. |
+| Cache reports `Permission denied` | Give UID 1234 write access to Isaac and Hub caches. |
+| `SimulationApp` exits or segfaults | Confirm `isaac-hub-cache` is running with host networking. |
+| SAM3D module or weights are missing | Check `tools/sam3d/third_party/` and model caches. |
+| SAM3D native extension fails | Match its CUDA, PyTorch, Python, and system ABI to the image. |
+| Pro/Rapid request class is missing | Upgrade both Tencent SDK packages as shown above. |
+| Hunyuan/refine credentials are missing | Update `.env.runtime` and restart. |
+| API is unreachable | Check container logs, health, and host port 8000. |
+| Disk is full | Inspect `docker system df`; remove only reviewed caches or old images. |

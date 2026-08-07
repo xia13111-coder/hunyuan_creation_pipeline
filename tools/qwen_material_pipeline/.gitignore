@@ -1,0 +1,29 @@
+# Rebuildable runtime state and machine-local dependencies.
+/workspace/*
+!/workspace/.gitkeep
+/var/*
+!/var/.gitkeep
+/results/*
+!/results/README.md
+/.env
+/.venv/
+/models/
+
+# Python bytecode and tool caches.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+
+# Coverage and packaging outputs.
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/

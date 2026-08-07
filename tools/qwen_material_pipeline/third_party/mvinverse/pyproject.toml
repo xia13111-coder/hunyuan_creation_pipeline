@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mvinverse"
+version = "0.1.0"
+description = "MVInverse: Multi-view inverse rendering"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "torch",
+    "torchvision",
+    "numpy",
+    "Pillow",
+    "opencv-python",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mvinverse*"]
+exclude = ["ckpts*", "assets*", "outputs*"]

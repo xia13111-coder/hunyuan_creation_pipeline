@@ -15,18 +15,34 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from pathlib import Path
 
-import cv2
-import numpy as np
-import torch
-import trimesh
-from PIL import Image
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from asset_pipeline.local_models import (  # noqa: E402
+    configure_offline_model_environment,
+    materialize_sam3d_local_config,
+    resolve_sam3d_local_models,
+)
+from asset_pipeline.runtime import load_project_environment  # noqa: E402
+
+
+load_project_environment()
+configure_offline_model_environment()
+
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import trimesh  # noqa: E402
+from PIL import Image  # noqa: E402
+
+
 THIRD_PARTY_ROOT = Path(__file__).resolve().parent / "third_party"
 SINGLE_VIEW_ROOT = (
     Path(os.getenv("SAM3D_SINGLE_VIEW_ROOT", str(THIRD_PARTY_ROOT / "sam-3d-objects")))
@@ -43,9 +59,6 @@ MULTI_VIEW_ROOT = (
     .resolve()
 )
 
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-os.environ.setdefault("GITHUB_PROXY", "https://ghproxy.com/")
-
 # Keep the wrapper self-contained: SAM3D keeps several import roots inside the
 # checkout instead of one installable package.
 for path in (
@@ -59,17 +72,10 @@ for path in (
     sys.path.insert(0, str(path))
 
 
-def load_single_view_pipeline():
+def load_single_view_pipeline(config_path: Path):
     print(">>> Loading single-view SAM3D pipeline...")
     from inference import Inference, make_scene
 
-    config_path = (
-        SINGLE_VIEW_ROOT
-        / "checkpoints"
-        / "sam-3d-objects"
-        / "checkpoints"
-        / "pipeline.yaml"
-    )
     if not config_path.exists():
         raise FileNotFoundError(f"SAM3D pipeline config not found: {config_path}")
     return Inference(str(config_path), compile=False), make_scene
@@ -80,7 +86,7 @@ def load_rgba_mask_for_inference(path: Path):
     return image.split()[-1] if image.mode == "RGBA" else image.convert("L")
 
 
-def load_sam3_processor():
+def load_sam3_processor(confidence_threshold: float):
     try:
         from sam3.model.sam3_image_processor import Sam3Processor
         from sam3.model_builder import build_sam3_image_model
@@ -113,7 +119,7 @@ def load_sam3_processor():
         )
 
     model = build_sam3_image_model(checkpoint_path=str(checkpoint), load_from_HF=False)
-    return Sam3Processor(model), model
+    return Sam3Processor(model, confidence_threshold=confidence_threshold), model
 
 
 def save_mask_rgba(
@@ -124,12 +130,17 @@ def save_mask_rgba(
     rgba = np.zeros((image_array.shape[0], image_array.shape[1], 4), dtype=np.uint8)
     rgba[:, :, :3] = image_array[:, :, :3]
     rgba[:, :, 3] = mask_array
-    Image.fromarray(rgba, "RGBA").save(output_path)
+    Image.fromarray(rgba).save(output_path)
 
 
-def auto_segment(input_dir: Path, mode: str, prompt: str) -> list[str]:
-    print(f">>> Segmenting images with prompt: {prompt!r}")
-    processor, model = load_sam3_processor()
+def auto_segment(
+    input_dir: Path, mode: str, prompt: str, confidence_threshold: float
+) -> list[str]:
+    print(
+        f">>> Segmenting images with prompt: {prompt!r} "
+        f"(confidence threshold: {confidence_threshold:.3f})"
+    )
+    processor, model = load_sam3_processor(confidence_threshold)
     valid_names: list[str] = []
 
     def process_one(image_path: Path, mask_path: Path, segmenter) -> bool:
@@ -139,7 +150,10 @@ def auto_segment(input_dir: Path, mode: str, prompt: str) -> list[str]:
         output = segmenter.set_text_prompt(state=state, prompt=prompt)
         masks = output["masks"].cpu().numpy()
         if len(masks) == 0:
-            print(f"  [warn] No mask found for {image_path}")
+            print(
+                f"  [warn] No mask found for {image_path} at confidence "
+                f"> {confidence_threshold:.3f}"
+            )
             return False
 
         scores = output.get("scores")
@@ -160,7 +174,14 @@ def auto_segment(input_dir: Path, mode: str, prompt: str) -> list[str]:
         mask_binary = (mask > 0.5).astype(np.uint8)
         mask_path.parent.mkdir(parents=True, exist_ok=True)
         save_mask_rgba(mask_binary * 255, image_array, mask_path)
-        print(f"  [+] Mask: {mask_path}")
+        score_text = (
+            f"{float(scores[best_idx].item()):.3f}" if scores is not None else "n/a"
+        )
+        coverage = float(mask_binary.mean())
+        print(
+            f"  [+] Mask: {mask_path} | score={score_text} "
+            f"| coverage={coverage:.1%}"
+        )
         return True
 
     if mode == "single":
@@ -190,7 +211,12 @@ def auto_segment(input_dir: Path, mode: str, prompt: str) -> list[str]:
     return valid_names
 
 
-def run_single_view(input_dir: Path, seed: int, steps: int) -> None:
+def run_single_view(
+    input_dir: Path,
+    seed: int,
+    steps: int,
+    pipeline_config: Path,
+) -> None:
     image_path = input_dir / "image.png"
     mask_paths = sorted(input_dir.glob("[0-9]*.png"))
     if not image_path.exists():
@@ -198,7 +224,7 @@ def run_single_view(input_dir: Path, seed: int, steps: int) -> None:
     if not mask_paths:
         raise FileNotFoundError(f"No single-view mask files found in: {input_dir}")
 
-    pipeline, make_scene = load_single_view_pipeline()
+    pipeline, make_scene = load_single_view_pipeline(pipeline_config)
     outputs = []
     for index, mask_path in enumerate(mask_paths):
         print(f">>> Reconstructing object {index}: {mask_path}")
@@ -252,9 +278,16 @@ def find_multiview_script() -> tuple[Path, Path]:
 
 
 def run_multi_view(
-    input_dir: Path, seed: int, steps: int, valid_names: list[str]
+    input_dir: Path,
+    seed: int,
+    steps: int,
+    valid_names: list[str],
+    pipeline_config: Path,
 ) -> None:
     script, cwd = find_multiview_script()
+    launcher = Path(__file__).resolve().with_name("run_multiview_local.py")
+    if not launcher.is_file():
+        raise FileNotFoundError(f"Local multi-view launcher not found: {launcher}")
     conda_prefix = Path(sys.executable).resolve().parents[1]
     env = os.environ.copy()
     env["PYTHONNOUSERSITE"] = "1"
@@ -272,7 +305,12 @@ def run_multi_view(
     env["PYTHONPATH"] = os.pathsep.join(str(path) for path in import_roots)
     cmd = [
         sys.executable,
+        str(launcher),
+        "--vendor-script",
         str(script),
+        "--model-config",
+        str(pipeline_config),
+        "--",
         "--input_path",
         str(input_dir.resolve()),
         "--mask_prompt",
@@ -341,6 +379,12 @@ def parse_args() -> argparse.Namespace:
         "--prompt", required=True, help="SAM3 target-object segmentation prompt"
     )
     parser.add_argument(
+        "--confidence-threshold",
+        type=float,
+        default=0.5,
+        help="minimum SAM3 text-grounding confidence in [0, 1] (default: 0.5)",
+    )
+    parser.add_argument(
         "--seed", type=int, default=42, help="geometry reconstruction seed"
     )
     parser.add_argument(
@@ -353,15 +397,42 @@ def main() -> int:
     args = parse_args()
     input_dir = Path(args.input_dir).expanduser().resolve()
     try:
+        if not 0.0 <= args.confidence_threshold <= 1.0:
+            raise ValueError("--confidence-threshold must be between 0 and 1")
         if args.mode == "multi":
             find_multiview_script()
-        valid_names = auto_segment(input_dir, args.mode, args.prompt)
-        if not valid_names:
-            raise ValueError("SAM3 segmentation produced no valid masks")
-        if args.mode == "single":
-            run_single_view(input_dir, args.seed, args.steps)
-        else:
-            run_multi_view(input_dir, args.seed, args.steps, valid_names)
+        local_models = resolve_sam3d_local_models(SINGLE_VIEW_ROOT)
+        print(">>> Local-only model routing enabled")
+        for name, value in local_models.environment().items():
+            print(f"    {name}={value}")
+        with tempfile.TemporaryDirectory(
+            prefix=".sam3d_local_config_", dir=str(input_dir)
+        ) as config_dir:
+            pipeline_config = materialize_sam3d_local_config(local_models, config_dir)
+            print(f"    SAM3D_RUNTIME_CONFIG={pipeline_config}")
+            valid_names = auto_segment(
+                input_dir,
+                args.mode,
+                args.prompt,
+                args.confidence_threshold,
+            )
+            if not valid_names:
+                raise ValueError("SAM3 segmentation produced no valid masks")
+            if args.mode == "single":
+                run_single_view(
+                    input_dir,
+                    args.seed,
+                    args.steps,
+                    pipeline_config,
+                )
+            else:
+                run_multi_view(
+                    input_dir,
+                    args.seed,
+                    args.steps,
+                    valid_names,
+                    pipeline_config,
+                )
         print("SAM3D reconstruction finished.")
         return 0
     except Exception as exc:

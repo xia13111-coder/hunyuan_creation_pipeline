@@ -2,100 +2,109 @@
 
 [English](./cad.md) | [中文](./cad.zh.md) | [Documentation index](../README.md)
 
-Hand-modeled assets use STEP/STP input only. This path generates USD directly through the Isaac Sim/Omniverse CAD Converter, preserves assembly hierarchy, and avoids a Blender GLB round trip.
+The manual-CAD path accepts STEP/STP and converts it directly with the Isaac
+Sim/Omniverse CAD Converter. It preserves assembly hierarchy and does not use a
+Blender/GLB round trip.
 
-## Code And Flow
+## Code and flow
+
+| Code | Responsibility |
+| --- | --- |
+| `asset_pipeline/manual_cad.py` | Coordinate conversion, physics, optional visual materials, collection, and validation. |
+| `asset_pipeline/jobs/cad.py` | Validate STEP/STP input and run CAD Converter. |
+| `asset_pipeline/visual_materials/` | Assign reference-image materials. |
+| `asset_pipeline/jobs/isaac.py` | Prepare geometry, author PhysX data, and collect dependencies. |
+| `asset_pipeline/jobs/delivery.py` | Validate the USD after material assignment and the collected USD. |
 
 ```text
-asset_pipeline.workflows.run_stp_physics_job
--> jobs.isaac.run_cad_to_usd_job
+run_manual_cad_workflow
+-> run_cad_to_usd_job
    -> tools/isaac/convert_cad_to_usd.py
--> for each CAD USD:
-   -> tools/isaac/add_physics.py --center-origin
-   -> tools/isaac/collect_usd_flat.py
+-> run_add_physics_job(center_origin=True)
+   -> normalize units and local origins, repair winding, author collision
+-> optional run_assign_visual_materials_job
+   -> register cameras, gather Part-ID evidence, select NVIDIA Base MDLs
+-> tools/isaac/collect_usd_flat.py
+-> final structure, dependency, and render checks
 ```
+
+Older names such as `run_stp_physics_job`, `run_manual_cad_job`, and
+`asset_pipeline/jobs/material.py` remain compatibility aliases. New code should
+use `run_manual_cad_workflow` and
+`asset_pipeline.visual_materials.run_assign_visual_materials_job`.
 
 ## Command
 
+Create the SAM3 foreground annotation first as shown in the
+[Part-ID quick start](../manual-part-id-materials.md), then run:
+
 ```bash
-python ./run_asset_pipeline.py \
+hunyuan-asset-pipeline \
   --manual-stp ./input/manual_asset.stp \
-  --cad-usd-output-dir ./manual_cad_usd \
-  --intermediate-output-dir ./manual_output_intermediate \
-  --final-output-dir ./manual_output_final \
+  --cad-usd-output-dir ./outputs/manual/asset_run/cad_usd \
+  --intermediate-output-dir ./outputs/manual/asset_run/intermediate \
+  --final-output-dir ./outputs/manual/asset_run/final \
+  --auto-visual-materials \
+  --visual-reference front=./references/front.jpg \
+  --visual-reference side=./references/side.jpg \
+  --visual-reference top=./references/top.jpg \
+  --visual-reference iso=./references/iso.jpg \
+  --visual-foreground-annotations ./annotations/sam3_foreground_annotations.json \
+  --visual-material-output-dir ./outputs/manual/asset_run/visual_material \
+  --acknowledge-mvinverse-noncommercial \
+  --allow-policy-material-fallback \
   --material steel \
   --approx sdf \
   --manual-sdf-resolution 32 \
   --set-mass 30
 ```
 
-`--manual-stp` also accepts a directory. The converter recursively discovers `.stp` and `.step` files and mirrors their relative layout in the output.
+`--manual-stp` may also be a directory. The converter finds `.stp` and `.step`
+recursively and mirrors their relative paths. The Physics-only path can process
+multiple files; reference-image assignment requires exactly one CAD asset.
 
-## Options
+## Main options
 
 | Option | Meaning |
 | --- | --- |
 | `--manual-stp` | STEP/STP file or directory. |
-| `--cad-usd-output-dir` | Raw CAD Converter USD output; defaults to `<input>_cad_usd`. |
-| `--cad-converter-option KEY=VALUE` | Extra Omniverse CAD converter option; may be repeated. |
-| `--intermediate-output-dir` | Physics-authored USD output. |
-| `--final-output-dir` | Final collection directory. |
-| `--material` | Explicit physics material from `materials.json`. |
-| `--approx` | Collision approximation; `sdf` is recommended for complex dynamic CAD and automatically enables SDF remeshing on this path. |
-| `--manual-sdf-resolution` | SDF resolution for manual CAD, default `32`. Higher values preserve more collision detail but increase cooking, memory, and collision cost. |
-| `--set-mass` | Total asset mass in kilograms; volume and density are used when omitted. |
+| `--cad-usd-output-dir` | Raw CAD Converter output; default is `<input>_cad_usd`. |
+| `--cad-converter-option KEY=VALUE` | Extra converter option; repeat as needed. |
+| `--intermediate-output-dir` | USD output after physics preparation. |
+| `--final-output-dir` | Collected final asset directory. |
+| `--auto-visual-materials` | Assign materials after geometry preparation and before collection. |
+| `--visual-reference [ID=]IMAGE` | Reference image; provide 2–4 views of the same asset. |
+| `--visual-foreground-annotations` | SAM3 whole-workpiece annotation created from those images. |
+| `--visual-material-output-dir` | Material-analysis files and the USD after material assignment. |
+| `--acknowledge-mvinverse-noncommercial` | Confirm that the run complies with the MVInverse license. |
+| `--allow-policy-material-fallback` | Give unobserved or unresolved parts the configured default material. |
+| `--material` | Physics-material preset from `materials.json`. |
+| `--approx` | Collision approximation; `sdf` is recommended for complex dynamic CAD. |
+| `--manual-sdf-resolution` | Manual-CAD SDF resolution, default `32`. |
+| `--set-mass` | Total mass in kilograms; omit to estimate it from volume and density. |
 
-`--len-x/y/z` and `--orientation` are not used by the CAD path because arbitrary nonuniform scaling and bounding-box rotation would damage assembly-transform semantics.
+STEP/STP does not accept `--len-x/y/z` or `--orientation`. Arbitrary scaling or
+bounding-box rotation would change engineering dimensions and assembly
+semantics. Unit conversion and origin centering preserve both.
 
-Manual CAD no longer inherits the direct script's general SDF default of `256`; it uses `32` to prioritize real-time performance for complex assemblies. Raise it to `64`, `128`, or `256` only when thin walls, holes, or small collision features are lost. This option affects only the manual STEP/STP path and does not change the Hunyuan or SAM3D paths.
+## Processing details
 
-## USD Hierarchy
+### Geometry before visual materials
 
-The Xform/Mesh hierarchy produced by the CAD Converter is preserved. Physics preparation does not join every mesh:
+Physics geometry preparation runs before visual-material inference. Procedural
+MDLs may use object-space coordinates, so changing units or mesh-local origins
+after material selection can move or rescale a visible pattern. All material
+renders therefore use the same normalized geometry.
 
-- The top asset root remains stable.
-- Assembly child transforms are retained.
-- Instances/prototypes are deinstanced when physics processing requires it.
-- Physics materials live below the asset anchor instead of being scattered at stage root.
+Reference-image assignment handles one STEP/STP asset per run and assigns every
+Mesh. Visible parts use their own evidence; unresolved parts use the configured
+default material. See [Reference-image materials](./visual-materials.md).
 
-## Units
+### Geometry and collision
 
-The final stage uses:
-
-```text
-upAxis = Z
-metersPerUnit = 1.0
-```
-
-When the CAD Converter outputs millimeters, `normalize_stage_units_to_meters` scales mesh points, translations, pivots, and other length values into meters while preserving world appearance and assembly relationships.
-
-## World And Local Origins
-
-The physics stage uses `--center-origin`:
-
-1. Compute the complete visible world bounding-box center.
-2. Move visible descendants to the world origin while keeping the top root transform at zero.
-3. Move each mesh's points close to its local bounding-box center.
-4. Compensate with `xformOp:translate:meshLocalOrigin`, preserving visual placement.
-
-The result has zero top-level XYZ transform, geometry centered near world origin, and mesh-local points without large offsets.
-
-## Inverted Winding And PhysX
-
-STEP/STP tessellation can produce reversed faces, open shells, nonmanifold edges, or mirrored assembly transforms. These defects may remain visually hidden by double-sided rendering but fail when PhysX computes collision volume and mass:
-
-```text
-PhysX error: attachShape ... negative mass
-```
-
-Before collision cooking, the pipeline now performs the following checks:
-
-1. Normalize USD mesh orientation from `leftHanded` to `rightHanded`.
-2. Count boundary, nonmanifold, inconsistent shared, and invalid edges/faces.
-3. For a closed mesh, compute signed volume using its full world transform, including mirrored parents.
-4. Reverse all face indices when the resulting world-space volume is negative.
-5. When `--approx sdf` is requested, keep the authored approximation as `sdf` and enable `sdfEnableRemeshing` so PhysX repairs problematic tessellation before SDF cooking.
-
-The correction changes topology orientation only; it does not flatten the assembly hierarchy or change visible placement. Open and nonmanifold visual geometry is not rewritten because its outside direction is ambiguous. Repairing the STEP source is still recommended when an exact SDF collision shape is required.
-
-The requested approximation is never silently replaced. A topology warning identifies the affected mesh while SDF remeshing handles common CAD winding, self-intersection, and open-shell defects. If PhysX still reports a cooking error, the CAD source has geometry that remeshing cannot repair reliably and should be healed in the CAD authoring tool.
+CAD conversion preserves the assembly hierarchy and transforms. The physics
+stage converts units to meters, centers the visible asset with compensating
+transforms, corrects unambiguous reversed faces, and creates collision data.
+Open or nonmanifold meshes are reported rather than guessed. SDF behavior,
+resolution guidance, and repair steps are documented in
+[Physics](./physics.md).

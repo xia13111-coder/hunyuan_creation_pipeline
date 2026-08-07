@@ -1,0 +1,22 @@
+ARG BASE_IMAGE=hunyuan-allinone:isaac-6.0.1
+FROM ${BASE_IMAGE}
+
+USER root
+
+ARG MATERIAL_PIP_INDEX_URL=https://pypi.org/simple
+
+COPY requirements-visual-materials.txt /tmp/requirements-visual-materials.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    PIP_CACHE_DIR=/root/.cache/pip \
+    PIP_INDEX_URL=${MATERIAL_PIP_INDEX_URL} \
+    /opt/conda/envs/hunyuan_sam3d/bin/python -m pip install \
+        --requirement /tmp/requirements-visual-materials.txt \
+    && rm -f /tmp/requirements-visual-materials.txt
+
+ENV QWEN_PYTHON=/opt/conda/envs/hunyuan_sam3d/bin/python
+ENV MVINVERSE_PYTHON=/opt/conda/envs/hunyuan_sam3d/bin/python
+ENV QWEN_MODEL_PATH=/workspace/models/qwen/Qwen3-VL-4B-Instruct
+ENV VISUAL_MATERIAL_ROOT=/workspace/materials/nvidia
+
+USER 1234:1234

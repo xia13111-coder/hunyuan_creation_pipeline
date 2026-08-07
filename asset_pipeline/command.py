@@ -3,15 +3,35 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
+from .progress import format_subprocess_output_line
 from .runtime import root_dir
 
 
 LogCallback = Optional[Callable[[str], None]]
+
+_PYTHON_TRACEBACK_HEADER = "Traceback (most recent call last):"
+_KIT_PYTHON_STDERR_MARKER = "[py stderr]: "
+_PYTHON_EXCEPTION_TAIL_RE = re.compile(
+    r"^(?:[A-Za-z_]\w*\.)*"
+    r"(?:[A-Za-z_]\w*(?:Error|Exception)|"
+    r"SystemExit|KeyboardInterrupt|GeneratorExit|"
+    r"StopIteration|StopAsyncIteration|Warning)"
+    r"(?::(?: .*)?)?$"
+)
+
+
+def _python_stderr_payload(output_line: str) -> str:
+    """Return Python stderr content, removing Kit's structured log prefix."""
+
+    if _KIT_PYTHON_STDERR_MARKER in output_line:
+        return output_line.split(_KIT_PYTHON_STDERR_MARKER, 1)[1]
+    return output_line
 
 
 def log_message(log_cb: LogCallback, message: str) -> None:
@@ -43,8 +63,18 @@ def run_command(
     *,
     log_cb: LogCallback = None,
     env_overrides: dict[str, str] | None = None,
+    env_remove: Sequence[str] = (),
 ) -> None:
     env = os.environ.copy()
+    # A conda pipeline must not silently import packages from ~/.local.  Those
+    # user-site packages are outside the declared runtime and can shadow core
+    # dependencies (notably typing_extensions used while importing PyTorch).
+    # Keep the child environment reproducible regardless of how the invoking
+    # interactive shell was configured. Explicit stage overrides below still
+    # take precedence for a deliberately exceptional tool.
+    env["PYTHONNOUSERSITE"] = "1"
+    for name in env_remove:
+        env.pop(name, None)
     if env_overrides:
         env.update(env_overrides)
     pretty_cmd = " ".join(shlex.quote(part) for part in cmd)
@@ -73,11 +103,28 @@ def run_command(
         raise RuntimeError(f"Failed to start command: {pretty_cmd} | {exc}") from exc
 
     assert process.stdout is not None
+    traceback_started = False
+    uncaught_python_traceback = False
     for line in process.stdout:
-        log_message(log_cb, line.rstrip())
+        output_line = line.rstrip()
+        python_payload = _python_stderr_payload(output_line)
+        if python_payload == _PYTHON_TRACEBACK_HEADER:
+            traceback_started = True
+        elif (
+            traceback_started
+            and python_payload == python_payload.lstrip()
+            and _PYTHON_EXCEPTION_TAIL_RE.fullmatch(python_payload)
+        ):
+            uncaught_python_traceback = True
+        log_message(log_cb, format_subprocess_output_line(output_line))
     return_code = process.wait()
     if return_code != 0:
         raise RuntimeError(f"Command failed with exit code {return_code}: {pretty_cmd}")
+    if uncaught_python_traceback:
+        raise RuntimeError(
+            "Command reported an uncaught Python traceback despite exit code 0: "
+            f"{pretty_cmd}"
+        )
 
 
 def append_flag(args: list[str], flag: str, enabled: bool) -> None:

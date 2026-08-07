@@ -52,7 +52,12 @@ def upload_to_uguu(path: str | Path, config: dict[str, Any]) -> str:
     except urllib.error.URLError as exc:
         raise HunyuanApiError(f"Temporary upload failed: {exc}") from exc
 
-    data = json.loads(raw)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HunyuanApiError(
+            f"Temporary upload returned invalid JSON: {raw[:500]}"
+        ) from exc
     if not data.get("success") or not data.get("files"):
         raise HunyuanApiError(f"Temporary upload did not return a file URL: {raw[:500]}")
     url = data["files"][0].get("url")

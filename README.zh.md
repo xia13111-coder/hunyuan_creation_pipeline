@@ -1,210 +1,228 @@
-# Hunyuan Creation Pipeline
+# Hunyuan 资产创建流水线
 
 [English](./README.md) | [中文](./README.zh.md) | [文档索引](./docs/README.zh.md)
 
-这是一个 3D 资产生产流水线。它支持 Hunyuan 图片/文本生成、SAM 3D Objects 单图/多图重建、已有 GLB，以及手工 STEP/STP CAD；输出经过拓扑精修、坐标和尺寸处理、USD 转换及 Isaac Sim 物理挂载的资产。
+把图片、已有 GLB 或手工建模 STEP/STP 转换为 USD，并可选执行网格精修、Isaac Sim 物理
+处理和参考图驱动的 NVIDIA MDL 材质赋值。
 
-## 模块
+## 支持流程
 
-| 模块 | 输入与职责 | 详细文档 |
-| --- | --- | --- |
-| 生成方式选择 | 根据现有输入和还原要求选择 Hunyuan 或 SAM3D | [选择指南](./docs/generation-guide.zh.md) |
-| Hunyuan 生成 | 图片目录、图片 URL 或文本生成原始 GLB | [Hunyuan](./docs/modules/hunyuan.zh.md) |
-| SAM3D | 单张/多张图片分割并重建原始 GLB | [SAM3D](./docs/modules/sam3d.zh.md) |
-| Refine Mesh | Hunyuan ReduceFace、Blender 投影、UV 和贴图迁移 | [Refine](./docs/modules/refine.zh.md) |
-| Blender 后处理 | 坐标轴、尺寸、居中和 GLB-to-USD | [Blender](./docs/modules/blender.zh.md) |
-| Isaac 物理 | collision、rigid body、材质、质量和最终收集 | [Physics](./docs/modules/physics.zh.md) |
-| 手工 CAD | STEP/STP 转 USD、单位/原点/层级清理和物理挂载 | [CAD](./docs/modules/cad.zh.md) |
-| HTTP API / Docker | 后台任务接口与容器部署 | [API](./docs/modules/api.zh.md) / [Docker](./docker/README.zh.md) |
+| 输入 | 输出 |
+| --- | --- |
+| Hunyuan 图片 | 生成/精修 GLB 和 USD |
+| SAM3D 图片 | 重建 GLB 和 USD |
+| 已有 GLB | 精修并调整朝向的 USD |
+| STEP/STP | 保持原始尺寸的 USD，可选物理和材质 |
 
-## 总体流程
+STEP/STP 材质流程会把 CAD 渲染图与 2–4 张实物照片对齐，按 CAD Part-ID 比较
+NVIDIA `Materials/Base` 候选并验证最终 USD。对齐或图像信息不足时，流程会停止并
+报告未通过的检查。
 
-```mermaid
-flowchart LR
-    H[Hunyuan 图片或文本] --> HG[Hunyuan 生成]
-    HG --> R[可选 Hunyuan refine]
-    S[SAM3D 图片] --> SG[SAM3D 重建]
-    SG --> R
-    E[已有 GLB] --> R
-    R --> B[Blender 坐标轴、尺寸和居中]
-    B --> U[GLB 转 Z-up USD]
+## 环境要求
 
-    C[手工 STEP 或 STP] --> CU[CAD 转 USD]
-    CU --> CP[CAD 单位、原点和面序清理]
+- Linux x86-64 和 NVIDIA CUDA GPU；
+- Conda 与 Python 3.10；
+- 单独安装 Blender 和 Isaac Sim；
+- 本地 Qwen3.5、SAM3、MVInverse、SigLIP2、DINOv2 权重和已构建的 Base 材质观察库；
+- 本机 NVIDIA MDL 材质库；
+- 只有 Hunyuan 生成或精修阶段需要腾讯云凭据。
 
-    U --> P[Isaac collision、刚体和质量]
-    CP --> P
-    P --> F[收集最终 USD 资产]
+完整本地材质流程当前需要约 24 GB 显存。模型、NVIDIA 资产、外部运行时和密钥不随
+源码发布。不同流程按需加载依赖：不加视觉材质的 STEP/STP 流程不需要 Qwen、SAM3、
+MVInverse、SigLIP2、DINOv2 或 NVIDIA MDL 材质库。
+
+## 安装
+
+```bash
+git clone https://github.com/xia13111-coder/hunyuan_creation_pipeline.git
+cd hunyuan_creation_pipeline
+
+conda env create -f environment.yml
+conda activate hunyuan_sam3d
+python -m pip install -e . -e ./tools/qwen_material_pipeline
+cp .env.example .env
 ```
 
-[查看流程图 PNG](./docs/images/pipeline-flow.zh.png) | [SVG](./docs/images/pipeline-flow.zh.svg) | [Mermaid 源文件](./docs/images/pipeline-flow.zh.mmd)
+在 `.env` 中填写本机路径或凭据。流水线命令会自动读取该文件；当前环境中已有的同名
+变量优先。本地模型路径统一放在该文件中：
 
-代码层次和完整函数调用关系见 [架构说明](./docs/architecture.zh.md)。
+| 模块 | `.env` 变量 |
+| --- | --- |
+| Qwen / Qwen3.5 | `QWEN_MODEL_PATH`、`QWEN35_MODEL_PATH` |
+| MVInverse | `MVINVERSE_REPOSITORY`、`MVINVERSE_CHECKPOINT` |
+| SAM3 | `SAM3_REPOSITORY`、`SAM3_CHECKPOINT` |
+| SAM3D | `SAM3D_SINGLE_VIEW_ROOT`、`SAM3D_MULTI_VIEW_ROOT`、`SAM3D_PIPELINE_CONFIG`、`SAM3D_MOGE_CHECKPOINT`、`SAM3D_DINOV2_REPOSITORY`、`SAM3D_DINOV2_CHECKPOINT` |
+| 材质检索 | `SIGLIP2_MODEL_PATH`、`DINOV2_MODEL_PATH` |
+
+运行时固定使用 `PIPELINE_LOCAL_MODELS_ONLY=1`。正常本地推理不会下载权重；
+路径缺失或不完整时会明确失败。Hunyuan 生成和 ReduceFace 是腾讯云
+API，仍需网络和凭据。
+
+验证入口：
+
+```bash
+hunyuan-asset-pipeline --help
+manual-material-pipeline --help
+qwen-material --help
+```
+
+容器部署见 [docker/README.zh.md](./docker/README.zh.md)。
 
 ## 快速开始
 
-主入口保持不变：
-
-```bash
-python ./run_asset_pipeline.py --help
-```
+以下命令都在项目根目录运行，并为每次任务使用独立输出目录。
 
 ### Hunyuan 图片生成
 
 ```bash
-python ./run_asset_pipeline.py \
-  --input-dir ./data \
-  --output-dir ./downloads \
+RUN=./outputs/hunyuan/basket
+hunyuan-asset-pipeline \
+  --input-dir ./input/basket_images \
+  --output-dir "$RUN/generation" \
+  --intermediate-output-dir "$RUN/intermediate" \
+  --final-output-dir "$RUN/final" \
+  --result-json "$RUN/pipeline_result.json" \
   --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
-  --intermediate-output-dir ./output_intermediate \
-  --final-output-dir ./output_final \
   --len-x 0.4 --len-y 0.3 --len-z 0.3 \
-  --orientation "X=L,Y=M,Z=S" \
-  --material plastic \
-  --approx sdf
+  --material plastic --approx sdf
 ```
+
+Hunyuan 只接受本地图片目录或单张公网图片 URL，不支持纯文本生成。使用公网图片时，
+把 `--input-dir` 换成 `--image-url URL`。
 
 ### SAM3D 图片重建
 
+输入目录中的图片应展示同一个物体：
+
 ```bash
-python ./run_asset_pipeline.py \
-  --sam3d-input ./data/sam3d_images \
+RUN=./outputs/sam3d/cabinet
+hunyuan-asset-pipeline \
+  --sam3d-input ./input/cabinet_views \
   --sam3d-mode auto \
-  --sam3d-prompt "metal shelves" \
-  --sam3d-seed 42 \
-  --sam3d-steps 50 \
-  --output-dir ./sam3d_downloads \
+  --sam3d-prompt "industrial cabinet" \
+  --output-dir "$RUN/generation" \
+  --intermediate-output-dir "$RUN/intermediate" \
+  --final-output-dir "$RUN/final" \
+  --result-json "$RUN/pipeline_result.json" \
   --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
-  --intermediate-output-dir ./sam3d_output_intermediate \
-  --final-output-dir ./sam3d_output_final \
   --len-x 0.4 --len-y 0.3 --len-z 0.8 \
-  --orientation "X=L,Y=M,Z=S" \
-  --approx sdf
+  --material steel --approx sdf
 ```
-
-SAM3D 的 prompt 用于二维分割目标，不是 text-to-3D 描述。
 
 ### 已有 GLB
 
 ```bash
-python ./run_asset_pipeline.py \
+RUN=./outputs/glb/model
+hunyuan-asset-pipeline \
   --existing-glb ./input/model.glb \
+  --intermediate-output-dir "$RUN/intermediate" \
+  --final-output-dir "$RUN/final" \
+  --result-json "$RUN/pipeline_result.json" \
   --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
-  --intermediate-output-dir ./output_intermediate \
-  --final-output-dir ./output_final \
-  --len-x 0.4 --len-y 0.3 --len-z 0.3 \
-  --material plastic \
-  --approx sdf
+  --len-x 0.4 --len-y 0.3 --len-z 0.8 \
+  --material plastic --approx sdf
 ```
 
-已有 SAM3D GLB 使用 `--sam3d-glb`；它跳过 SAM3D 重建，但默认仍经过 Hunyuan refine。
+已经精修完成的 GLB 可以加 `--skip-refine`。
 
-### 手工 STEP/STP
+### STEP/STP：不加视觉材质
+
+这条路径只做 CAD 转 USD、物理属性和依赖收集，不调用 Qwen、MVInverse 或参考图流程：
 
 ```bash
-python ./run_asset_pipeline.py \
-  --manual-stp ./input/manual_asset.stp \
-  --cad-usd-output-dir ./manual_cad_usd \
-  --intermediate-output-dir ./manual_output_intermediate \
-  --final-output-dir ./manual_output_final \
+RUN=./outputs/manual/asset_physics
+hunyuan-asset-pipeline \
+  --manual-stp ./input/asset.stp \
+  --cad-usd-output-dir "$RUN/cad_usd" \
+  --intermediate-output-dir "$RUN/intermediate" \
+  --final-output-dir "$RUN/final" \
+  --result-json "$RUN/pipeline_result.json" \
   --material steel \
   --approx sdf \
-  --manual-sdf-resolution 32 \
-  --set-mass 30
+  --manual-sdf-resolution 32
 ```
 
-手工建模只保留 STEP/STP 路径，不再做 CAD -> USD -> Blender -> GLB -> USD 往返转换。手工 CAD 的 SDF 默认分辨率为 `32`；只有碰撞轮廓不够准确时才需要提高到 `64`、`128` 或 `256`。
+### STEP/STP：根据参考图自动赋材质
 
-## 环境
-
-项目只使用一个 Python 环境：
+先在每张参考图中确认整机前景：
 
 ```bash
-conda env create -f ./environment.yml
-conda activate hunyuan_sam3d
+qwen-material sam3-foreground-ui \
+  --reference front=./references/front.jpg \
+  --reference side=./references/side.jpg \
+  --reference top=./references/top.jpg \
+  --reference iso=./references/iso.jpg \
+  --output ./annotations/sam3_foreground_annotations.json
 ```
 
-已有环境可用 `conda env update -n hunyuan_sam3d -f ./environment.yml` 更新。CLI 和 API
-启动时会检查当前环境，未激活 `hunyuan_sam3d` 会直接给出错误，避免 Hunyuan、refine
-和 SAM3D 被不同 Python 环境拆开执行。
-
-设置腾讯云凭据：
+然后启动自动流程：
 
 ```bash
-export TENCENTCLOUD_SECRET_ID="your-secret-id"
-export TENCENTCLOUD_SECRET_KEY="your-secret-key"
+manual-material-pipeline \
+  --stp ./input/asset.stp \
+  --sam3-annotations ./annotations/sam3_foreground_annotations.json \
+  --output ./outputs/manual/asset_run
 ```
 
-按机器覆盖外部程序路径：
+STEP/STP 保留原始尺寸。从零运行应使用新输出目录；`--resume` 只恢复同一个任务，并重新
+验证产物哈希。
 
-```bash
-export BLENDER_BIN="$(command -v blender)"
-export ISAACSIM_ROOT="../isaacsim"
-export ISAAC_PYTHON="$ISAACSIM_ROOT/python.sh"
-```
-
-示例假设 Isaac Sim 位于项目同级的 `../isaacsim`，请按本机目录关系替换这个相对路径。
-不要把某台机器的用户名或绝对安装路径提交到配置中。`BLENDER_BIN` 和
-`ISAACSIM_ROOT` 由每台机器在本地设置；Docker 用户不需要设置这两个变量。
-
-SAM3D 自动复用当前 `hunyuan_sam3d` 的 Python，不再单独配置 `SAM3D_PYTHON`。
-两个外部仓库统一放在 `./tools/sam3d/third_party/` 下，并从主仓库 git 和 Docker
-构建上下文中排除；目录布局见 [SAM3D 工具说明](./tools/sam3d/README.md)。
-
-容器部署见 [Docker 操作手册](./docker/README.zh.md)，离线镜像分卷可从
-[GitHub Release](https://github.com/xia13111-coder/hunyuan_creation_pipeline/releases/tag/docker-isaac-6.0.1)
-下载。当前完整镜像的验收目标是 Isaac Sim 6.0.1，文档包含分卷校验与导入、Hub/缓存
-挂载、CLI 与 API 操作和验收流程。
-
-## 代码结构
-
-```text
-run_asset_pipeline.py          稳定的用户入口
-serve_api.py                   兼容 ASGI 入口
-pipeline_runner.py             旧 import 的兼容导出
-
-asset_pipeline/
-  cli.py                       CLI 参数和入口分支
-  api.py                       FastAPI 后台任务
-  runtime.py                   环境、可执行文件和默认路径
-  command.py                   子进程执行
-  paths.py                     文件发现和输出路径
-  hunyuan_generation.py        Hunyuan 原始生成客户端
-  jobs/                        Hunyuan、SAM3D、refine、Blender、Isaac 原子 job
-  workflows.py                 各条完整 pipeline 的组合
-
-tools/
-  blender/                     Blender 子进程脚本
-  isaac/                       Isaac Sim Python 脚本
-  sam3d/                       SAM3D wrapper 和本地第三方仓库
-
-asset_refiner/                 Hunyuan ReduceFace 和本地 Blender refine
-configs/                       refine 配置
-docker/                        Docker 和 HTTP API 部署
-docs/                          按模块拆分的说明文档
-```
+详细说明见 [Hunyuan](./docs/modules/hunyuan.zh.md)、[SAM3D](./docs/modules/sam3d.zh.md)、
+[CAD](./docs/modules/cad.zh.md)、[生成方式选择](./docs/generation-guide.zh.md)和
+[CAD 视觉材质](./docs/manual-part-id-materials.zh.md)。
 
 ## 输出
 
-| 路径 | 内容 |
-| --- | --- |
-| `downloads/` | Hunyuan 原始生成结果 |
-| `<output-dir>/sam3d/` | SAM3D 输入副本、mask、原始 GLB/PLY |
-| `*_refined_mesh/` | Hunyuan target、贴图、QC 和 refined GLB |
-| `output_intermediate/` | 添加物理后的 USD |
-| `output_final/` | 最终收集的 USD、材质和贴图 |
-| `*_pipeline_result.json` | 机器可读的运行摘要 |
+```text
+RUN_ROOT/
+├── generation/       # 仅 Hunyuan/SAM3D
+├── cad_usd/           # 仅 STEP/STP
+├── intermediate/
+├── visual_material/   # 仅自动视觉材质
+├── final/
+└── pipeline_result.json
+```
 
-生成结果、模型权重、本地第三方 checkout 和缓存不会提交到 git。
+具体任务只创建自己需要的目录。
 
-## 文档
+生成结果可能包含本机路径、照片或私有输入。Git 默认忽略这些文件；分享前请先检查。
+
+## 仓库结构
+
+```text
+asset_pipeline/                 编排与工作流
+asset_refiner/                  网格精修
+tools/{blender,isaac,sam3d}/    Blender、Isaac Sim 和 SAM3D 执行脚本
+tools/qwen_material_pipeline/   材质推理和 USD 工具
+configs/                        版本化配置
+docs/                           详细文档
+tests/                          测试
+outputs/                        生成结果
+```
+
+主要文档：
 
 - [文档索引](./docs/README.zh.md)
-- [代码架构与调用关系](./docs/architecture.zh.md)
-- [Refine 配置](./configs/README.md)
-- [工具目录](./tools/README.md)
-- [Docker 操作手册](./docker/README.zh.md)
-- [HTTP API](./docs/modules/api.zh.md)
+- [架构](./docs/architecture.zh.md)
+- [视觉材质](./docs/modules/visual-materials.zh.md)
+- [公开发布检查表](./docs/public-release-checklist.zh.md)
+- [变更记录](./CHANGELOG.md)
+
+## 测试
+
+```bash
+python -m pytest -q -p no:cacheprovider tests
+PYTHONPATH=./tools python -m pytest -q -p no:cacheprovider \
+  tools/qwen_material_pipeline/tests
+python ./tools/release/check_public_tree.py
+```
+
+## 许可证
+
+自研代码和文档采用 [Apache License 2.0](./LICENSE)。MVInverse 仅限非商业用途；模型、
+NVIDIA 软件、MDL 材质和生成资产使用各自条款。见
+[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)、
+[CONTRIBUTING.md](./CONTRIBUTING.md)和[SECURITY.md](./SECURITY.md)。

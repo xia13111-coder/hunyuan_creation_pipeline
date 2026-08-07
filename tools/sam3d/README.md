@@ -1,7 +1,7 @@
 # SAM3D Tools
 
-`run_reconstruct.py` is the stable wrapper used by `asset_pipeline.jobs.sam3d`.
-The two upstream repositories are kept as sibling directories:
+`run_reconstruct.py` is the entry point used by `asset_pipeline.jobs.sam3d`.
+The two upstream repositories remain side by side:
 
 ```text
 tools/sam3d/
@@ -11,22 +11,36 @@ tools/sam3d/
     └── sam-3d-objects-multiview/
 ```
 
-They are not overlaid because both projects contain modules with the same names,
-while the multi-view project also refers to the single-view checkout through
-`../sam-3d-objects`. The sibling layout preserves that upstream contract.
+Both projects contain modules with the same names, and the multi-view project
+expects the single-view checkout at `../sam-3d-objects`. Do not merge them.
 
-Activate the only supported environment before running the wrapper:
+Activate the supported environment before running the wrapper:
 
 ```bash
 conda activate hunyuan_sam3d
 python ./tools/sam3d/run_reconstruct.py --help
 ```
 
-The defaults point to the two directories above. `SAM3D_SINGLE_VIEW_ROOT`,
-`SAM3D_MULTI_VIEW_ROOT`, and `SAM3_CHECKPOINT` remain available when an external
-checkout or checkpoint is required. `third_party/` is intentionally ignored by the
-main Git repository and Docker build context because it contains upstream source,
-model weights, and generated native extensions. Docker runs must bind-mount the
-project directory so these local dependencies are visible in the container. See
-the [Docker operations guide](../../docker/README.md) for source, model-cache,
-and multi-view visualization mounts.
+Local paths can be set in the project `.env`:
+
+```dotenv
+SAM3D_SINGLE_VIEW_ROOT=/absolute/path/to/sam-3d-objects
+SAM3D_MULTI_VIEW_ROOT=/absolute/path/to/sam-3d-objects-multiview
+SAM3D_PIPELINE_CONFIG=/absolute/path/to/pipeline.yaml
+SAM3_REPOSITORY=/absolute/path/to/sam3
+SAM3_CHECKPOINT=/absolute/path/to/sam3.pt
+SAM3D_MOGE_CHECKPOINT=/absolute/path/to/moge-vitl/model.pt
+SAM3D_DINOV2_REPOSITORY=/absolute/path/to/facebookresearch_dinov2_main
+SAM3D_DINOV2_CHECKPOINT=/absolute/path/to/dinov2_vitl14_reg4_pretrain.pth
+```
+
+Normal reconstruction is local-only. Missing or incomplete weights fail before
+inference; no model hub download is attempted. The wrapper builds a temporary
+absolute-path configuration overlay and leaves the upstream `pipeline.yaml`
+unchanged. Hunyuan generation and ReduceFace remain cloud APIs and are not
+covered by this local-weight guarantee.
+
+`third_party/` is ignored by Git and the Docker build context. Docker runs must
+mount the upstream source and weights. See the
+[Docker operations guide](../../docker/README.md) and the
+[SAM3D module guide](../../docs/modules/sam3d.md).

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hunyuan-asset-pipeline"
+version = "0.1.0"
+description = "Hunyuan, SAM3D, CAD, Isaac Sim and visual-material asset pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"]
+keywords = ["USD", "STEP", "STP", "Isaac Sim", "3D reconstruction", "materials"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/xia13111-coder/hunyuan_creation_pipeline"
+Documentation = "https://github.com/xia13111-coder/hunyuan_creation_pipeline/tree/main/docs"
+Issues = "https://github.com/xia13111-coder/hunyuan_creation_pipeline/issues"
+Source = "https://github.com/xia13111-coder/hunyuan_creation_pipeline"
+
+[project.scripts]
+hunyuan-asset-pipeline = "asset_pipeline.cli:main"
+manual-material-pipeline = "asset_pipeline.manual_material_cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["asset_pipeline*", "asset_refiner*"]
+exclude = ["apps*", "examples*", "tests*", "tools*"]

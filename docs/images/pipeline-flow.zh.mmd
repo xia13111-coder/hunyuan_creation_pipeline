@@ -1,15 +1,19 @@
 flowchart LR
-    H[Hunyuan 图片或文本] --> HG[Hunyuan 生成]
-    HG --> R[可选 Hunyuan refine]
-    S[SAM3D 图片] --> SG[SAM3D 重建]
+    H[图片（Hunyuan）] --> HG[生成 3D 模型]
+    HG --> R[可选：网格精修]
+    S[图片（SAM3D）] --> SG[重建 3D 模型]
     SG --> R
     E[已有 GLB] --> R
-    R --> B[Blender 坐标轴、尺寸和居中]
+    R --> B[Blender：朝向、尺寸、居中]
     B --> U[GLB 转 Z-up USD]
+    U --> GV[可选：根据参考图匹配并应用材质]
+    GV --> P[Isaac：碰撞、刚体、质量]
+    U -. 未启用参考图赋材质 .-> P
 
-    C[手工 STEP 或 STP] --> CU[CAD 转 USD]
-    CU --> CP[CAD 单位、原点和面序清理]
+    C[STEP/STP 工程模型] --> CU[CAD 转 USD]
+    CU --> CP[几何规范化与物理属性]
+    CP --> CV[可选：根据参考图匹配并应用材质]
 
-    U --> P[Isaac collision、刚体和质量]
-    CP --> P
+    CP -. 未启用参考图赋材质 .-> F
+    CV --> F
     P --> F[收集最终 USD 资产]

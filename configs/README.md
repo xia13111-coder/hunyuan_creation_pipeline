@@ -1,6 +1,6 @@
-# Config Guide
+# Refine Configurations
 
-The pipeline now keeps one production refine path:
+The default refine workflow is:
 
 ```text
 Tencent Hunyuan ReduceFace
@@ -24,11 +24,10 @@ python -m asset_refiner \
 The local postprocess step migrates PBR texture channels to the new UV layout:
 `base_color.png`, `normal.png`, `roughness.png`, and `metallic.png`.
 
-Raw SAM3D GLBs may have no image texture and store appearance in the mesh
-`COLOR_0` vertex attribute. For the `base_color` channel, the Blender worker
-automatically falls back to interpolating those vertex colors and bakes them to
-the new UV layout. See [`docs/modules/sam3d.md`](../docs/modules/sam3d.md) for the complete
-SAM3D input and refine path.
+Some SAM3D GLBs have no image texture and store appearance in the mesh
+`COLOR_0` vertex attribute. For the `base_color` channel, the Blender script
+uses those vertex colors when needed and bakes them to the new UV layout. See
+[`docs/modules/sam3d.md`](../docs/modules/sam3d.md) for all SAM3D options.
 
 For large GLBs, upload a geometry-only proxy to Hunyuan while keeping the
 original file as the local texture source:

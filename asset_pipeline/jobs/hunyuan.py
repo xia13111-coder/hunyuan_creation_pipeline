@@ -9,11 +9,21 @@ from ..command import LogCallback, append_flag, append_option, run_command
 from ..paths import list_files_by_suffix
 
 
+def _validate_image_source(input_dir: str | None, image_url: str | None) -> None:
+    """Require exactly one image source before starting a Hunyuan job."""
+
+    source_count = sum(bool(value) for value in (input_dir, image_url))
+    if source_count != 1:
+        raise ValueError(
+            "Hunyuan generation requires exactly one image source: "
+            "input_dir or image_url"
+        )
+
+
 def run_hunyuan_job(
     *,
     output_dir: str,
     input_dir: str | None = None,
-    prompt: str | None = None,
     image_url: str | None = None,
     result_formats: Sequence[str] = ("GLB",),
     region: str = "ap-guangzhou",
@@ -33,6 +43,7 @@ def run_hunyuan_job(
     verbose: int = 1,
     log_cb: LogCallback = None,
 ) -> dict:
+    _validate_image_source(input_dir, image_url)
     args = [
         sys.executable,
         "-m",
@@ -64,8 +75,6 @@ def run_hunyuan_job(
     ]
     if input_dir:
         args.extend(["--input", input_dir])
-    if prompt:
-        args.extend(["--prompt", prompt])
     if image_url:
         args.extend(["--image-url", image_url])
     if not pbr:
@@ -80,7 +89,6 @@ def run_hunyuan_job(
     return {
         "output_dir": output_dir,
         "input_dir": input_dir,
-        "prompt": prompt,
         "image_url": image_url,
         "result_formats": [fmt.upper() for fmt in result_formats],
         "download_preview": download_preview,
@@ -104,7 +112,6 @@ def run_generate_model_job(
     *,
     output_dir: str,
     input_dir: str | None = None,
-    prompt: str | None = None,
     image_url: str | None = None,
     face_count: int | None = None,
     download_preview: bool = False,
@@ -113,7 +120,6 @@ def run_generate_model_job(
     return run_hunyuan_job(
         output_dir=output_dir,
         input_dir=input_dir,
-        prompt=prompt,
         image_url=image_url,
         result_formats=("GLB",),
         version="pro",

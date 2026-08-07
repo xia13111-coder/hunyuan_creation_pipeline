@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ubtech.example/schemas/qwen-mvinverse-pbr-evidence-v1.json",
+  "title": "Qwen MVInverse multiview PBR evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "inputs", "policy", "views", "groups", "summary"],
+  "properties": {
+    "schema_version": {"const": "qwen-mvinverse-pbr-evidence/v1"},
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mvinverse_output_dir", "reference_manifest", "canonical_palette", "frame_mapping_strategy", "albedo_color_space", "inference_ledger", "inference_ledger_sha256", "integrity_verified"],
+      "properties": {
+        "mvinverse_output_dir": {"type": "string", "minLength": 1},
+        "reference_manifest": {"type": ["string", "null"]},
+        "canonical_palette": {"type": ["string", "null"]},
+        "frame_mapping_strategy": {"enum": ["explicit_argument", "explicit_manifest_indices", "official_sorted_image_basename", "verified_inference_ledger"]},
+        "albedo_color_space": {"const": "assumed_srgb_display_0_1"},
+        "inference_ledger": {"type": ["string", "null"]},
+        "inference_ledger_sha256": {"anyOf": [{"type": "string", "pattern": "^[0-9a-f]{64}$"}, {"type": "null"}]},
+        "integrity_verified": {"type": "boolean"}
+      }
+    },
+    "policy": {"$ref": "#/$defs/policy"},
+    "views": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/view"}},
+    "groups": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/fusedGroup"}},
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["view_count", "canonical_group_count", "auto_parameter_group_count", "preserve_group_count", "fail_closed", "usd_modified"],
+      "properties": {
+        "view_count": {"type": "integer", "minimum": 1},
+        "canonical_group_count": {"type": "integer", "minimum": 1},
+        "auto_parameter_group_count": {"type": "integer", "minimum": 0},
+        "preserve_group_count": {"type": "integer", "minimum": 0},
+        "fail_closed": {"const": true},
+        "usd_modified": {"const": false}
+      }
+    }
+  },
+  "$defs": {
+    "probability": {"type": "number", "minimum": 0, "maximum": 1},
+    "groupId": {"type": "string", "pattern": "^G[0-9]{2,4}$"},
+    "stringList": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum_region_pixels", "minimum_color_pixels", "minimum_image_fraction", "minimum_color_match_fraction", "minimum_valid_fraction", "minimum_distinct_views", "maximum_albedo_view_mad", "maximum_metallic_view_iqr", "maximum_metallic_view_mad", "maximum_roughness_view_iqr", "maximum_roughness_view_mad", "dielectric_metallic_max", "conductive_metallic_min", "maximum_mask_aspect_ratio_error"],
+      "properties": {
+        "minimum_region_pixels": {"type": "integer", "minimum": 1},
+        "minimum_color_pixels": {"type": "integer", "minimum": 1},
+        "minimum_image_fraction": {"$ref": "#/$defs/probability"},
+        "minimum_color_match_fraction": {"$ref": "#/$defs/probability"},
+        "minimum_valid_fraction": {"$ref": "#/$defs/probability"},
+        "minimum_distinct_views": {"type": "integer", "minimum": 1},
+        "maximum_albedo_view_mad": {"$ref": "#/$defs/probability"},
+        "maximum_metallic_view_iqr": {"$ref": "#/$defs/probability"},
+        "maximum_metallic_view_mad": {"$ref": "#/$defs/probability"},
+        "maximum_roughness_view_iqr": {"$ref": "#/$defs/probability"},
+        "maximum_roughness_view_mad": {"$ref": "#/$defs/probability"},
+        "dielectric_metallic_max": {"$ref": "#/$defs/probability"},
+        "conductive_metallic_min": {"$ref": "#/$defs/probability"},
+        "maximum_mask_aspect_ratio_error": {"$ref": "#/$defs/probability"}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "format", "key", "dtype"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "format": {"enum": ["npy", "npz", "png"]},
+        "key": {"type": ["string", "null"]},
+        "dtype": {"type": "string", "minLength": 1}
+      }
+    },
+    "scalarStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_count", "median", "q1", "q3", "iqr", "mad"],
+      "properties": {
+        "sample_count": {"type": "integer", "minimum": 1},
+        "median": {"$ref": "#/$defs/probability"},
+        "q1": {"$ref": "#/$defs/probability"},
+        "q3": {"$ref": "#/$defs/probability"},
+        "iqr": {"$ref": "#/$defs/probability"},
+        "mad": {"$ref": "#/$defs/probability"}
+      }
+    },
+    "rgb": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/probability"}
+    },
+    "vectorStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_count", "median", "q1", "q3", "iqr", "mad"],
+      "properties": {
+        "sample_count": {"type": "integer", "minimum": 1},
+        "median": {"$ref": "#/$defs/rgb"},
+        "q1": {"$ref": "#/$defs/rgb"},
+        "q3": {"$ref": "#/$defs/rgb"},
+        "iqr": {"$ref": "#/$defs/rgb"},
+        "mad": {"$ref": "#/$defs/rgb"}
+      }
+    },
+    "association": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "candidate_group_ids", "matched_group_id"],
+      "properties": {
+        "status": {"enum": ["matched", "ambiguous", "unmatched", "explicit_mask"]},
+        "candidate_group_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/groupId"}},
+        "matched_group_id": {"anyOf": [{"$ref": "#/$defs/groupId"}, {"type": "null"}]}
+      }
+    },
+    "mask": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "resized_to_output"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "resized_to_output": {"type": "boolean"}
+      }
+    },
+    "box": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "prefixItems": [
+        {"type": "integer", "minimum": 0, "maximum": 1000},
+        {"type": "integer", "minimum": 0, "maximum": 1000},
+        {"type": "integer", "minimum": 0, "maximum": 1000},
+        {"type": "integer", "minimum": 0, "maximum": 1000}
+      ],
+      "items": false
+    },
+    "viewGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["group_id", "association", "evidence_source", "boxes", "mask", "region_pixels", "image_pixels", "image_fraction", "color_filter_applied", "color_matching_pixels", "color_match_fraction", "valid_pixels", "valid_fraction", "albedo", "metallic", "roughness", "accepted", "reason_codes"],
+      "properties": {
+        "group_id": {"$ref": "#/$defs/groupId"},
+        "association": {"$ref": "#/$defs/association"},
+        "evidence_source": {"enum": ["palette_boxes", "explicit_mask", null]},
+        "boxes": {"type": "array", "items": {"$ref": "#/$defs/box"}},
+        "mask": {"anyOf": [{"$ref": "#/$defs/mask"}, {"type": "null"}]},
+        "region_pixels": {"type": "integer", "minimum": 0},
+        "image_pixels": {"type": "integer", "minimum": 1},
+        "image_fraction": {"$ref": "#/$defs/probability"},
+        "color_filter_applied": {"type": "boolean"},
+        "color_matching_pixels": {"type": "integer", "minimum": 0},
+        "color_match_fraction": {"$ref": "#/$defs/probability"},
+        "valid_pixels": {"type": "integer", "minimum": 0},
+        "valid_fraction": {"$ref": "#/$defs/probability"},
+        "albedo": {"anyOf": [{"$ref": "#/$defs/vectorStats"}, {"type": "null"}]},
+        "metallic": {"anyOf": [{"$ref": "#/$defs/scalarStats"}, {"type": "null"}]},
+        "roughness": {"anyOf": [{"$ref": "#/$defs/scalarStats"}, {"type": "null"}]},
+        "accepted": {"type": "boolean"},
+        "reason_codes": {"$ref": "#/$defs/stringList"}
+      }
+    },
+    "view": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["view_id", "frame_index", "resolution", "sources", "groups"],
+      "properties": {
+        "view_id": {"type": "string", "minLength": 1},
+        "frame_index": {"type": "integer", "minimum": 0},
+        "resolution": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 1}},
+        "sources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["albedo", "metallic", "roughness"],
+          "properties": {
+            "albedo": {"$ref": "#/$defs/source"},
+            "metallic": {"$ref": "#/$defs/source"},
+            "roughness": {"$ref": "#/$defs/source"}
+          }
+        },
+        "groups": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/viewGroup"}}
+      }
+    },
+    "canonicalSemantic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family_hint", "base_color", "finish_hint", "visual_description"],
+      "properties": {
+        "family_hint": {"type": "string", "minLength": 1},
+        "base_color": {"type": "string", "minLength": 1},
+        "finish_hint": {"type": "string", "minLength": 1},
+        "visual_description": {"type": "string", "minLength": 1}
+      }
+    },
+    "semanticObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["view_id", "group_id", "family_hint", "finish_hint", "surface_class"],
+      "properties": {
+        "view_id": {"type": "string", "minLength": 1},
+        "group_id": {"$ref": "#/$defs/groupId"},
+        "family_hint": {"type": "string", "minLength": 1},
+        "finish_hint": {"type": "string", "minLength": 1},
+        "surface_class": {"enum": ["dielectric", "conductive", "unknown"]}
+      }
+    },
+    "rejectedView": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["view_id", "reason_codes"],
+      "properties": {
+        "view_id": {"type": "string", "minLength": 1},
+        "reason_codes": {"$ref": "#/$defs/stringList"}
+      }
+    },
+    "suggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "auto_parameter_eligible", "base_color_srgb", "metallic", "roughness", "reason_codes", "warning_codes"],
+      "properties": {
+        "decision": {"enum": ["auto", "preserve"]},
+        "auto_parameter_eligible": {"type": "boolean"},
+        "base_color_srgb": {"anyOf": [{"$ref": "#/$defs/rgb"}, {"type": "null"}]},
+        "metallic": {"anyOf": [{"$ref": "#/$defs/probability"}, {"type": "null"}]},
+        "roughness": {"anyOf": [{"$ref": "#/$defs/probability"}, {"type": "null"}]},
+        "reason_codes": {"$ref": "#/$defs/stringList"},
+        "warning_codes": {"$ref": "#/$defs/stringList"}
+      }
+    },
+    "fusedGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["group_id", "canonical_semantic", "surface_class", "semantic_observations", "contributing_view_ids", "distinct_view_count", "ambiguous_views", "unmatched_views", "rejected_views", "albedo", "metallic", "roughness", "suggestion"],
+      "properties": {
+        "group_id": {"$ref": "#/$defs/groupId"},
+        "canonical_semantic": {"$ref": "#/$defs/canonicalSemantic"},
+        "surface_class": {"enum": ["dielectric", "conductive", "unknown", "conflict"]},
+        "semantic_observations": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/semanticObservation"}},
+        "contributing_view_ids": {"$ref": "#/$defs/stringList"},
+        "distinct_view_count": {"type": "integer", "minimum": 0},
+        "ambiguous_views": {"$ref": "#/$defs/stringList"},
+        "unmatched_views": {"$ref": "#/$defs/stringList"},
+        "rejected_views": {"type": "array", "items": {"$ref": "#/$defs/rejectedView"}},
+        "albedo": {"anyOf": [{"$ref": "#/$defs/vectorStats"}, {"type": "null"}]},
+        "metallic": {"anyOf": [{"$ref": "#/$defs/scalarStats"}, {"type": "null"}]},
+        "roughness": {"anyOf": [{"$ref": "#/$defs/scalarStats"}, {"type": "null"}]},
+        "suggestion": {"$ref": "#/$defs/suggestion"}
+      }
+    }
+  }
+}

@@ -1,0 +1,57 @@
+digraph asset_pipeline {
+  graph [
+    rankdir=LR,
+    bgcolor="white",
+    fontname="Noto Sans CJK SC",
+    label="资产创建总体流程",
+    labelloc=t,
+    labeljust=l,
+    fontsize=24,
+    nodesep=0.45,
+    ranksep=0.72,
+    pad=0.25,
+    splines=ortho
+  ];
+  node [
+    shape=box,
+    style="rounded,filled",
+    color="#64748b",
+    fillcolor="#f8fafc",
+    fontcolor="#172033",
+    fontname="Noto Sans CJK SC",
+    fontsize=15,
+    penwidth=1.5,
+    margin="0.18,0.12"
+  ];
+  edge [color="#475569", penwidth=1.7, arrowsize=0.75];
+
+  h [label="图片（Hunyuan）", fillcolor="#eef6ff", color="#3973a8"];
+  hg [label="生成 3D 模型"];
+  s [label="图片（SAM3D）", fillcolor="#eef6ff", color="#3973a8"];
+  sg [label="重建 3D 模型"];
+  e [label="已有 GLB", fillcolor="#eef6ff", color="#3973a8"];
+  r [label="可选：网格精修", fillcolor="#f4f0ff", color="#7658a8"];
+  b [label="Blender：朝向、尺寸\n和居中"];
+  u [label="GLB 转 Z-up USD"];
+  gv [label="可选：根据参考图\n匹配并应用材质", fillcolor="#fff4fb", color="#a23b77"];
+
+  c [label="STEP/STP 工程模型", fillcolor="#fff7e8", color="#9a681f"];
+  cu [label="CAD 转 USD", fillcolor="#fff7e8", color="#9a681f"];
+  cp [label="几何规范化\n与物理属性", fillcolor="#edf8f1", color="#397a50"];
+  cv [label="可选：根据参考图\n匹配并应用材质", fillcolor="#fff4fb", color="#a23b77"];
+
+  p [label="Isaac：碰撞、刚体\n和质量", fillcolor="#edf8f1", color="#397a50"];
+  f [label="收集最终 USD", fillcolor="#e8f5ee", color="#276640", penwidth=2.2];
+
+  h -> hg -> r;
+  s -> sg -> r;
+  e -> r;
+  r -> b -> u -> gv -> p;
+  u -> p [style=dashed, color="#9a681f", fontcolor="#7c5318", fontsize=11,
+           xlabel="未启用参考图赋材质"];
+
+  c -> cu -> cp -> cv -> f;
+  cp -> f [style=dashed, color="#9a681f", fontcolor="#7c5318", fontsize=11,
+            xlabel="未启用参考图赋材质"];
+  p -> f;
+}

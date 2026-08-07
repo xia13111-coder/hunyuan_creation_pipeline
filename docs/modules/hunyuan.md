@@ -4,7 +4,7 @@
 
 For input and use-case differences from SAM3D, see [Choosing Between Hunyuan And SAM3D](../generation-guide.md).
 
-This module submits an image, image URL, or text prompt to Tencent Hunyuan 3D, downloads a raw GLB, and hands it to the refine module. It does not implement ReduceFace, UVs, physics, or USD conversion.
+This module submits a local image or image URL to Tencent Hunyuan 3D, downloads a raw GLB, and hands it to the refine module. It does not implement ReduceFace, UVs, physics, or USD conversion.
 
 ## Code
 
@@ -24,24 +24,25 @@ asset_pipeline/hunyuan_generation.py
 | --- | --- |
 | `--input-dir` | Scan JPG, JPEG, PNG, and WEBP files for image-to-3D jobs. |
 | `--image-url` | Use one publicly reachable image URL. |
-| `--prompt` | Text-to-3D prompt. |
 | `--face-count` | Requested Hunyuan Pro face count, such as `150000`. |
 | `--download-preview` | Download the preview image returned by the API. |
 | `--output-dir` | Raw generation directory. Default: `./downloads`. |
 
-`--input-dir`, `--image-url`, and `--prompt` select the main CLI source. When no valid image or alternate source is available, validation fails before submission.
+`--input-dir` and `--image-url` are mutually exclusive Hunyuan inputs. This
+project does not expose text-only Hunyuan generation. Validation fails before
+submission when the image directory is missing or contains no supported image.
 
 ## Command
 
 ```bash
-python ./run_asset_pipeline.py \
+hunyuan-asset-pipeline \
   --input-dir ./data \
-  --output-dir ./downloads \
+  --output-dir ./outputs/hunyuan_example/generation \
   --face-count 150000 \
   --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
-  --intermediate-output-dir ./output_intermediate \
-  --final-output-dir ./output_final \
+  --intermediate-output-dir ./outputs/hunyuan_example/intermediate \
+  --final-output-dir ./outputs/hunyuan_example/final \
   --len-x 0.4 --len-y 0.3 --len-z 0.3 \
   --material plastic \
   --approx sdf

@@ -1,17 +1,212 @@
 {
   "materials": {
-    "steel":  { "density": 7850, "friction": 0.5, "restitution": 0.05, "combine": "average", "dyn_ratio": 0.9 },
-    "rubber": { "density": 1100, "friction": 1.0, "restitution": 0.6,  "dyn_ratio": 0.7 },
-    "wood":   { "density": 700,  "friction": 0.6, "restitution": 0.2 },
-    "copper": {
-      "density": 8960,
+    "steel": {
+      "density": 7850,
+      "friction": 0.50,
+      "restitution": 0.05,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Backward-compatible generic carbon-steel baseline."
+    },
+    "carbon_steel": {
+      "density": 7850,
+      "friction": 0.50,
+      "restitution": 0.05,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Uncoated structural or machine carbon steel."
+    },
+    "painted_steel": {
+      "density": 7850,
+      "friction": 0.35,
+      "restitution": 0.03,
+      "combine": "average",
+      "dyn_ratio": 0.80,
+      "description": "Steel substrate with a smooth industrial paint or powder-coat contact surface."
+    },
+    "stainless_steel": {
+      "density": 8000,
+      "friction": 0.45,
+      "restitution": 0.04,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Generic austenitic stainless-steel baseline."
+    },
+    "cast_iron": {
+      "density": 7200,
+      "friction": 0.55,
+      "restitution": 0.03,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Generic gray cast-iron machine-part baseline."
+    },
+    "aluminum": {
+      "density": 2700,
       "friction": 0.40,
       "restitution": 0.05,
-      "dyn_ratio": 0.9},
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Generic structural aluminum-alloy baseline."
+    },
+    "copper": {
+      "density": 8940,
+      "friction": 0.40,
+      "restitution": 0.04,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "High-conductivity copper baseline."
+    },
+    "brass": {
+      "density": 8500,
+      "friction": 0.40,
+      "restitution": 0.04,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Generic copper-zinc brass baseline."
+    },
+    "bronze": {
+      "density": 8800,
+      "friction": 0.38,
+      "restitution": 0.04,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Generic bearing-bronze baseline."
+    },
     "plastic": {
       "density": 950,
       "friction": 0.30,
-      "restitution": 0.1,
-      "dyn_ratio": 0.9}
+      "restitution": 0.08,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Backward-compatible generic plastic; physically closest to HDPE. Prefer a named polymer when known."
+    },
+    "hdpe": {
+      "density": 950,
+      "friction": 0.30,
+      "restitution": 0.08,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "High-density polyethylene baseline."
+    },
+    "abs": {
+      "density": 1040,
+      "friction": 0.35,
+      "restitution": 0.08,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "General-purpose ABS engineering plastic."
+    },
+    "polycarbonate": {
+      "density": 1200,
+      "friction": 0.35,
+      "restitution": 0.08,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Unfilled polycarbonate baseline."
+    },
+    "pa6": {
+      "density": 1130,
+      "friction": 0.30,
+      "restitution": 0.06,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Unfilled nylon-6 baseline; moisture and reinforcement can change density and contact response."
+    },
+    "pom": {
+      "density": 1410,
+      "friction": 0.20,
+      "restitution": 0.05,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Acetal/POM low-friction engineering-plastic baseline."
+    },
+    "pvc_rigid": {
+      "density": 1400,
+      "friction": 0.35,
+      "restitution": 0.06,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Unplasticized rigid PVC baseline."
+    },
+    "ptfe": {
+      "density": 2200,
+      "friction": 0.08,
+      "restitution": 0.02,
+      "combine": "average",
+      "dyn_ratio": 0.90,
+      "description": "PTFE low-friction bearing or liner baseline."
+    },
+    "rubber": {
+      "density": 1100,
+      "friction": 0.90,
+      "restitution": 0.15,
+      "combine": "average",
+      "dyn_ratio": 0.75,
+      "description": "Backward-compatible generic dense industrial elastomer; not a bouncing-ball preset."
+    },
+    "rubber_pad": {
+      "density": 1100,
+      "friction": 1.00,
+      "restitution": 0.08,
+      "combine": "average",
+      "dyn_ratio": 0.70,
+      "description": "High-grip machine foot or anti-slip pad baseline."
+    },
+    "rubber_hose": {
+      "density": 1150,
+      "friction": 0.75,
+      "restitution": 0.10,
+      "combine": "average",
+      "dyn_ratio": 0.75,
+      "description": "Dense reinforced industrial hose represented as a rigid contact surface."
+    },
+    "silicone_rubber": {
+      "density": 1150,
+      "friction": 0.85,
+      "restitution": 0.20,
+      "combine": "average",
+      "dyn_ratio": 0.75,
+      "description": "Generic solid silicone-rubber baseline."
+    },
+    "wood": {
+      "density": 700,
+      "friction": 0.55,
+      "restitution": 0.15,
+      "combine": "average",
+      "dyn_ratio": 0.80,
+      "description": "Backward-compatible dense dry-wood baseline; species and moisture can change density substantially."
+    },
+    "plywood": {
+      "density": 600,
+      "friction": 0.50,
+      "restitution": 0.12,
+      "combine": "average",
+      "dyn_ratio": 0.80,
+      "description": "Generic dry structural plywood baseline."
+    },
+    "glass": {
+      "density": 2500,
+      "friction": 0.35,
+      "restitution": 0.05,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Soda-lime glass rigid-body baseline; fracture is not modeled."
+    },
+    "ceramic": {
+      "density": 2400,
+      "friction": 0.45,
+      "restitution": 0.04,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Generic dense technical/structural ceramic baseline; fracture is not modeled."
+    },
+    "concrete": {
+      "density": 2400,
+      "friction": 0.70,
+      "restitution": 0.02,
+      "combine": "average",
+      "dyn_ratio": 0.85,
+      "description": "Normal-weight dry concrete contact-surface baseline."
+    }
   }
 }

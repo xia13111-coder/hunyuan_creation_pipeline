@@ -198,23 +198,29 @@ def get_format_field_mapping():
 # =========================
 # 请求载荷构造
 # =========================
+def _validate_image_input(
+    image_path: Optional[str], image_url: Optional[str]
+) -> None:
+    if sum(bool(value) for value in (image_path, image_url)) != 1:
+        raise ValueError(
+            "Hunyuan generation requires exactly one image source: "
+            "image_path or image_url"
+        )
+
+
 def build_payload_single_rapid(
     image_path: Optional[str],
     result_format: str,
     enable_pbr: bool,
-    prompt: Optional[str] = None,
     image_url: Optional[str] = None,
 ):
-    """
-    极速版：Prompt / ImageBase64 / ImageUrl 三选一
-    """
+    """极速版：使用本地图片或图片 URL。"""
+    _validate_image_input(image_path, image_url)
     payload = {
         "EnablePBR": bool(enable_pbr),
         "ResultFormat": result_format.upper() if result_format else None,
     }
-    if prompt:
-        payload["Prompt"] = prompt
-    elif image_url:
+    if image_url:
         payload["ImageUrl"] = image_url
     else:
         if not image_path or not os.path.exists(image_path):
@@ -231,7 +237,6 @@ def build_payload_single_pro(
     image_path: Optional[str],
     result_format: str,
     enable_pbr: bool,
-    prompt: Optional[str] = None,
     image_url: Optional[str] = None,
     face_count: Optional[int] = None,
     generate_type: Optional[str] = None,
@@ -239,13 +244,12 @@ def build_payload_single_pro(
     """
     专业版：支持可选 FaceCount / GenerateType
     """
+    _validate_image_input(image_path, image_url)
     payload = {
         "EnablePBR": bool(enable_pbr),
         "ResultFormat": result_format.upper() if result_format else None,
     }
-    if prompt:
-        payload["Prompt"] = prompt
-    elif image_url:
+    if image_url:
         payload["ImageUrl"] = image_url
     else:
         if not image_path or not os.path.exists(image_path):
@@ -271,6 +275,18 @@ def submit_job_with_retry(
     max_retry: int = 10,
     retry_interval: int = 60,
 ) -> str:
+    if "Prompt" in payload:
+        raise ValueError("Hunyuan text prompts are disabled; provide an image")
+    image_source_count = sum(
+        bool(payload.get(field_name))
+        for field_name in ("ImageBase64", "ImageUrl")
+    )
+    if image_source_count != 1:
+        raise ValueError(
+            "Hunyuan request must contain exactly one image source: "
+            "ImageBase64 or ImageUrl"
+        )
+
     result_format = (result_format or "").upper()
     for retry_count in range(max_retry):
         try:
@@ -476,7 +492,6 @@ def process_single_view_with_multi_formats(
     poll_interval: float,
     poll_timeout: float,
     version: str,
-    prompt: Optional[str] = None,
     image_url: Optional[str] = None,
     face_count: Optional[int] = None,
     generate_type: Optional[str] = None,
@@ -484,9 +499,7 @@ def process_single_view_with_multi_formats(
     resubmit_backoff: float = 30.0,
     download_preview: bool = False,
 ):
-    img_name = (
-        os.path.basename(image_path) if image_path else (image_url or prompt or "job")
-    )
+    img_name = os.path.basename(image_path) if image_path else (image_url or "job")
     stem = os.path.splitext(img_name)[0]
     out_dir = os.path.join(output_root, stem)
     ensure_dir(out_dir)
@@ -502,7 +515,6 @@ def process_single_view_with_multi_formats(
                         image_path=image_path,
                         result_format=fmt,
                         enable_pbr=enable_pbr,
-                        prompt=prompt,
                         image_url=image_url,
                     )
                 else:
@@ -510,7 +522,6 @@ def process_single_view_with_multi_formats(
                         image_path=image_path,
                         result_format=fmt,
                         enable_pbr=enable_pbr,
-                        prompt=prompt,
                         image_url=image_url,
                         face_count=face_count,
                         generate_type=generate_type,
@@ -565,7 +576,7 @@ def main():
     parser.add_argument(
         "--input",
         "-i",
-        default="./data/",
+        default=None,
         help="输入目录：放单视角图片（jpg/png/jpeg/webp）",
     )
     parser.add_argument("--output", "-o", default="./downloads/", help="输出目录")
@@ -629,10 +640,7 @@ def main():
         default=None,
         help="专业版生成类型（如：Normal/LowPoly/Geometry/Sketch）",
     )
-    # Prompt / 图片URL（可替代本地图片）
-    parser.add_argument(
-        "--prompt", type=str, default=None, help="文生3D提示词（提供后忽略本地图片）"
-    )
+    # 图片 URL 可替代本地图片。
     parser.add_argument(
         "--image-url", type=str, default=None, help="图片URL（提供后忽略本地图片）"
     )
@@ -701,6 +709,9 @@ def main():
             print(json.dumps(result, ensure_ascii=False))
             sys.exit(2)
 
+    if args.input and args.image_url:
+        parser.error("--input and --image-url are mutually exclusive")
+
     # 初始化
     try:
         client = init_client(args.region, args.endpoint)
@@ -710,10 +721,10 @@ def main():
         logging.error(f"初始化失败: {str(e)}")
         sys.exit(2)
 
-    # 输入来源：prompt/image-url 或 本地目录
+    # 输入来源：图片 URL 或本地图片目录。
     ensure_dir(args.output)
-    if args.prompt or args.image_url:
-        logging.info("\n单任务模式（Prompt/ImageUrl）启动")
+    if args.image_url:
+        logging.info("\n单任务模式（ImageUrl）启动")
         process_single_view_with_multi_formats(
             client=client,
             session=session,
@@ -724,7 +735,6 @@ def main():
             poll_interval=float(args.interval),
             poll_timeout=float(args.timeout),
             version=args.version,
-            prompt=args.prompt,
             image_url=args.image_url,
             face_count=args.face_count,
             generate_type=args.gen_type,
@@ -736,18 +746,19 @@ def main():
         return
 
     # 批量模式：本地目录
-    if not os.path.isdir(args.input):
-        logging.error(f"输入路径不存在: {args.input}")
+    input_dir = args.input or "./data/"
+    if not os.path.isdir(input_dir):
+        logging.error(f"输入路径不存在: {input_dir}")
         sys.exit(2)
 
     images = [
-        os.path.join(args.input, f)
-        for f in os.listdir(args.input)
-        if os.path.isfile(os.path.join(args.input, f))
-        and is_image_file(os.path.join(args.input, f))
+        os.path.join(input_dir, f)
+        for f in os.listdir(input_dir)
+        if os.path.isfile(os.path.join(input_dir, f))
+        and is_image_file(os.path.join(input_dir, f))
     ]
     if not images:
-        logging.warning(f"输入目录 {args.input} 下无有效图片")
+        logging.warning(f"输入目录 {input_dir} 下无有效图片")
         return
 
     logging.info(f"\n批量模式启动 | 发现{len(images)}张有效图片")
@@ -763,7 +774,6 @@ def main():
             poll_interval=float(args.interval),
             poll_timeout=float(args.timeout),
             version=args.version,
-            prompt=args.prompt,
             image_url=args.image_url,
             face_count=args.face_count,
             generate_type=args.gen_type,

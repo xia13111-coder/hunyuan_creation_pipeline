@@ -1,9 +1,6 @@
-"""Isaac Sim CAD conversion, physics authoring, and USD collection jobs."""
+"""Isaac Sim Physics authoring and USD collection jobs."""
 
 from __future__ import annotations
-
-from pathlib import Path
-from typing import Sequence
 
 from ..command import (
     LogCallback,
@@ -12,56 +9,10 @@ from ..command import (
     isaac_tool_path,
     run_command,
 )
-from ..paths import cad_usd_output_path, list_files_by_suffix
-from ..runtime import default_cad_usd_output_dir, isaac_python, materials_file
+from ..runtime import isaac_python, materials_file
 
-
-def run_cad_to_usd_job(
-    *,
-    input_path: str,
-    out_dir: str | None = None,
-    overwrite: bool = True,
-    headless: bool = True,
-    converter_options: Sequence[str] = (),
-    log_cb: LogCallback = None,
-) -> dict:
-    cad_files = list_files_by_suffix(input_path, {".stp", ".step"})
-    if not cad_files:
-        raise FileNotFoundError(
-            f"No .stp/.step files found for CAD input: {input_path}"
-        )
-
-    resolved_out_dir = out_dir or default_cad_usd_output_dir(input_path)
-    args = [
-        str(isaac_python()),
-        str(isaac_tool_path("convert_cad_to_usd.py")),
-        "--input",
-        input_path,
-        "--out-dir",
-        resolved_out_dir,
-    ]
-    append_flag(args, "--headless", headless)
-    append_flag(args, "--overwrite", overwrite)
-    for item in converter_options:
-        args.extend(["--option", item])
-
-    run_command(args, log_cb=log_cb)
-    usd_files = sorted(
-        cad_usd_output_path(path, input_path, resolved_out_dir) for path in cad_files
-    )
-    missing_usd_files = [path for path in usd_files if not Path(path).exists()]
-    if missing_usd_files:
-        raise FileNotFoundError(
-            f"CAD conversion did not create expected USD file(s): {', '.join(missing_usd_files)}"
-        )
-    return {
-        "input_path": input_path,
-        "out_dir": resolved_out_dir,
-        "overwrite": overwrite,
-        "converter_options": list(converter_options),
-        "cad_files": cad_files,
-        "usd_files": usd_files,
-    }
+# Compatibility re-exports. New code imports STEP/STP jobs from ``jobs.cad``.
+from .cad import CAD_SUFFIXES, run_cad_to_usd_job, validate_cad_input_path
 
 
 def run_add_physics_job(
@@ -128,3 +79,12 @@ def run_collect_job(
     append_flag(args, "--headless", headless)
     run_command(args, log_cb=log_cb)
     return {"folder": folder, "out_dir": out_dir}
+
+
+__all__ = [
+    "CAD_SUFFIXES",
+    "run_add_physics_job",
+    "run_cad_to_usd_job",
+    "run_collect_job",
+    "validate_cad_input_path",
+]

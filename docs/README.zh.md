@@ -2,21 +2,25 @@
 
 [English](./README.md) | [中文](./README.zh.md) | [返回项目 README](../README.zh.md)
 
-文档按代码模块拆分。主 README 只保留入口和快速命令，参数和实现细节在对应模块中维护。
+请先阅读主 README，再按需要查看具体流程或模块。
 
-| 模块 | 代码所有者 | 文档 |
-| --- | --- | --- |
-| 生成方式选择 | Hunyuan 与 SAM3D 输入路径 | [Hunyuan 与 SAM3D 对比](./generation-guide.zh.md) |
-| 总体架构 | `asset_pipeline/` | [架构和调用关系](./architecture.zh.md) |
-| Hunyuan 原始生成 | `asset_pipeline/hunyuan_generation.py`、`jobs/hunyuan.py` | [Hunyuan](./modules/hunyuan.zh.md) |
-| SAM3D 图片重建 | `jobs/sam3d.py`、`tools/sam3d/` | [SAM3D](./modules/sam3d.zh.md) |
-| Mesh refine | `jobs/refine.py`、`asset_refiner/` | [Refine](./modules/refine.zh.md) |
-| Blender 后处理 | `jobs/blender.py`、`tools/blender/` | [Blender](./modules/blender.zh.md) |
-| Isaac Sim 物理 | `jobs/isaac.py`、`tools/isaac/` | [Physics](./modules/physics.zh.md) |
-| 手工 CAD | `workflows.run_stp_physics_job`、`convert_cad_to_usd.py` | [CAD](./modules/cad.zh.md) |
-| HTTP API / Docker | `asset_pipeline/api.py`、`docker/` | [API](./modules/api.zh.md) / [Docker](../docker/README.zh.md) |
+| 主题 | 文档 |
+| --- | --- |
+| 仓库目录 | [仓库目录](./repository-layout.zh.md) |
+| 生成方式选择 | [Hunyuan 与 SAM3D 对比](./generation-guide.zh.md) |
+| 总体架构 | [架构和调用关系](./architecture.zh.md) |
+| Hunyuan 原始生成 | [Hunyuan](./modules/hunyuan.zh.md) |
+| SAM3D 图片重建 | [SAM3D](./modules/sam3d.zh.md) |
+| 网格精修 | [精修](./modules/refine.zh.md) |
+| Blender 后处理 | [Blender](./modules/blender.zh.md) |
+| STEP/STP 参考图自动赋材质 | [快速开始](./manual-part-id-materials.zh.md) / [行为与排错](./modules/visual-materials.zh.md) |
+| Isaac Sim 物理 | [物理处理](./modules/physics.zh.md) |
+| 手工建模 STEP/STP | [CAD](./modules/cad.zh.md) |
+| HTTP API 和 Docker | [API](./modules/api.zh.md) / [Docker](../docker/README.zh.md) |
+| 发布与迁移 | [发布与可移植性](./release-portability.zh.md) |
+| 公开源码发布 | [公开发布检查表](./public-release-checklist.zh.md) |
 
-其他说明：
+其他参考：
 
 - [Refine 配置文件说明](../configs/README.md)
 - [独立工具说明](../tools/README.md)

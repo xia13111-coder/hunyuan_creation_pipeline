@@ -37,6 +37,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
         "poll_interval_seconds": 10,
         "timeout_seconds": 3600,
+        "describe_max_attempts": 6,
+        "describe_retry_interval_seconds": 5,
+        "describe_retry_backoff_factor": 2.0,
+        "describe_retry_error_codes": [
+            "InternalError",
+            "RequestLimitExceeded",
+            "RequestTimeout",
+        ],
         "submit_max_retries": 6,
         "submit_retry_interval_seconds": 60,
         "submit_retry_backoff_factor": 1.5,
@@ -46,6 +54,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "RequestTimeout",
             "FailedOperation.ResourceInsufficient",
         ],
+        "job_failure_retry": {
+            "max_attempts": 3,
+            "retry_interval_seconds": 30,
+            "retry_backoff_factor": 2.0,
+            "error_codes": [
+                "FailedOperation.InnerError",
+            ],
+        },
+        "result_download": {
+            "max_attempts": 5,
+            "retry_interval_seconds": 5,
+            "retry_backoff_factor": 2.0,
+            "timeout_seconds": 120,
+        },
         "normalize_result_to_source_bbox": True,
         "download_preference": ["GLB", "FBX", "ZIP", "OBJ"],
         "retopology": {

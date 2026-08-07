@@ -1,0 +1,86 @@
+{
+  "schema_version": "qwen-auto-visual-material-bridge/v2",
+  "qwen": {
+    "python": "${QWEN35_PYTHON}",
+    "model_family": "qwen3_5",
+    "model_path": "${QWEN35_MODEL_PATH}",
+    "model_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "max_new_tokens": 1024,
+    "max_new_tokens_ceiling": 4096,
+    "minimum_usable_palette_views": 2,
+    "minimum_usable_palette_view_ratio": 0.5,
+    "mapping_verification_views": 2,
+    "parallel_requests": 1
+  },
+  "materials": {
+    "catalog": "../../var/catalogs/nvidia_mdl_catalog.json",
+    "whitelist": "../materials/industrial_whitelist.json",
+    "material_root": "${VISUAL_MATERIAL_ROOT}",
+    "root_scope": "nvidia_base",
+    "assignment_unit": "part_id",
+    "immutable_after_selection": true,
+    "parameter_candidate_mode": "disabled",
+    "selection_objective": "visual_similarity",
+    "exact_mdl_tournament_max_candidates": 12,
+    "exact_mdl_tournament_all_groups": true,
+    "exact_mdl_tournament_minimum_score_improvement": 0.015,
+    "exact_mdl_tournament_minimum_winner_margin": 0.005
+  },
+  "render": {
+    "resolution": 512,
+    "views": "pose-bank-26",
+    "rt_subframes": 4,
+    "quality_lighting_profile": "material-neutral",
+    "analysis_up_axis": "z",
+    "analysis_front_axis": "-y",
+    "final_visual_gate": {
+      "maximum_score_regression": 0.01,
+      "maximum_group_recall_regression": 0.01,
+      "maximum_group_share_error_regression": 0.01,
+      "minimum_final_appearance_score": 0.62,
+      "minimum_final_view_appearance_score": 0.55,
+      "minimum_significant_reference_share": 0.01,
+      "minimum_significant_evidence_pixels": 128,
+      "maximum_policy_fallback_fraction": 0.9,
+      "maximum_neutral_fallback_fraction": 0.8,
+      "maximum_unresolved_entity_fraction": 0.9,
+      "maximum_unresolved_face_subset_fraction": 0.5,
+      "minimum_owner_local_resolved_fraction": 0.5,
+      "maximum_visible_fallback_fraction": 0.2
+    }
+  },
+  "mvinverse": {
+    "mode": "run",
+    "python": "${MVINVERSE_PYTHON}",
+    "repository": "${MVINVERSE_REPOSITORY}",
+    "checkpoint": "${MVINVERSE_CHECKPOINT}",
+    "model_revision": "6172ff9a437444df028ed67523badfa523173f21",
+    "device": "cuda",
+    "max_side": 448,
+    "oom_retry_max_sides": [
+      392
+    ],
+    "timeout_seconds": 1800
+  },
+  "sam3": {
+    "python": "${QWEN_PYTHON}",
+    "repository": "${SAM3_REPOSITORY}",
+    "checkpoint": "${SAM3_CHECKPOINT}",
+    "device": "cuda",
+    "minimum_model_score": 0.45,
+    "minimum_prompt_overlap": 0.25,
+    "maximum_image_fraction": 0.8,
+    "minimum_mask_pixels": 32
+  },
+  "retrieval": {
+    "python": "${QWEN_PYTHON}",
+    "siglip2_model": "${SIGLIP2_MODEL_PATH}",
+    "dinov2_model": "${DINOV2_MODEL_PATH}",
+    "cache_dir": "${VISUAL_RETRIEVAL_CACHE}",
+    "observation_bank": "${NVIDIA_BASE_OBSERVATION_BANK}",
+    "device": "cuda",
+    "siglip_top_k": 64,
+    "final_top_k": 32,
+    "batch_size": 24
+  }
+}

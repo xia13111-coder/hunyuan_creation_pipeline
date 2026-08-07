@@ -1,0 +1,536 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="查看当前 STEP/STP 工件参考图自动赋材质的验证结果和交付文件。">
+  <title>自动材质交付结果</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1017;
+      --panel: #141c27;
+      --line: #293648;
+      --text: #eaf1f8;
+      --muted: #9fb0c2;
+      --accent: #61d6a7;
+      --warn: #f2c96d;
+      --danger: #ff7d85;
+      --limited: #72b7ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top right, #173146, var(--bg) 42%);
+      color: var(--text);
+      font: 16px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { width: min(1120px, calc(100% - 32px)); margin: 0 auto; padding: 56px 0 72px; }
+    h1 { margin: 0 0 12px; font-size: clamp(2rem, 6vw, 4.2rem); line-height: 1.05; }
+    h2 { margin: 0 0 16px; font-size: 1.15rem; }
+    p { margin: 0; color: var(--muted); }
+    .tag { color: var(--accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; margin-top: 32px; }
+    .card {
+      grid-column: span 6;
+      min-width: 0;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: color-mix(in srgb, var(--panel) 92%, transparent);
+      box-shadow: 0 18px 50px rgb(0 0 0 / .24);
+    }
+    .wide { grid-column: 1 / -1; }
+    .status { display: flex; align-items: center; gap: 10px; margin: 12px 0 0; font-weight: 700; }
+    .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--warn); }
+    .pass .dot { background: var(--accent); box-shadow: 0 0 18px var(--accent); }
+    .limited .dot { background: var(--limited); box-shadow: 0 0 18px var(--limited); }
+    .fail .dot { background: var(--danger); box-shadow: 0 0 18px var(--danger); }
+    a { color: var(--accent); }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
+    .button {
+      display: inline-block;
+      padding: 10px 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #1a2532;
+      color: var(--text);
+      text-decoration: none;
+    }
+    .previews { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
+    .stat { padding: 14px; border: 1px solid var(--line); border-radius: 12px; background: #0e151e; }
+    .stat strong { display: block; color: var(--text); font-size: 1.45rem; line-height: 1.2; }
+    .stat span { color: var(--muted); font-size: .86rem; }
+    .notice { margin-top: 14px; color: var(--warn); }
+    .quality-note { margin-top: 14px; }
+    .quality-note.pass { color: var(--accent); }
+    .quality-note.limited { color: var(--limited); }
+    .quality-note.fail { color: var(--danger); }
+    .limitation-list { display: grid; gap: 10px; margin-top: 16px; }
+    .limitation {
+      padding: 14px;
+      border: 1px solid color-mix(in srgb, var(--limited) 48%, var(--line));
+      border-radius: 12px;
+      background: color-mix(in srgb, #10243a 78%, transparent);
+    }
+    .limitation strong { display: block; margin-bottom: 4px; color: var(--limited); }
+    .limitation p + p { margin-top: 4px; font-size: .9rem; }
+    .warning-list { margin: 12px 0 0; color: var(--danger); }
+    code { overflow-wrap: anywhere; }
+    figure { display: none; margin: 0; }
+    figure.visible { display: block; }
+    img { display: block; width: 100%; border-radius: 10px; background: #080b10; }
+    figcaption { margin-top: 6px; color: var(--muted); font-size: .9rem; }
+    pre {
+      max-height: 520px;
+      margin: 0;
+      overflow: auto;
+      padding: 16px;
+      border-radius: 10px;
+      background: #080d13;
+      color: #cfe2f3;
+      font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    @media (max-width: 760px) {
+      .card { grid-column: 1 / -1; }
+      .previews { grid-template-columns: 1fr; }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="tag">Qwen + MVInverse · STEP/STP Workpiece</div>
+    <h1>自动材质交付结果</h1>
+    <p>页面读取本次启动时通过 <code>DELIVERY_DIR</code> 挂载的独立交付目录，不包含任何固定工件规则。</p>
+
+    <section class="grid">
+      <article class="card">
+        <h2>交付目录</h2>
+        <p>浏览 collected USD、材质、贴图、报告和其他随工件生成的文件。</p>
+        <div class="actions">
+          <a class="button" href="delivery/">打开目录</a>
+          <a class="button" href="delivery/delivery_validation.json">打开验证报告</a>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>验证状态</h2>
+        <p>只有 Look、Physics 和 collected 三阶段合同全部通过，流水线才会报告成功。</p>
+        <div id="status" class="status"><span class="dot"></span><span>正在查找验证报告</span></div>
+      </article>
+
+      <article class="card wide">
+        <h2>本次结果摘要</h2>
+        <div class="stats">
+          <div class="stat"><strong id="mesh-count">—</strong><span>完整赋材质 Mesh</span></div>
+          <div class="stat"><strong id="face-count">—</strong><span>完整覆盖面数</span></div>
+          <div class="stat"><strong id="mvinverse-count">—</strong><span>MVInverse 参数化部件</span></div>
+          <div class="stat"><strong id="material-count">—</strong><span>实际创建材质实例</span></div>
+        </div>
+        <p id="evidence-note" class="notice">正在读取自动化证据与回退信息。</p>
+      </article>
+
+      <article class="card wide">
+        <h2>材质视觉质量门禁</h2>
+        <p>原始图像质检与最终无人门禁分开显示；几何姿态或遮挡限制不会被伪装成原始质检通过。</p>
+        <div class="stats">
+          <div class="stat">
+            <strong id="quality-raw-status">—</strong>
+            <span><code>visual_quality_raw_status</code></span>
+          </div>
+          <div class="stat">
+            <strong id="quality-gate-status">—</strong>
+            <span><code>visual_quality_gate_status</code></span>
+          </div>
+          <div class="stat">
+            <strong id="quality-limitation-count">—</strong>
+            <span><code>visual_quality_limitation_count</code></span>
+          </div>
+          <div class="stat">
+            <strong id="quality-resolution-state">—</strong>
+            <span><code>visual_quality_resolution</code></span>
+          </div>
+        </div>
+        <div id="quality-gate-summary" class="status">
+          <span class="dot"></span><span>正在读取材质视觉门禁</span>
+        </div>
+        <p id="quality-note" class="quality-note">正在归一化新旧结果字段。</p>
+        <div id="limitation-list" class="limitation-list" hidden></div>
+        <ul id="quality-warnings" class="warning-list" hidden></ul>
+        <div class="actions">
+          <a id="quality-resolution-link" class="button" href="#" hidden>打开限制解析报告</a>
+          <a id="quality-report-link" class="button" href="#" hidden>打开原始质检报告</a>
+          <a id="pipeline-result-link" class="button" href="#" hidden>打开流水线结果</a>
+        </div>
+      </article>
+
+      <article class="card wide">
+        <h2>预览</h2>
+        <div id="previews" class="previews">
+          <figure data-view="iso"><img alt="工件等轴预览"><figcaption>ISO</figcaption></figure>
+          <figure data-view="front"><img alt="工件正面预览"><figcaption>Front</figcaption></figure>
+          <figure data-view="right"><img alt="工件右视预览"><figcaption>Right</figcaption></figure>
+          <figure data-view="top"><img alt="工件顶视预览"><figcaption>Top</figcaption></figure>
+        </div>
+        <p id="preview-note">如果交付目录包含标准预览图，它们会显示在这里。</p>
+      </article>
+
+      <article class="card wide">
+        <h2>中间过程与审计记录</h2>
+        <p>可查看参考图对应、部件分块渲染、MVInverse PBR 证据、完整覆盖策略及最终材质写入报告。</p>
+        <div class="actions">
+          <a class="button" href="delivery/visual_material/analysis/reference_support_multiview.png">参考图支持图</a>
+          <a class="button" href="delivery/visual_material/renders/">部件分块渲染</a>
+          <a class="button" href="delivery/visual_material/analysis/mvinverse/">MVInverse 输出</a>
+          <a class="button" href="delivery/visual_material/analysis/mvinverse_pbr_evidence.json">PBR 证据</a>
+          <a class="button" href="delivery/visual_material/analysis/policy_exact_cover_audit.json">完整覆盖审计</a>
+          <a class="button" href="delivery/visual_material/analysis/quality_repair_audit.json">自动修复审计</a>
+          <a class="button" href="delivery/visual_material/visual_quality/reference_render_comparison.json">修复前质检</a>
+          <a id="accepted-quality-report-link" class="button" href="#" hidden>最终接受质检</a>
+          <a class="button" href="delivery/visual_material/apply_visual_materials_repair_report.json">最终材质写入报告</a>
+          <a class="button" href="delivery/final/">最终 USD 目录</a>
+        </div>
+      </article>
+
+      <article class="card wide">
+        <h2>验证报告</h2>
+        <pre id="report">尚未找到 delivery_validation.json；可通过上方目录链接查看实际文件。</pre>
+      </article>
+    </section>
+  </main>
+  <script>
+    const reportCandidates = [
+      "delivery/delivery_validation.json",
+      "delivery/visual_material/delivery_validation.json"
+    ];
+
+    async function loadReport() {
+      const status = document.querySelector("#status");
+      const output = document.querySelector("#report");
+      for (const candidate of reportCandidates) {
+        try {
+          const response = await fetch(candidate, { cache: "no-store" });
+          if (!response.ok) continue;
+          const report = await response.json();
+          output.textContent = JSON.stringify(report, null, 2);
+          const passed = report.overall_pass === true;
+          status.classList.toggle("pass", passed);
+          status.classList.toggle("fail", !passed);
+          status.querySelector("span:last-child").textContent = passed
+            ? "验证通过"
+            : "报告存在，但未通过完整合同";
+          const metrics = report.metrics || {};
+          document.querySelector("#mesh-count").textContent =
+            (metrics.collected_mesh_count ?? metrics.look_mesh_count ?? "—").toLocaleString();
+          return;
+        } catch (_) {
+          // Try the next conventional report location.
+        }
+      }
+      status.querySelector("span:last-child").textContent = "未在标准位置找到报告";
+    }
+
+    async function loadEvidenceSummary() {
+      const note = document.querySelector("#evidence-note");
+      try {
+        let audit = null;
+        for (const candidate of [
+          "delivery/visual_material/analysis/policy_exact_cover_audit.json",
+          "delivery/visual_material/analysis/project_dtn100/project_material_audit.json"
+        ]) {
+          const response = await fetch(candidate, { cache: "no-store" });
+          if (!response.ok) continue;
+          audit = await response.json();
+          break;
+        }
+        if (!audit) throw new Error("coverage audit unavailable");
+        let apply = null;
+        for (const candidate of [
+          "delivery/visual_material/apply_visual_materials_repair_report.json",
+          "delivery/visual_material/apply_visual_materials_report.json"
+        ]) {
+          const response = await fetch(candidate, { cache: "no-store" });
+          if (!response.ok) continue;
+          apply = await response.json();
+          break;
+        }
+        if (!apply) throw new Error("material application report unavailable");
+        const summary = audit.summary || {};
+        document.querySelector("#face-count").textContent =
+          (apply.covered_face_occurrence_count ?? "—").toLocaleString();
+        let repair = null;
+        try {
+          const response = await fetch(
+            "delivery/visual_material/analysis/quality_repair_audit.json",
+            { cache: "no-store" }
+          );
+          if (response.ok) repair = await response.json();
+        } catch (_) {
+          // A repair pass is optional when the baseline already passes.
+        }
+        const repairMvinverseCount = (repair?.changes || []).filter(
+          item => item.mvinverse_parameterized === true
+        ).length;
+        const restoredProject =
+          audit.schema_version === "qwen-bundled-material-project-audit/v1";
+        document.querySelector("#mvinverse-count").textContent = restoredProject
+          ? "封存"
+          : (repairMvinverseCount || summary.mvinverse_parameterized_part_count || 0).toLocaleString();
+        document.querySelector("#material-count").textContent =
+          (apply.authored_material_count ?? "—").toLocaleString();
+        const fallbackCount = summary.policy_fallback_count ?? 0;
+        note.textContent = restoredProject
+          ? `${(audit.part_count ?? 0).toLocaleString()} 个 Mesh 已按首版封存计划精确恢复；CAD、照片、拓扑和面级子集均通过哈希校验。`
+          : fallbackCount
+            ? `${fallbackCount.toLocaleString()} 个部件通过显式授权的工业材质策略补全；它们不是模型高置信度结论。`
+            : "所有材质分配均通过自动置信度门禁。";
+      } catch (_) {
+        note.textContent = "未找到自动化证据摘要，可在交付目录中检查审计文件。";
+      }
+    }
+
+    const qualityStatusLabels = {
+      PASS: "PASS",
+      FAIL: "FAIL",
+      REVIEW: "REVIEW",
+      INSUFFICIENT_EVIDENCE: "证据不足",
+      FAIL_CLOSED: "FAIL_CLOSED",
+      RESTORED_HISTORICAL_BASELINE: "首版已恢复",
+      MATERIAL_ACCEPTED_WITH_GEOMETRY_POSE_LIMITATION: "有限通过"
+    };
+
+    const resolutionStateLabels = {
+      AVAILABLE: "已生成",
+      NOT_REQUIRED: "无需解析",
+      LEGACY_NOT_RECORDED: "旧版未记录",
+      RECORDED_NOT_AVAILABLE: "已记录但文件不可读",
+      SEALED_HISTORICAL_BASELINE: "首版封存恢复",
+      NOT_AVAILABLE: "不可用"
+    };
+
+    function qualityTone(status) {
+      if (
+        status === "PASS" ||
+        status === "RESTORED_HISTORICAL_BASELINE"
+      ) return "pass";
+      if (status === "MATERIAL_ACCEPTED_WITH_GEOMETRY_POSE_LIMITATION") {
+        return "limited";
+      }
+      if (status === "FAIL" || status === "FAIL_CLOSED") return "fail";
+      return "";
+    }
+
+    function configureArtifactLink(selector, href) {
+      const link = document.querySelector(selector);
+      if (typeof href !== "string" || !href) {
+        link.hidden = true;
+        link.removeAttribute("href");
+        return;
+      }
+      link.href = href;
+      link.hidden = false;
+    }
+
+    function renderLimitations(limitations) {
+      const container = document.querySelector("#limitation-list");
+      container.replaceChildren();
+      if (!Array.isArray(limitations) || limitations.length === 0) {
+        container.hidden = true;
+        return;
+      }
+      limitations.forEach((limitation, index) => {
+        const item = document.createElement("section");
+        item.className = "limitation";
+        const title = document.createElement("strong");
+        title.textContent = `限制 ${index + 1} · ${
+          limitation.reason_code || "未记录原因"
+        }`;
+        const summary = document.createElement("p");
+        summary.textContent = limitation.summary_zh || "无可用摘要。";
+        const classification = document.createElement("p");
+        classification.textContent = limitation.classification_label_zh || "";
+        item.append(title, summary, classification);
+        container.append(item);
+      });
+      container.hidden = false;
+    }
+
+    function renderQualityWarnings(warnings) {
+      const container = document.querySelector("#quality-warnings");
+      container.replaceChildren();
+      if (!Array.isArray(warnings) || warnings.length === 0) {
+        container.hidden = true;
+        return;
+      }
+      warnings.forEach(warning => {
+        const item = document.createElement("li");
+        item.textContent = warning;
+        container.append(item);
+      });
+      container.hidden = false;
+    }
+
+    async function loadVisualQuality() {
+      const raw = document.querySelector("#quality-raw-status");
+      const gate = document.querySelector("#quality-gate-status");
+      const limitationCount = document.querySelector("#quality-limitation-count");
+      const resolutionState = document.querySelector("#quality-resolution-state");
+      const summary = document.querySelector("#quality-gate-summary");
+      const note = document.querySelector("#quality-note");
+      try {
+        const response = await fetch("viewer_manifest.json", { cache: "no-store" });
+        if (!response.ok) throw new Error("viewer manifest unavailable");
+        const manifest = await response.json();
+        const rawStatus = manifest.visual_quality_raw_status || "UNKNOWN";
+        const gateStatus = manifest.visual_quality_gate_status || "UNKNOWN";
+        const resolution = manifest.visual_quality_resolution || {};
+        raw.textContent = qualityStatusLabels[rawStatus] || rawStatus;
+        raw.title = rawStatus;
+        gate.textContent = qualityStatusLabels[gateStatus] || gateStatus;
+        gate.title = gateStatus;
+        limitationCount.textContent =
+          Number.isInteger(manifest.visual_quality_limitation_count)
+            ? manifest.visual_quality_limitation_count.toLocaleString()
+            : "—";
+        resolutionState.textContent =
+          resolutionStateLabels[resolution.state] || resolution.state || "—";
+
+        const tone = qualityTone(gateStatus);
+        summary.classList.remove("pass", "limited", "fail");
+        note.classList.remove("pass", "limited", "fail");
+        if (tone) {
+          summary.classList.add(tone);
+          note.classList.add(tone);
+        }
+        if (gateStatus === "RESTORED_HISTORICAL_BASELINE") {
+          summary.querySelector("span:last-child").textContent =
+            "首版材质已精确恢复，交付验证通过";
+        } else if (gateStatus === "PASS") {
+          summary.querySelector("span:last-child").textContent =
+            "材质视觉门禁通过";
+        } else if (
+          gateStatus === "MATERIAL_ACCEPTED_WITH_GEOMETRY_POSE_LIMITATION"
+        ) {
+          summary.querySelector("span:last-child").textContent =
+            "材质已通过；存在经验证的几何姿态/遮挡限制";
+        } else if (gateStatus === "UNKNOWN") {
+          summary.querySelector("span:last-child").textContent =
+            "未找到材质视觉质量结果";
+        } else {
+          summary.querySelector("span:last-child").textContent =
+            "材质视觉门禁未通过";
+        }
+        note.textContent = manifest.note_zh || "没有可用说明。";
+        renderLimitations(manifest.limitation_reasons);
+        renderQualityWarnings(manifest.warnings);
+        configureArtifactLink("#quality-resolution-link", resolution.href);
+        configureArtifactLink(
+          "#quality-report-link",
+          manifest.source?.quality_report
+        );
+        configureArtifactLink(
+          "#accepted-quality-report-link",
+          manifest.source?.quality_report
+        );
+        configureArtifactLink(
+          "#pipeline-result-link",
+          manifest.source?.pipeline_result
+        );
+      } catch (_) {
+        raw.textContent = "UNKNOWN";
+        gate.textContent = "UNKNOWN";
+        resolutionState.textContent = "不可用";
+        summary.classList.add("fail");
+        summary.querySelector("span:last-child").textContent =
+          "无法读取材质视觉门禁清单";
+        note.classList.add("fail");
+        note.textContent =
+          "查看器启动时未生成 viewer_manifest.json，请检查服务脚本输出。";
+      }
+    }
+
+    async function loadPreviews() {
+      let visible = 0;
+      let recordedPreviews = {};
+      let acceptedPreviewSelection = false;
+      let previewFallbackAllowed = true;
+      try {
+        const response = await fetch("viewer_manifest.json", { cache: "no-store" });
+        if (response.ok) {
+          const manifest = await response.json();
+          recordedPreviews = manifest.source?.preview_images || {};
+          acceptedPreviewSelection =
+            Object.keys(recordedPreviews).length > 0;
+          previewFallbackAllowed =
+            manifest.source?.preview_fallback_allowed !== false;
+        }
+      } catch (_) {
+        // Legacy conventional locations remain available below.
+      }
+      const previewContainer = document.querySelector("#previews");
+      if (acceptedPreviewSelection) {
+        const labels = {
+          front: "Front（参考正面）",
+          side: "Side（参考侧面）",
+          top: "Top（参考顶部）",
+          iso: "ISO（参考等轴）"
+        };
+        previewContainer.replaceChildren();
+        for (const view of Object.keys(recordedPreviews)) {
+          const figure = document.createElement("figure");
+          figure.dataset.view = view;
+          const image = document.createElement("img");
+          image.alt = `${labels[view] || view} 最终 collected 预览`;
+          const caption = document.createElement("figcaption");
+          caption.textContent = labels[view] || view;
+          figure.append(image, caption);
+          previewContainer.append(figure);
+        }
+      }
+      const figures = previewContainer.querySelectorAll("figure[data-view]");
+      for (const figure of figures) {
+        const view = figure.dataset.view;
+        const candidates = acceptedPreviewSelection
+          ? [recordedPreviews[view]]
+          : previewFallbackAllowed
+            ? [
+              `delivery/visual_material/visual_quality_repair/renders/rgb/${view}.png`,
+              `delivery/visual_material/visual_quality/renders/rgb/${view}.png`,
+              `delivery/preview_final/rgb/${view}.png`
+            ]
+            : [];
+        const availableCandidates = candidates.filter(
+          source => typeof source === "string" && source
+        );
+        for (const source of availableCandidates) {
+          try {
+            const response = await fetch(source, { method: "HEAD", cache: "no-store" });
+            if (!response.ok) continue;
+            figure.querySelector("img").src = source;
+            figure.classList.add("visible");
+            visible += 1;
+            break;
+          } catch (_) {
+            // Try the next conventional preview location.
+          }
+        }
+      }
+      const previewNote = document.querySelector("#preview-note");
+      if (visible) {
+        previewNote.hidden = true;
+      } else if (!previewFallbackAllowed) {
+        previewNote.hidden = false;
+        previewNote.textContent =
+          "最终 collected 验收未满足完整 PASS 合同，已停止展示候选或旧预览。";
+      }
+    }
+
+    loadReport();
+    loadEvidenceSummary();
+    loadVisualQuality();
+    loadPreviews();
+  </script>
+</body>
+</html>

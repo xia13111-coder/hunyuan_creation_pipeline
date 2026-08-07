@@ -2,21 +2,26 @@
 
 [English](./README.md) | [中文](./README.zh.md) | [Back to project README](../README.md)
 
-Documentation follows code ownership. The root README contains entry points and quick commands; detailed behavior and options live with each module guide.
+Start with the root README, then open the guide for the workflow or module you
+need.
 
-| Module | Code owner | Guide |
-| --- | --- | --- |
-| Generation method selection | Hunyuan and SAM3D input paths | [Hunyuan vs. SAM3D](./generation-guide.md) |
-| Overall architecture | `asset_pipeline/` | [Architecture and call graph](./architecture.md) |
-| Raw Hunyuan generation | `asset_pipeline/hunyuan_generation.py`, `jobs/hunyuan.py` | [Hunyuan](./modules/hunyuan.md) |
-| SAM3D reconstruction | `jobs/sam3d.py`, `tools/sam3d/` | [SAM3D](./modules/sam3d.md) |
-| Mesh refine | `jobs/refine.py`, `asset_refiner/` | [Refine](./modules/refine.md) |
-| Blender postprocess | `jobs/blender.py`, `tools/blender/` | [Blender](./modules/blender.md) |
-| Isaac Sim physics | `jobs/isaac.py`, `tools/isaac/` | [Physics](./modules/physics.md) |
-| Manual CAD | `workflows.run_stp_physics_job`, `convert_cad_to_usd.py` | [CAD](./modules/cad.md) |
-| HTTP API / Docker | `asset_pipeline/api.py`, `docker/` | [API](./modules/api.md) / [Docker](../docker/README.md) |
+| Topic | Guide |
+| --- | --- |
+| Repository layout | [Repository layout](./repository-layout.md) |
+| Generation method selection | [Hunyuan vs. SAM3D](./generation-guide.md) |
+| Overall architecture | [Architecture and call graph](./architecture.md) |
+| Raw Hunyuan generation | [Hunyuan](./modules/hunyuan.md) |
+| SAM3D reconstruction | [SAM3D](./modules/sam3d.md) |
+| Mesh refinement | [Refine](./modules/refine.md) |
+| Blender post-processing | [Blender](./modules/blender.md) |
+| STEP/STP reference-image materials | [Quick start](./manual-part-id-materials.md) / [Behavior and troubleshooting](./modules/visual-materials.md) |
+| Isaac Sim physics | [Physics](./modules/physics.md) |
+| Hand-authored STEP/STP | [CAD](./modules/cad.md) |
+| HTTP API and Docker | [API](./modules/api.md) / [Docker](../docker/README.md) |
+| Release and migration | [Release and portability](./release-portability.md) |
+| Public source release | [Public release checklist](./public-release-checklist.md) |
 
-Additional references:
+Other references:
 
 - [Refine configuration](../configs/README.md)
 - [Standalone tools](../tools/README.md)

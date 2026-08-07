@@ -1,7 +1,24 @@
-ARG PIPELINE_ENV_IMAGE=hunyuan-sam3d-env:latest
-ARG ISAACSIM_BASE_IMAGE=nvcr.io/nvidia/isaac-sim:5.0.0
+ARG PIPELINE_ENV_IMAGE=hunyuan-allinone:isaac-6.0.1
+ARG ISAACSIM_BASE_IMAGE=isaacsim_sim:latest
 
 FROM ${PIPELINE_ENV_IMAGE} AS pipeline_env
+
+USER root
+
+ARG MATERIAL_PIP_INDEX_URL=https://pypi.org/simple
+
+# Older pipeline environment images do not contain the optional local Qwen
+# and MVInverse runtimes.  Install the small compatibility layer here so the
+# final all-in-one image always exposes the complete visual-material feature
+# set while continuing to share the pinned SAM3D PyTorch/CUDA runtime.
+COPY requirements-visual-materials.txt /tmp/requirements-visual-materials.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    PIP_CACHE_DIR=/root/.cache/pip \
+    PIP_INDEX_URL=${MATERIAL_PIP_INDEX_URL} \
+    /opt/conda/envs/hunyuan_sam3d/bin/python -m pip install \
+        --requirement /tmp/requirements-visual-materials.txt \
+    && rm -f /tmp/requirements-visual-materials.txt
+
 FROM ${ISAACSIM_BASE_IMAGE}
 
 USER root
@@ -40,9 +57,8 @@ RUN find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) -print0 \
     | xargs -0 sed -i \
         -e 's|http://archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' \
         -e 's|http://security.ubuntu.com/ubuntu|https://security.ubuntu.com/ubuntu|g' \
-        -e 's|http://nexus.rd.ubtrobot.com/repository/ubuntu-proxy/|https://archive.ubuntu.com/ubuntu|g' \
-    || true; \
-    rm -f /etc/apt/sources.list.d/ubt.list
+        -e 's|https\?://[^/]*/repository/ubuntu-proxy/|https://archive.ubuntu.com/ubuntu|g' \
+    || true
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
@@ -83,9 +99,13 @@ COPY --from=pipeline_env ${CONDA_DIR} ${CONDA_DIR}
 ENV CONDA_PREFIX=${CONDA_DIR}/envs/${CONDA_ENV_NAME}
 ENV CONDA_DEFAULT_ENV=${CONDA_ENV_NAME}
 ENV PATH=${CONDA_DIR}/envs/${CONDA_ENV_NAME}/bin:${CONDA_DIR}/bin:${BLENDER_HOME}:${PATH}
+ENV QWEN_PYTHON=${CONDA_DIR}/envs/${CONDA_ENV_NAME}/bin/python
+ENV MVINVERSE_PYTHON=${CONDA_DIR}/envs/${CONDA_ENV_NAME}/bin/python
+ENV QWEN_MODEL_PATH=/workspace/models/qwen/Qwen3-VL-4B-Instruct
+ENV VISUAL_MATERIAL_ROOT=/workspace/materials/nvidia
+ENV TORCH_HOME=${HOME}/.cache/torch
+ENV PYTHONPATH=${ROOT_DIR}/tools
 
-# The upstream SAM3D checkout defaults DINOv2 to this legacy cache path.
-# Keep it as an internal compatibility link; host paths remain configurable mounts.
 RUN if ! getent group "${APP_GID}" >/dev/null; then \
         groupadd --gid "${APP_GID}" pipeline; \
     fi \
@@ -93,9 +113,8 @@ RUN if ! getent group "${APP_GID}" >/dev/null; then \
         useradd --uid "${APP_UID}" --gid "${APP_GID}" --home-dir "${HOME}" \
             --no-create-home --shell /bin/bash pipeline; \
     fi \
-    && mkdir -p "${HOME}/.cache/torch" /home/user/.cache/torch \
-        /workspace/hunyuan3.0_assets_creation \
-    && ln -sfn "${HOME}/.cache/torch/hub" /home/user/.cache/torch/hub \
+    && chmod o+rx /opt/isaac-sim \
+    && mkdir -p "${TORCH_HOME}" /workspace/hunyuan3.0_assets_creation \
     && chown -R "${APP_UID}:${APP_GID}" "${HOME}" /workspace
 
 COPY --chown=${APP_UID}:${APP_GID} . /workspace/hunyuan3.0_assets_creation

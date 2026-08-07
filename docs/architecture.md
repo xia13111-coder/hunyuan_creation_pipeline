@@ -1,59 +1,58 @@
-# Code Architecture And Call Graph
+# Architecture and Call Graph
 
 [English](./architecture.md) | [中文](./architecture.zh.md) | [Documentation index](./README.md)
+
+This page describes module ownership and the main execution paths. User
+commands and tuning options are documented in the relevant workflow guides.
 
 ## Layers
 
 ```text
-entry points       run_asset_pipeline.py / serve_api.py
-                        |
-interfaces         asset_pipeline/cli.py / api.py
-                        |
-workflows          asset_pipeline/workflows.py
-                        |
-jobs               asset_pipeline/jobs/*.py
-                        |
-execution          asset_pipeline/command.py
-                        |
-external processes Hunyuan SDK / Blender / Isaac Sim / SAM3D
+CLI / HTTP API
+    -> workflow orchestration
+        -> jobs and visual-material stages
+            -> shared subprocess runner
+                -> Blender / Isaac Sim / model runtimes / cloud APIs
 ```
 
-Dependencies flow downward. Jobs do not call the CLI, and standalone tools do not know about complete workflows. This keeps function ownership and callers explicit.
+Dependencies point downward: jobs do not call the CLI, and runtime workers do
+not coordinate complete workflows.
 
-## Package Ownership
+## Main modules
 
-| File | Responsibility |
+| Module | Responsibility |
 | --- | --- |
-| `asset_pipeline/runtime.py` | Discover Blender, Isaac Python, SAM3D Python, project paths, and defaults. |
-| `asset_pipeline/command.py` | Log and execute external subprocesses consistently. |
-| `asset_pipeline/paths.py` | Filter files, name run directories, and calculate output paths. |
-| `asset_pipeline/jobs/hunyuan.py` | Submit raw Hunyuan model generation. |
-| `asset_pipeline/jobs/sam3d.py` | Prepare single/multi-view inputs and start the SAM3D wrapper. |
-| `asset_pipeline/jobs/refine.py` | Run `asset_refiner` per GLB and collect refined GLBs. |
-| `asset_pipeline/jobs/blender.py` | Blender preflight, axis mapping, sizing, and GLB-to-USD. |
-| `asset_pipeline/jobs/isaac.py` | STEP/STP-to-USD, physics authoring, and USD collection. |
-| `asset_pipeline/workflows.py` | Compose jobs by source type without implementing backend algorithms. |
-| `asset_pipeline/cli.py` | Parse user options and select one workflow. |
-| `asset_pipeline/api.py` | Expose workflows as FastAPI background jobs. |
-| `asset_pipeline/hunyuan_generation.py` | Tencent SDK client and standalone generation CLI. |
+| `asset_pipeline/cli.py` | Parse command-line options and select a workflow. |
+| `asset_pipeline/api.py` | Run the same workflows as FastAPI background jobs. |
+| `asset_pipeline/workflows.py` | Compose jobs for image and GLB inputs. |
+| `asset_pipeline/manual_cad.py` | Compose the STEP/STP workflow. |
+| `asset_pipeline/jobs/` | Run one conversion, refinement, physics, or delivery task. |
+| `asset_pipeline/visual_materials/` | Coordinate reference-driven material assignment. |
+| `asset_pipeline/command.py` | Log and execute subprocesses. |
+| `asset_pipeline/runtime.py` | Resolve external runtimes and configuration. |
+| `asset_pipeline/project_layout.py` | Resolve repository paths. |
+| `asset_refiner/` | Refine meshes and transfer textures. |
+| `tools/blender/` | Blender-only workers. |
+| `tools/isaac/` | Isaac Sim-only workers. |
+| `tools/sam3d/` | SAM3D reconstruction workers. |
+| `tools/qwen_material_pipeline/` | Segmentation, evidence, retrieval, material selection, and USD tools. |
 
-`pipeline_runner.py` now contains compatibility exports only. Existing callers may keep `import pipeline_runner`; new code should import the owning module directly.
+`pipeline_runner.py`, root `run_*.py` scripts, and
+`asset_pipeline/jobs/material.py` remain compatibility entry points. New code
+should import the module responsible for that behavior directly.
 
-## Main CLI
+## Main command dispatch
 
 ```text
 run_asset_pipeline.py
 -> asset_pipeline.cli.main
    -> runtime.configure_runtime
-   -> ensure_generation_source
-   -> run
+   -> select input workflow
 ```
-
-Source dispatch:
 
 ```text
 --manual-stp
--> workflows.run_stp_physics_job
+-> manual_cad.run_manual_cad_workflow
 
 --sam3d-input
 -> workflows.run_sam3d_image_and_process_model_job
@@ -62,97 +61,149 @@ Source dispatch:
 -> jobs.refine.run_refine_mesh_job
 -> workflows.run_process_model_job
 
-image / image URL / prompt
+image directory / image URL
 -> workflows.run_generate_and_process_model_job
 ```
 
-## Hunyuan Generation
+## Image and GLB workflows
+
+Hunyuan generation:
 
 ```text
 workflows.run_generate_and_process_model_job
 -> jobs.hunyuan.run_generate_model_job
-   -> run_hunyuan_job
-      -> python -m asset_pipeline.hunyuan_generation
 -> jobs.refine.run_refine_mesh_job
 -> workflows.run_process_model_job
 ```
 
-## SAM3D
+SAM3D reconstruction:
 
 ```text
 workflows.run_sam3d_image_and_process_model_job
 -> jobs.sam3d.run_sam3d_image_job
-   -> prepare_sam3d_input
-   -> command.run_command tools/sam3d/run_reconstruct.py
-      -> SAM3 segmentation
-      -> single-view or multi-view reconstruction
-   -> select_sam3d_glb
+   -> tools/sam3d/run_reconstruct.py
 -> jobs.refine.run_refine_mesh_job
 -> workflows.run_process_model_job
 ```
 
-## Refine
-
-```text
-jobs.refine.run_refine_mesh_job
--> python -m asset_refiner
-   -> asset_refiner.cli.main
-   -> asset_refiner.runner.run_refinement
-   -> asset_refiner.hunyuan_backend.run_hunyuan_refinement
-      -> temporary upload for local GLB
-      -> SubmitReduceFaceJob / DescribeReduceFaceJob
-      -> download Hunyuan target
-      -> run_local_postprocess_worker
-         -> Blender asset_refiner/blender_worker.py
-```
-
-Blender worker core path:
-
-```text
-run_pipeline
--> import_asset / join_as_whole_asset
--> clean_source_surface
--> whole_asset_retopology
--> generate_uv
--> migrate_textures
-   -> nearest-surface PBR image sampling
-   -> or COLOR_0 vertex color to base_color
--> export_final
--> build_qc_checks
-```
-
-## GLB Postprocess
+Common GLB post-processing:
 
 ```text
 workflows.run_process_model_job
--> run_postprocess_job
-   -> jobs.blender.blender_preflight
-   -> jobs.blender.run_align_job
-      -> tools/blender/align_glb_axis_only.py
-   -> jobs.blender.run_resize_job
-      -> tools/blender/resize_glb_xyz_and_center.py
-   -> jobs.blender.run_convert_job
-      -> tools/blender/convert_glb_to_usd_zup.py
-   -> jobs.isaac.run_add_physics_job
-      -> tools/isaac/add_physics.py
-   -> jobs.isaac.run_collect_job
-      -> tools/isaac/collect_usd_flat.py
+-> Blender preflight, axis alignment, optional resize, and GLB-to-USD
+-> optional reference-driven material assignment
+-> Isaac Sim physics
+-> USD collection
+-> delivery validation
 ```
 
-## Manual CAD
+For refinement internals, see [Refine](./modules/refine.md). For Blender and
+physics, see [Blender](./modules/blender.md) and
+[Physics](./modules/physics.md).
+
+## STEP/STP workflow
+
+The hand-authored CAD path preserves source dimensions and accepts one STEP/STP
+assembly per reference-image run.
 
 ```text
-workflows.run_stp_physics_job
--> jobs.isaac.run_cad_to_usd_job
+manual_cad.run_manual_cad_workflow
+-> jobs.cad.run_cad_to_usd_job
    -> tools/isaac/convert_cad_to_usd.py
--> for each USD:
-   -> jobs.isaac.run_add_physics_job(center_origin=True)
-   -> jobs.isaac.run_collect_job
+-> jobs.isaac.run_add_physics_job(center_origin=True)
+-> optional visual_materials.run_assign_visual_materials_job
+-> jobs.isaac.run_collect_job
+-> optional delivery and final visual validation
 ```
 
-## External Boundaries
+Physics geometry preparation runs before material selection. This is important
+for procedural MDLs whose visible pattern can depend on object-space scale and
+origin. Camera alignment is used only to compare renders with photographs; it
+does not rotate or resize the delivered CAD geometry.
 
-The CLI, API, Hunyuan, `asset_refiner` orchestration code, and SAM3D all run in
-`hunyuan_sam3d`. Blender and Isaac Sim still use the Python runtimes bundled with
-those applications, so the orchestration layer invokes them as subprocesses instead
-of importing `bpy` or `pxr`; mesh, UV, and texture work remains in Blender.
+The workflow intentionally has no `len_x`, `len_y`, `len_z`, or `orientation`
+option. See [CAD](./modules/cad.md) and the
+[CAD material quick start](./manual-part-id-materials.md).
+
+## Visual-material workflow
+
+Public entry points are exported from `asset_pipeline.visual_materials`.
+`orchestrator.py` runs the stages; it does not implement the model algorithms.
+
+```text
+visual_materials.run_assign_visual_materials_job
+-> VisualMaterialPipelineContext.create
+-> VisualMaterialWorkspace.create
+-> stages.source_preparation.prepare_source_evidence
+   -> USD part index and instance expansion
+   -> canonical RGB and Part-ID renders
+   -> continuous 3D camera registration
+-> stages.material_inference.run_material_inference
+   -> local NVIDIA Materials/Base catalog
+   -> SAM3 foreground evidence
+   -> Qwen + MVInverse analysis
+   -> SigLIP2 retrieval + DINOv2 reranking
+-> per-Part-ID candidate selection and complete assignment plan
+-> preview USD after material assignment and render comparison
+-> bounded candidate refinement when evidence permits
+-> final MDL selection and selection record
+-> final USD material layer
+```
+
+After collection:
+
+```text
+visual_materials.run_final_visual_acceptance_job
+-> render collected USD
+-> compare it with registered reference views
+-> validate materials and external MDL dependencies
+```
+
+### Responsibilities inside `asset_pipeline/visual_materials`
+
+- `context.py` holds validated run inputs and configuration.
+- `workspace.py` defines output paths.
+- `commands.py` builds subprocess arguments.
+- `stages/runner.py` handles progress, subprocess failures, and bounded retries.
+- `stages/source_preparation.py` prepares registries, renders, and camera data.
+- `stages/material_inference.py` starts the material-analysis subprocess.
+- `policy_exact_cover.py` ensures every mesh receives an applicable result.
+- `exact_mdl_cache.py` verifies cached candidate renders.
+- `tournaments.py` compares shortlisted MDLs by rendered appearance.
+- `quality_contracts/` contains metrics, diagnostics, limited repair, and final
+  result checks.
+- `stages/final_acceptance.py` checks the collected deliverable.
+
+### Model roles
+
+- SAM3 supplies the confirmed whole-workpiece foreground. It may replay the
+  user's point-based annotation.
+- Qwen describes visible parts and chooses among bounded candidates.
+- MVInverse estimates PBR appearance evidence; it does not decide the final MDL
+  by itself.
+- SigLIP2 retrieves visually related materials from the complete local NVIDIA
+  `Materials/Base` catalog.
+- DINOv2 reranks candidates using local surface appearance.
+- CAD Part-ID renders connect photo evidence to individual meshes. Parts not
+  visible in any accepted view receive the configured default material so the output
+  still covers every mesh.
+
+The final choice is made from rendered MDL candidates. Once the selection
+record is created, later stages verify and apply that choice without silently
+changing it. Exact thresholds and repair rules are documented in
+[Visual materials](./modules/visual-materials.md).
+
+## Runtime boundaries and resume
+
+The top-level command runs in `hunyuan_sam3d`. Blender and Isaac Sim use their
+own Python runtimes. Qwen may use the configured Python 3.11 environment; SAM3,
+MVInverse, SigLIP2, and DINOv2 use the runtime recorded in the material
+configuration.
+
+GPU-heavy stages run sequentially to reduce peak memory use. Each reusable
+stage records its inputs, model revision, configuration, and output hashes.
+`--resume` reuses a stage only when those values still match; otherwise the
+stage runs again. A failed model stage receives at most one clean-process retry
+when its saved evidence is safe to reuse. Invalid schemas, mismatched hashes,
+or insufficient visual evidence stop the workflow and leave a diagnostic
+report under the run directory.

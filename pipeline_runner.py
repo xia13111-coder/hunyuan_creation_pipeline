@@ -1,7 +1,7 @@
 """Backward-compatible imports for the modular :mod:`asset_pipeline` package.
 
 New code should import the owning module directly, for example
-``asset_pipeline.jobs.refine`` or ``asset_pipeline.workflows``.
+``asset_pipeline.manual_cad`` or ``asset_pipeline.jobs.refine``.
 """
 
 # Compatibility re-exports are intentionally imported for downstream callers.
@@ -14,17 +14,21 @@ from asset_pipeline import (
     available_materials,
     blender_bin,
     configure_runtime,
+    DEFAULT_VISUAL_MATERIAL_CONFIG_PATH,
     default_cad_usd_output_dir,
     default_refine_config_path,
     default_refine_output_dir,
     default_refine_temp_upload,
     isaac_python,
     materials_file,
+    load_visual_material_config,
+    parse_visual_references,
     prepare_sam3d_input,
     project_root,
     require_unified_environment,
     root_dir,
     run_add_physics_job,
+    run_assign_visual_materials_job,
     run_align_job,
     run_cad_to_usd_job,
     run_collect_job,
@@ -32,6 +36,8 @@ from asset_pipeline import (
     run_generate_and_process_model_job,
     run_generate_model_job,
     run_hunyuan_job,
+    run_manual_cad_job,
+    run_manual_cad_workflow,
     run_postprocess_job,
     run_process_model_job,
     run_refine_mesh_job,
@@ -39,6 +45,7 @@ from asset_pipeline import (
     run_sam3d_image_and_process_model_job,
     run_sam3d_image_job,
     run_stp_physics_job,
+    run_validate_visual_material_delivery_job,
     runtime_summary,
     sam3d_python,
     select_sam3d_glb,

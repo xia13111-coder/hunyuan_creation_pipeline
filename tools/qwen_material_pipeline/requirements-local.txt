@@ -1,0 +1,13 @@
+# Compatibility dependency list for standalone development only.
+# Production installs the pinned root environment.yml into hunyuan_sam3d;
+# never install these packages into Isaac Sim's vendor-managed Python.
+torch>=2.4
+transformers>=4.57.0,<6
+accelerate>=1.0
+Pillow>=10
+numpy>=1.26,<3
+# Required to preserve all 16 bits when an MVInverse albedo PNG is RGB/RGBA.
+opencv-python>=4.8,<5
+safetensors>=0.4
+huggingface-hub>=0.36,<1
+modelscope>=1.28,<2

@@ -34,6 +34,7 @@ dependencies:
       - --extra-index-url https://download.pytorch.org/whl/cu121
       - --find-links https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.5.1_cu121.html
       - aiohttp==3.13.2
+      - accelerate==1.10.1
       - astor==0.8.1
       - certifi==2025.8.3
       - charset-normalizer==3.4.3
@@ -48,7 +49,8 @@ dependencies:
       - gradio==5.49.0
       - gsplat==1.5.3
       - hydra-core==1.3.2
-      - huggingface-hub==1.22.0
+      - fvcore==0.1.5.post20221221
+      - huggingface-hub==0.36.2
       - idna==3.10
       - igraph==0.11.8
       - imageio==2.37.2
@@ -56,6 +58,7 @@ dependencies:
       - kaolin==0.17.0
       - lightning==2.5.6
       - loguru==0.7.2
+      - modelscope==1.28.2
       - numpy==1.26.4
       - nvidia-cuda-nvcc-cu12==12.8.93
       - omegaconf==2.3.0
@@ -65,26 +68,33 @@ dependencies:
       - pillow==11.3.0
       - plyfile==1.1.3
       - psutil==7.0.0
+      - protobuf==6.32.1
       - pycocotools==2.0.7
       - pycryptodome==3.23.0
+      - pyexr==0.5.0
       - pymeshfix==0.17.0
+      - pytest==9.1.1
       - pyyaml>=6.0
       - regex==2024.11.6
       - requests==2.32.4
       - seaborn==0.13.2
+      - sentencepiece==0.2.0
       - six==1.17.0
       - spconv-cu120==2.3.6
       - tencentcloud-sdk-python==3.0.1462
       - tencentcloud-sdk-python-ai3d==3.0.1462
       - tencentcloud-sdk-python-common==3.0.1462
       - timm==1.0.17
+      - tensorboard==2.20.0
       - torch==2.5.1+cu121
       - torchvision==0.20.1+cu121
+      - transformers==4.57.6
       - trimesh==4.9.0
       - typing-extensions==4.12.2
       - urllib3==2.5.0
       - uvicorn
       - utils3d @ git+https://github.com/EasternJournalist/utils3d.git@3913c65d81e05e47b9f367250cf8c0f7462a0900
       - warp-lang==1.15.0
+      - wcmatch==10.1
       - xatlas==0.0.9
       - xmltodict==0.14.2

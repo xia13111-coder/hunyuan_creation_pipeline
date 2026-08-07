@@ -6,6 +6,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+build/
+dist/
+*.egg-info/
 
 .env
 .env.*
@@ -18,7 +21,9 @@ __pycache__/
 downloads/
 downloads_*/
 sam3d_downloads/
-outputs/
+/input/
+/outputs/*
+!/outputs/README.md
 output/
 output_*/
 sam3d_output_*/
@@ -30,6 +35,31 @@ pipeline_*_result.json
 *_pipeline_result.json
 manual_pipeline_result*.json
 *.log
+
+# Standalone web applications keep source but not dependency/build trees.
+/apps/**/node_modules/
+/apps/**/.next/
+/apps/**/dist/
+
+# The local material-audit site is a separate nested repository containing
+# workpiece photographs and generated audit data. It is not part of the public
+# root source release; publish a separately sanitized app repository instead.
+/apps/material_audit_web/
+
+# Example photographs and annotations are local inputs, not source code.
+/examples/*/references/*
+/examples/dtn100/
+/annotations/
+
+# Material-pipeline local runtimes, model weights, caches and results.
+/tools/qwen_material_pipeline/models/
+/tools/qwen_material_pipeline/var/*
+!/tools/qwen_material_pipeline/var/.gitkeep
+/tools/qwen_material_pipeline/workspace/*
+!/tools/qwen_material_pipeline/workspace/.gitkeep
+/tools/qwen_material_pipeline/results/*
+!/tools/qwen_material_pipeline/results/README.md
+/tools/qwen_material_pipeline/projects/dtn100/
 
 # Local third-party SAM3D checkouts and model weights.
 /tools/sam3d/third_party/

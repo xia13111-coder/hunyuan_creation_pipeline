@@ -2,7 +2,9 @@
 
 [English](./blender.md) | [中文](./blender.zh.md) | [Documentation index](../README.md)
 
-This module processes refined GLBs: bounding-box axis mapping, target sizing, geometry centering, and Z-up USD export. It does not own the Hunyuan API or PhysX properties.
+This module processes refined GLBs: bounding-box axis mapping, target sizing,
+geometry centering, and Z-up USD export. Hunyuan API calls and PhysX authoring
+are handled by other modules.
 
 ## Code And Order
 
@@ -18,6 +20,16 @@ asset_pipeline/workflows.run_postprocess_job
 ```
 
 `BLENDER_BIN` selects Blender. The preflight checks the executable, version, and GLB count before any model is changed.
+
+After conversion, `--auto-visual-materials` sends the converted USD to
+[`asset_pipeline/visual_materials`](./visual-materials.md). Physics uses the
+validated USD after material assignment. Without this option, conversion
+proceeds directly to Physics.
+
+That statement applies only to the GLB postprocess branch. Hand-authored
+STEP/STP assets do not pass through Blender. Their order is CAD USD → Physics
+geometry preparation → Qwen/MVInverse material selection → dependency
+collection.
 
 ## Axis Mapping
 

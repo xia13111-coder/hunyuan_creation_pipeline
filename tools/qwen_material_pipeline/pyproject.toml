@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwen-material-pipeline"
+version = "0.1.0"
+description = "Reference-driven NVIDIA MDL retrieval and USD material binding"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE", "third_party/mvinverse/LICENSE"]
+keywords = ["USD", "NVIDIA MDL", "material retrieval", "Qwen", "MVInverse"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/xia13111-coder/hunyuan_creation_pipeline"
+Documentation = "https://github.com/xia13111-coder/hunyuan_creation_pipeline/tree/main/tools/qwen_material_pipeline"
+Issues = "https://github.com/xia13111-coder/hunyuan_creation_pipeline/issues"
+Source = "https://github.com/xia13111-coder/hunyuan_creation_pipeline"
+
+[project.scripts]
+qwen-material = "qwen_material_pipeline.__main__:main"
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["qwen_material_pipeline*"]
+exclude = [
+    "qwen_material_pipeline.build*",
+    "qwen_material_pipeline.tests*",
+]
+
+[tool.setuptools.package-data]
+qwen_material_pipeline = [
+    "configs/**/*.json",
+    "projects/**/*",
+    "schemas/*.json",
+    "web/**/*.html",
+    "web/**/*.js",
+    "web/**/*.css",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+# runner.py is hash-bound by the MVInverse evidence ledger.  Formatting it
+# would make an otherwise valid inference run fail provenance verification.
+extend-exclude = '''
+(
+  ^/mvinverse/runner\.py$
+  | ^/third_party/
+  | ^/\.venv/
+)
+'''
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+extend-exclude = [
+    ".venv",
+    "mvinverse/runner.py",
+    "third_party",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = [".."]
+testpaths = ["tests"]

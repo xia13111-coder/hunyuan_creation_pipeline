@@ -12,12 +12,15 @@ runner.run_refinement
 from __future__ import annotations
 
 import copy
+import http.client
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
@@ -112,12 +115,82 @@ def choose_result_file(files: list[dict[str, Any]], preferences: list[str] | Non
     return RemoteFile(type=str(first.get("Type") or "UNKNOWN").upper(), url=str(first["Url"]))
 
 
-def download_url(url: str, destination: Path) -> Path:
+RETRYABLE_RESULT_DOWNLOAD_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
+
+
+def is_retryable_result_download_error(exc: Exception) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in RETRYABLE_RESULT_DOWNLOAD_HTTP_CODES
+    return isinstance(
+        exc,
+        (
+            urllib.error.URLError,
+            TimeoutError,
+            ConnectionError,
+            ssl.SSLError,
+            http.client.IncompleteRead,
+        ),
+    )
+
+
+def download_url(
+    url: str,
+    destination: Path,
+    *,
+    max_attempts: int = 5,
+    retry_interval_seconds: float = 5,
+    retry_backoff_factor: float = 2.0,
+    timeout_seconds: float = 120,
+) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with urllib.request.urlopen(url, timeout=120) as response:
-        with destination.open("wb") as handle:
-            shutil.copyfileobj(response, handle)
-    return destination
+    part_path = destination.with_name(f"{destination.name}.part")
+    attempts = max(1, int(max_attempts))
+    interval = max(0.0, float(retry_interval_seconds))
+    backoff = max(1.0, float(retry_backoff_factor))
+
+    for attempt in range(1, attempts + 1):
+        part_path.unlink(missing_ok=True)
+        print(
+            f"Downloading Hunyuan result: attempt {attempt}/{attempts}",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            with urllib.request.urlopen(url, timeout=timeout_seconds) as response:
+                content_length = response.headers.get("Content-Length")
+                with part_path.open("wb") as handle:
+                    shutil.copyfileobj(response, handle)
+
+            if content_length:
+                try:
+                    expected_size = int(content_length)
+                except ValueError:
+                    expected_size = None
+                if expected_size is not None:
+                    actual_size = part_path.stat().st_size
+                    if actual_size != expected_size:
+                        raise urllib.error.ContentTooShortError(
+                            f"Hunyuan result download was incomplete: "
+                            f"expected {expected_size} bytes, got {actual_size}",
+                            None,
+                        )
+
+            part_path.replace(destination)
+            return destination
+        except Exception as exc:
+            part_path.unlink(missing_ok=True)
+            if attempt >= attempts or not is_retryable_result_download_error(exc):
+                raise
+            print(
+                f"Hunyuan result download failed: {exc}. "
+                f"Retrying in {interval:.0f}s.",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(interval)
+            interval *= backoff
+
+    raise RuntimeError("Hunyuan result download retry loop exited unexpectedly")
 
 
 def prepare_downloaded_model(path: Path) -> Path:
@@ -134,6 +207,60 @@ def prepare_downloaded_model(path: Path) -> Path:
         raise HunyuanApiError(f"Downloaded ZIP did not contain an importable 3D file: {path}")
     candidates.sort(key=lambda item: ([".glb", ".gltf", ".fbx", ".obj"].index(item.suffix.lower()), len(str(item))))
     return candidates[0]
+
+
+def is_retryable_describe_error(
+    exc: Exception,
+    retry_error_codes: list[str],
+) -> bool:
+    if is_retryable_result_download_error(exc):
+        return True
+    cause = exc.__cause__
+    if isinstance(cause, Exception) and is_retryable_result_download_error(cause):
+        return True
+
+    message = str(exc)
+    if "Tencent API request failed for " in message:
+        return True
+    return any(code and code in message for code in retry_error_codes)
+
+
+def describe_job_with_retry(
+    client: TencentCloudApiClient,
+    *,
+    describe_action: str,
+    job_id: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    max_attempts = max(1, int(config.get("describe_max_attempts", 6) or 6))
+    interval_value = config.get("describe_retry_interval_seconds", 5)
+    interval = max(0.0, float(5 if interval_value is None else interval_value))
+    backoff_value = config.get("describe_retry_backoff_factor", 2.0)
+    backoff = max(1.0, float(2.0 if backoff_value is None else backoff_value))
+    retry_codes = [
+        str(code) for code in config.get("describe_retry_error_codes", [])
+    ]
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return client.call(describe_action, {"JobId": job_id})
+        except Exception as exc:
+            if (
+                attempt >= max_attempts
+                or not is_retryable_describe_error(exc, retry_codes)
+            ):
+                raise
+            print(
+                f"Hunyuan status query {describe_action} failed "
+                f"(attempt {attempt}/{max_attempts}): {exc}. "
+                f"Retrying in {interval:.0f}s.",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(interval)
+            interval *= backoff
+
+    raise RuntimeError("Hunyuan status query retry loop exited unexpectedly")
 
 
 def run_job(
@@ -162,7 +289,12 @@ def run_job(
     polls: list[dict[str, Any]] = []
     last_status: str | None = None
     while True:
-        describe_response = client.call(describe_action, {"JobId": job_id})
+        describe_response = describe_job_with_retry(
+            client,
+            describe_action=describe_action,
+            job_id=str(job_id),
+            config=hunyuan_cfg,
+        )
         status = str(describe_response.get("Status") or "").upper()
         if status != last_status:
             print(f"Hunyuan {stage_name} job {job_id}: {status}", file=sys.stderr, flush=True)
@@ -202,6 +334,14 @@ def should_retry_submit_error(exc: HunyuanApiError, retry_error_codes: list[str]
 
 def is_download_error(exc: HunyuanApiError) -> bool:
     return "DownloadError" in str(exc)
+
+
+def is_retryable_job_failure(
+    exc: HunyuanApiError,
+    retry_error_codes: list[str],
+) -> bool:
+    message = str(exc)
+    return any(code and code in message for code in retry_error_codes)
 
 
 def submit_job_with_retry(
@@ -262,6 +402,118 @@ def submit_reduce_face(
         poll_interval_seconds=int(config.get("hunyuan", {}).get("poll_interval_seconds", 10) or 10),
         timeout_seconds=int(config.get("hunyuan", {}).get("timeout_seconds", 3600) or 3600),
         stage_name="reduce_face",
+    )
+
+
+def submit_reduce_face_with_temporary_upload(
+    client: TencentCloudApiClient,
+    *,
+    local_input: Path,
+    input_type: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Retry temporary uploads, remote downloads, and retryable failed jobs."""
+    hunyuan_cfg = config.get("hunyuan", {})
+    temp_cfg = hunyuan_cfg.get("temp_upload", {})
+    max_url_attempts = max(1, int(temp_cfg.get("download_error_max_retries", 4) or 4))
+    url_retry_interval = float(
+        temp_cfg.get("download_error_retry_interval_seconds", 10) or 10
+    )
+    job_retry_cfg = hunyuan_cfg.get("job_failure_retry", {})
+    max_job_attempts = max(1, int(job_retry_cfg.get("max_attempts", 1) or 1))
+    job_retry_interval_value = job_retry_cfg.get("retry_interval_seconds", 30)
+    job_retry_interval = max(
+        0.0,
+        float(
+            30
+            if job_retry_interval_value is None
+            else job_retry_interval_value
+        ),
+    )
+    job_retry_backoff_value = job_retry_cfg.get(
+        "retry_backoff_factor",
+        2.0,
+    )
+    job_retry_backoff = max(
+        1.0,
+        float(
+            2.0
+            if job_retry_backoff_value is None
+            else job_retry_backoff_value
+        ),
+    )
+    job_retry_codes = [
+        str(code) for code in job_retry_cfg.get("error_codes", [])
+    ]
+
+    for job_attempt in range(1, max_job_attempts + 1):
+        print(
+            f"Hunyuan reduce_face task attempt "
+            f"{job_attempt}/{max_job_attempts}",
+            file=sys.stderr,
+            flush=True,
+        )
+        for upload_attempt in range(1, max_url_attempts + 1):
+            print(
+                f"Uploading local input to temporary public host for Hunyuan API "
+                f"({upload_attempt}/{max_url_attempts})...",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                uploaded_url = upload_to_temporary_host(local_input, config)
+            except HunyuanApiError as exc:
+                if upload_attempt >= max_url_attempts:
+                    raise
+                print(
+                    f"Temporary upload failed: {exc}. "
+                    f"Retrying in {url_retry_interval:.0f}s.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(url_retry_interval)
+                continue
+
+            print(
+                "Temporary upload finished; submitting uploaded URL to "
+                "Hunyuan API.",
+                file=sys.stderr,
+                flush=True,
+            )
+            current_file = RemoteFile(type=input_type, url=uploaded_url)
+            try:
+                return submit_reduce_face(client, current_file, config)
+            except HunyuanApiError as exc:
+                if is_download_error(exc):
+                    if upload_attempt >= max_url_attempts:
+                        raise
+                    print(
+                        f"Hunyuan could not download that temporary URL: {exc}. "
+                        f"Re-uploading in {url_retry_interval:.0f}s.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    time.sleep(url_retry_interval)
+                    continue
+                if (
+                    job_attempt >= max_job_attempts
+                    or not is_retryable_job_failure(exc, job_retry_codes)
+                ):
+                    raise
+                print(
+                    f"Hunyuan reduce_face task failed with retryable error "
+                    f"(attempt {job_attempt}/{max_job_attempts}): {exc}. "
+                    f"Re-uploading and submitting a new job in "
+                    f"{job_retry_interval:.0f}s.",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(job_retry_interval)
+                job_retry_interval *= job_retry_backoff
+                break
+
+    raise HunyuanApiError(
+        "Hunyuan task retry loop exited without a ReduceFace result"
     )
 
 
@@ -384,35 +636,12 @@ def run_hunyuan_refinement(
     current_file = remote_input
     if config.get("hunyuan", {}).get("retopology", {}).get("enabled", True):
         if temp_upload_required:
-            temp_cfg = config.get("hunyuan", {}).get("temp_upload", {})
-            max_url_attempts = max(1, int(temp_cfg.get("download_error_max_retries", 4) or 4))
-            retry_interval = float(temp_cfg.get("download_error_retry_interval_seconds", 10) or 10)
-            local_input = Path(api_input_ref).resolve()
-            for upload_attempt in range(1, max_url_attempts + 1):
-                print(
-                    f"Uploading local input to temporary public host for Hunyuan API "
-                    f"({upload_attempt}/{max_url_attempts})...",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                uploaded_url = upload_to_temporary_host(local_input, config)
-                print("Temporary upload finished; submitting uploaded URL to Hunyuan API.", file=sys.stderr, flush=True)
-                current_file = RemoteFile(type=remote_input.type, url=uploaded_url)
-                try:
-                    reduce_result = submit_reduce_face(client, current_file, config)
-                    break
-                except HunyuanApiError as exc:
-                    if upload_attempt >= max_url_attempts or not is_download_error(exc):
-                        raise
-                    print(
-                        f"Hunyuan could not download that temporary URL: {exc}. "
-                        f"Re-uploading in {retry_interval:.0f}s.",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    time.sleep(retry_interval)
-            else:
-                raise HunyuanApiError("Temporary upload retry loop exited without a ReduceFace result")
+            reduce_result = submit_reduce_face_with_temporary_upload(
+                client,
+                local_input=Path(api_input_ref).resolve(),
+                input_type=remote_input.type,
+                config=config,
+            )
         else:
             reduce_result = submit_reduce_face(client, current_file, config)
         api_stages.append(reduce_result)
@@ -439,7 +668,21 @@ def run_hunyuan_refinement(
 
     suffix = "." + current_file.type.lower().replace("unknown", "bin")
     download_name = "hunyuan_reduce_target"
-    api_result_path = prepare_downloaded_model(download_url(current_file.url, intermediate / f"{download_name}{suffix}"))
+    result_download_cfg = config.get("hunyuan", {}).get("result_download", {})
+    api_result_path = prepare_downloaded_model(
+        download_url(
+            current_file.url,
+            intermediate / f"{download_name}{suffix}",
+            max_attempts=int(result_download_cfg.get("max_attempts", 5)),
+            retry_interval_seconds=float(
+                result_download_cfg.get("retry_interval_seconds", 5)
+            ),
+            retry_backoff_factor=float(
+                result_download_cfg.get("retry_backoff_factor", 2.0)
+            ),
+            timeout_seconds=float(result_download_cfg.get("timeout_seconds", 120)),
+        )
+    )
 
     local_log_path = output_dir / "hunyuan_local_postprocess_blender.log"
     local_config_path = run_local_postprocess_worker(

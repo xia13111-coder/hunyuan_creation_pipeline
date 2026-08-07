@@ -2,7 +2,9 @@
 
 [English](./api.md) | [中文](./api.zh.md) | [Documentation index](../README.md)
 
-`asset_pipeline/api.py` uses FastAPI to expose Hunyuan generation and GLB postprocess workflows as background jobs. The API owns queue state, status, and logs while reusing the same pipeline functions.
+`asset_pipeline/api.py` exposes Hunyuan generation and asset-processing pipelines
+as FastAPI background jobs. It manages queue state and logs while calling the
+same functions as the CLI.
 
 ## Start
 
@@ -24,7 +26,11 @@ The root `serve_api.py` contains a compatibility ASGI export, so the old `uvicor
 | `GET` | `/jobs/{job_id}/logs` | Return job logs. |
 | `POST` | `/jobs/generate-model` | Run raw Hunyuan generation only. |
 | `POST` | `/jobs/process-model` | Run Blender/Isaac postprocess on an existing GLB. |
+| `POST` | `/jobs/process-manual-cad` | Convert STEP/STP to USD, add physics, optionally assign reference-image materials, collect dependencies, and validate the result. |
 | `POST` | `/jobs/generate-and-process-model` | Run Hunyuan generation, refine, Blender, and Isaac. |
+
+The two Hunyuan generation endpoints accept exactly one of `input_dir` and
+`image_url`. A `prompt` field is rejected.
 
 ## Job Model
 
@@ -59,12 +65,54 @@ curl --noproxy '*' -X POST http://127.0.0.1:8000/jobs/process-model \
   }'
 ```
 
+Hand-authored CAD has a dedicated endpoint and requires no size fields:
+
+```bash
+curl --noproxy '*' -X POST http://127.0.0.1:8000/jobs/process-manual-cad \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "input_path": "/workspace/assets/manual_asset.stp",
+    "cad_usd_output_dir": "/workspace/assets/manual/cad_usd",
+    "intermediate_output_dir": "/workspace/assets/manual/intermediate",
+    "final_output_dir": "/workspace/assets/manual/final",
+    "auto_visual_materials": false,
+    "material": "steel",
+    "approx": "sdf",
+    "sdf_resolution": 32
+  }'
+```
+
+The endpoint calls `manual_cad.run_manual_cad_workflow`. With reference-image
+materials enabled, geometry preparation runs before NVIDIA MDL selection;
+dependencies are collected only after the material result is validated. This
+order keeps object-space procedural textures stable. The request has no
+`len_x/len_y/len_z` or `orientation` fields and rejects them. Schema errors
+return HTTP 422, preflight errors return HTTP 400, and subprocess failures mark
+the job as `failed`.
+
+Complete the local SAM3 annotation UI before submitting the background job.
+Pass its JSON path as `visual_foreground_annotations`; this field is restricted
+to the STEP/STP endpoint with `auto_visual_materials: true` and
+`visual_inference_mode: "live"`. A queued job never waits for browser clicks.
+
+The example above runs CAD + Physics only. To enable reference-image materials,
+configure the dependencies listed in the visual-material guide, including
+Qwen3.5, SAM3, MVInverse, SigLIP2, DINOv2, the Base observation bank, NVIDIA
+Materials, and the reference images. Then set `auto_visual_materials` to
+`true`. See
+[Reference-image material assignment](./visual-materials.md).
+
 ## Docker
 
-The full image starts `asset_pipeline.api:app` by default. The current validated
-container target uses Isaac Sim 6.0.1. The API exposes Hunyuan generation and
-existing-GLB processing; run SAM3D image reconstruction and manual STEP/STP jobs
-through the pipeline CLI inside the same container.
+The full image starts `asset_pipeline.api:app` by default. The provided
+container image uses Isaac Sim 6.0.1. The API exposes Hunyuan generation,
+existing-GLB processing, and manual STEP/STP processing; run SAM3D image
+reconstruction through the pipeline CLI inside the same container.
+
+`hunyuan-allinone:isaac-6.0.1-materials` includes the shared visual-material
+dependencies in `hunyuan_sam3d`. Qwen3.5 uses the separately mounted runtime
+described in the Docker guide. Model weights, the Base observation bank, and
+NVIDIA Materials remain read-only mounts and are not baked into the image.
 
 See the [Docker operations guide](../../docker/README.md) for offline image
 export/import, GPU setup, Hub/cache mounts, CLI/API commands, lifecycle

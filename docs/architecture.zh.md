@@ -2,58 +2,54 @@
 
 [English](./architecture.md) | [中文](./architecture.zh.md) | [文档索引](./README.zh.md)
 
-## 分层原则
+本页只说明模块职责和主要调用链。运行命令和调参方法请查看对应的流程文档。
+
+## 分层结构
 
 ```text
-入口层        run_asset_pipeline.py / serve_api.py
-                 |
-接口实现层    asset_pipeline/cli.py / api.py
-                 |
-工作流层      asset_pipeline/workflows.py
-                 |
-Job 层        asset_pipeline/jobs/*.py
-                 |
-执行层        asset_pipeline/command.py
-                 |
-外部进程      Hunyuan SDK / Blender / Isaac Sim / SAM3D
+CLI / HTTP API
+    -> 工作流编排
+        -> Job 与视觉材质阶段
+            -> 统一子进程执行器
+                -> Blender / Isaac Sim / 模型运行时 / 云 API
 ```
 
-依赖只向下流动。`jobs` 不反向调用 CLI，独立工具也不知道完整 pipeline。这样每个函数的所属模块和上层调用者都比较明确。
+依赖只向下流动：任务模块不调用 CLI，外部运行时脚本也不负责组织完整流程。
 
-## 包结构
+## 主要模块
 
-| 文件 | 职责 |
+| 模块 | 职责 |
 | --- | --- |
-| `asset_pipeline/runtime.py` | 查找 Blender、Isaac Python、SAM3D Python，提供项目路径和默认配置。 |
-| `asset_pipeline/command.py` | 统一构造日志并运行外部子进程。 |
-| `asset_pipeline/paths.py` | 文件筛选、运行目录命名和输出路径计算。 |
-| `asset_pipeline/jobs/hunyuan.py` | 提交 Hunyuan 原始模型生成。 |
-| `asset_pipeline/jobs/sam3d.py` | 准备单/多图目录并启动 SAM3D wrapper。 |
-| `asset_pipeline/jobs/refine.py` | 对每个 GLB 启动 `asset_refiner` 并收集 refined GLB。 |
-| `asset_pipeline/jobs/blender.py` | Blender 预检、轴对齐、尺寸和 GLB-to-USD。 |
-| `asset_pipeline/jobs/isaac.py` | STEP/STP-to-USD、物理挂载和 USD 收集。 |
-| `asset_pipeline/workflows.py` | 按输入类型组合 job，不实现底层算法。 |
-| `asset_pipeline/cli.py` | 解析用户参数，选择一条 workflow。 |
-| `asset_pipeline/api.py` | 把 workflow 包装成 FastAPI 后台任务。 |
-| `asset_pipeline/hunyuan_generation.py` | Tencent SDK 客户端和可独立执行的生成 CLI。 |
+| `asset_pipeline/cli.py` | 解析命令行参数并选择工作流。 |
+| `asset_pipeline/api.py` | 通过 FastAPI 后台任务运行相同工作流。 |
+| `asset_pipeline/workflows.py` | 组合图片和 GLB 输入所需的 Job。 |
+| `asset_pipeline/manual_cad.py` | 组合 STEP/STP 工作流。 |
+| `asset_pipeline/jobs/` | 执行一次转换、精修、物理处理或交付检查。 |
+| `asset_pipeline/visual_materials/` | 组织参考图驱动的材质赋值。 |
+| `asset_pipeline/command.py` | 统一记录并执行子进程。 |
+| `asset_pipeline/runtime.py` | 查找外部运行时并读取配置。 |
+| `asset_pipeline/project_layout.py` | 解析仓库路径。 |
+| `asset_refiner/` | 网格精修与纹理迁移。 |
+| `tools/blender/` | 仅由 Blender 执行的脚本。 |
+| `tools/isaac/` | 仅由 Isaac Sim 执行的脚本。 |
+| `tools/sam3d/` | SAM3D 重建脚本。 |
+| `tools/qwen_material_pipeline/` | 分割、图像分析、检索、材质选择与 USD 工具。 |
 
-`pipeline_runner.py` 只保留兼容导出。旧代码仍可使用 `import pipeline_runner`，新代码应直接 import 所属模块。
+`pipeline_runner.py`、根目录 `run_*.py` 和 `asset_pipeline/jobs/material.py`
+用于兼容旧入口。新代码应直接导入实际负责该功能的模块。
 
-## 主 CLI
+## 主命令分发
 
 ```text
 run_asset_pipeline.py
 -> asset_pipeline.cli.main
    -> runtime.configure_runtime
-   -> ensure_generation_source
-   -> run
+   -> 根据输入选择工作流
 ```
-
-`run` 的分支：
 
 ```text
 --manual-stp
--> workflows.run_stp_physics_job
+-> manual_cad.run_manual_cad_workflow
 
 --sam3d-input
 -> workflows.run_sam3d_image_and_process_model_job
@@ -62,97 +58,134 @@ run_asset_pipeline.py
 -> jobs.refine.run_refine_mesh_job
 -> workflows.run_process_model_job
 
-图片 / 图片 URL / prompt
+图片目录 / 图片 URL
 -> workflows.run_generate_and_process_model_job
 ```
 
-## Hunyuan 生成
+## 图片与 GLB 流程
+
+Hunyuan 生成：
 
 ```text
 workflows.run_generate_and_process_model_job
 -> jobs.hunyuan.run_generate_model_job
-   -> run_hunyuan_job
-      -> python -m asset_pipeline.hunyuan_generation
 -> jobs.refine.run_refine_mesh_job
 -> workflows.run_process_model_job
 ```
 
-## SAM3D
+SAM3D 重建：
 
 ```text
 workflows.run_sam3d_image_and_process_model_job
 -> jobs.sam3d.run_sam3d_image_job
-   -> prepare_sam3d_input
-   -> command.run_command tools/sam3d/run_reconstruct.py
-      -> SAM3 自动分割
-      -> single-view 或 multi-view 重建
-   -> select_sam3d_glb
+   -> tools/sam3d/run_reconstruct.py
 -> jobs.refine.run_refine_mesh_job
 -> workflows.run_process_model_job
 ```
 
-## Refine
-
-```text
-jobs.refine.run_refine_mesh_job
--> python -m asset_refiner
-   -> asset_refiner.cli.main
-   -> asset_refiner.runner.run_refinement
-   -> asset_refiner.hunyuan_backend.run_hunyuan_refinement
-      -> 临时上传本地 GLB
-      -> SubmitReduceFaceJob / DescribeReduceFaceJob
-      -> 下载 Hunyuan target
-      -> run_local_postprocess_worker
-         -> Blender asset_refiner/blender_worker.py
-```
-
-Blender worker 的核心链路：
-
-```text
-run_pipeline
--> import_asset / join_as_whole_asset
--> clean_source_surface
--> whole_asset_retopology
--> generate_uv
--> migrate_textures
-   -> 图片 PBR 最近表面采样
-   -> 或 COLOR_0 顶点色到 base_color
--> export_final
--> build_qc_checks
-```
-
-## GLB 后处理
+GLB 通用后处理：
 
 ```text
 workflows.run_process_model_job
--> run_postprocess_job
-   -> jobs.blender.blender_preflight
-   -> jobs.blender.run_align_job
-      -> tools/blender/align_glb_axis_only.py
-   -> jobs.blender.run_resize_job
-      -> tools/blender/resize_glb_xyz_and_center.py
-   -> jobs.blender.run_convert_job
-      -> tools/blender/convert_glb_to_usd_zup.py
-   -> jobs.isaac.run_add_physics_job
-      -> tools/isaac/add_physics.py
-   -> jobs.isaac.run_collect_job
-      -> tools/isaac/collect_usd_flat.py
+-> Blender 预检、轴对齐、可选尺寸调整和 GLB-to-USD
+-> 可选参考图材质赋值
+-> Isaac Sim 物理处理
+-> USD 收集
+-> 交付检查
 ```
 
-## 手工 CAD
+精修细节见[网格精修](./modules/refine.zh.md)，Blender 和物理处理见
+[Blender](./modules/blender.zh.md)与[物理处理](./modules/physics.zh.md)。
+
+## STEP/STP 流程
+
+手工建模 STEP/STP（CAD）流程保留源模型尺寸。每次参考图推理只接收一个 STEP/STP 装配体。
 
 ```text
-workflows.run_stp_physics_job
--> jobs.isaac.run_cad_to_usd_job
+manual_cad.run_manual_cad_workflow
+-> jobs.cad.run_cad_to_usd_job
    -> tools/isaac/convert_cad_to_usd.py
--> 对每个 USD:
-   -> jobs.isaac.run_add_physics_job(center_origin=True)
-   -> jobs.isaac.run_collect_job
+-> jobs.isaac.run_add_physics_job(center_origin=True)
+-> 可选 visual_materials.run_assign_visual_materials_job
+-> jobs.isaac.run_collect_job
+-> 可选交付检查和最终视觉检查
 ```
 
-## 外部边界
+物理几何准备位于选材之前。部分程序化 MDL 会使用模型空间坐标，之后再修改单位或局部
+原点可能改变纹理的大小和位置。相机对齐只用于比较渲染图与照片，不会旋转或缩放最终
+交付的 CAD 几何。
 
-CLI、API、Hunyuan、`asset_refiner` 编排代码和 SAM3D 统一运行在
-`hunyuan_sam3d`。Blender 和 Isaac Sim 仍使用各自随程序提供的 Python，因此编排层通过
-子进程调用，不在主 Python 中 import `bpy` 或 `pxr`；真正的 mesh/UV/texture 工作也仍由
-Blender 子进程执行。
+该流程不接收 `len_x`、`len_y`、`len_z` 或 `orientation`。详细说明见
+[CAD](./modules/cad.zh.md)和[材质快速开始](./manual-part-id-materials.zh.md)。
+
+## 视觉材质流程
+
+公共入口由 `asset_pipeline.visual_materials` 导出。`orchestrator.py` 负责安排阶段顺序，
+不实现模型算法。
+
+```text
+visual_materials.run_assign_visual_materials_job
+-> VisualMaterialPipelineContext.create
+-> VisualMaterialWorkspace.create
+-> stages.source_preparation.prepare_source_evidence
+   -> USD 注册表与实例展开
+   -> 标准 RGB 和 Part-ID 渲染
+   -> 连续三维相机对齐
+-> stages.material_inference.run_material_inference
+   -> 本次运行使用的 NVIDIA Materials/Base 目录
+   -> SAM3 前景信息
+   -> Qwen + MVInverse 分析
+   -> SigLIP2 检索 + DINOv2 重排
+-> 逐 Part-ID 选择候选并补全所有 Mesh
+-> 生成赋材质预览 USD，与参考图比较
+-> 图像信息充分时执行一次受限候选调整
+-> 确定最终 MDL 并记录选择结果
+-> 生成不改动原始几何的最终材质 USD
+```
+
+收集 USD 后：
+
+```text
+visual_materials.run_final_visual_acceptance_job
+-> 渲染收集后的 USD
+-> 与已对齐的参考视角比较
+-> 检查材质和外部 MDL 依赖
+```
+
+### `asset_pipeline/visual_materials` 内部职责
+
+- `context.py` 保存已验证的输入和配置。
+- `workspace.py` 定义输出路径。
+- `commands.py` 构造子进程参数。
+- `stages/runner.py` 处理进度、子进程异常和有限重试。
+- `stages/source_preparation.py` 准备注册表、渲染图和相机数据。
+- `stages/material_inference.py` 启动材质分析子进程。
+- `policy_exact_cover.py` 保证每个 Mesh 都有可应用的结果。
+- `exact_mdl_cache.py` 校验候选渲染缓存。
+- `tournaments.py` 按渲染效果比较入围的 MDL。
+- `quality_contracts/` 保存质量指标、问题诊断、有限修正和最终检查。
+- `stages/final_acceptance.py` 检查收集后的交付文件。
+
+### 各模型的作用
+
+- SAM3 提供已确认的整机前景，也可以重放用户点选得到的标注。
+- Qwen 描述可见零件，并在限定候选中做选择。
+- MVInverse 提供 PBR 外观估计，但不单独决定最终 MDL。
+- SigLIP2 从本机完整 NVIDIA `Materials/Base` 目录中检索相似材质。
+- DINOv2 根据局部表面外观重新排序候选。
+- CAD Part-ID 渲染把照片中的信息对应到每个 Mesh。任何合格视角都看不到的零件使用
+  配置中的默认方案，确保所有 Mesh 都有材质。
+
+最终结果由 MDL 候选的实际渲染效果决定。选择结果生成后，后续阶段只校验并应用它，
+不会静默替换。具体阈值和调整规则见[视觉材质](./modules/visual-materials.zh.md)。
+
+## 运行时与断点继续
+
+顶层命令运行在 `hunyuan_sam3d` 环境中。Blender 和 Isaac Sim 使用各自的 Python。
+Qwen 可以使用配置的 Python 3.11 环境；SAM3、MVInverse、SigLIP2 和 DINOv2 使用材质
+配置中记录的运行时。
+
+占用 GPU 的阶段按顺序运行，以降低峰值显存。可复用阶段会记录输入、模型版本、配置和
+输出哈希。`--resume` 只在这些内容仍一致时复用结果，否则重新执行该阶段。模型阶段失败
+后，只有在已有分析结果可安全复用时才会用新进程重试一次。JSON 格式错误、哈希不匹配
+或图像信息不足时，流程会停止，并在本次运行目录中保留诊断报告。

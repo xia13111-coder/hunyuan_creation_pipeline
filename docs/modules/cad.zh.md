@@ -1,101 +1,99 @@
-# 手工 STEP/STP CAD 模块
+# 手工建模 STEP/STP（CAD）模块
 
 [English](./cad.md) | [中文](./cad.zh.md) | [文档索引](../README.zh.md)
 
-手工建模资产只走 STEP/STP 输入。该路径直接使用 Isaac Sim/Omniverse CAD Converter 生成 USD，保留装配体层级，不再经过 Blender GLB 往返转换。
+手工建模 STEP/STP（CAD）流程接收 STEP/STP，并直接通过 Isaac Sim/Omniverse CAD Converter 转为 USD。
+它保留装配体层级，不经过 Blender/GLB 中转。
 
 ## 代码和流程
 
+| 代码 | 职责 |
+| --- | --- |
+| `asset_pipeline/manual_cad.py` | 编排转换、物理、可选视觉材质、依赖收集和验证。 |
+| `asset_pipeline/jobs/cad.py` | 校验 STEP/STP 并运行 CAD Converter。 |
+| `asset_pipeline/visual_materials/` | 根据参考图分配视觉材质。 |
+| `asset_pipeline/jobs/isaac.py` | 准备几何、写入 PhysX 数据并收集依赖。 |
+| `asset_pipeline/jobs/delivery.py` | 验证赋材质后及最终收集的 USD。 |
+
 ```text
-asset_pipeline.workflows.run_stp_physics_job
--> jobs.isaac.run_cad_to_usd_job
+run_manual_cad_workflow
+-> run_cad_to_usd_job
    -> tools/isaac/convert_cad_to_usd.py
--> 对每个 CAD USD:
-   -> tools/isaac/add_physics.py --center-origin
-   -> tools/isaac/collect_usd_flat.py
+-> run_add_physics_job(center_origin=True)
+   -> 归一单位和局部原点、修复面序、写入碰撞
+-> 可选 run_assign_visual_materials_job
+   -> 相机对齐、提取 Part-ID 外观信息、选择 NVIDIA Base MDL
+-> tools/isaac/collect_usd_flat.py
+-> 检查结构、依赖和最终渲染
 ```
+
+`run_stp_physics_job`、`run_manual_cad_job` 和 `asset_pipeline/jobs/material.py` 只用于兼容
+旧调用。新代码应使用 `run_manual_cad_workflow` 和
+`asset_pipeline.visual_materials.run_assign_visual_materials_job`。
 
 ## 命令
 
+先按 [Part-ID 快速开始](../manual-part-id-materials.zh.md) 生成 SAM3 整机前景标注，再运行：
+
 ```bash
-python ./run_asset_pipeline.py \
+hunyuan-asset-pipeline \
   --manual-stp ./input/manual_asset.stp \
-  --cad-usd-output-dir ./manual_cad_usd \
-  --intermediate-output-dir ./manual_output_intermediate \
-  --final-output-dir ./manual_output_final \
+  --cad-usd-output-dir ./outputs/manual/asset_run/cad_usd \
+  --intermediate-output-dir ./outputs/manual/asset_run/intermediate \
+  --final-output-dir ./outputs/manual/asset_run/final \
+  --auto-visual-materials \
+  --visual-reference front=./references/front.jpg \
+  --visual-reference side=./references/side.jpg \
+  --visual-reference top=./references/top.jpg \
+  --visual-reference iso=./references/iso.jpg \
+  --visual-foreground-annotations ./annotations/sam3_foreground_annotations.json \
+  --visual-material-output-dir ./outputs/manual/asset_run/visual_material \
+  --acknowledge-mvinverse-noncommercial \
+  --allow-policy-material-fallback \
   --material steel \
   --approx sdf \
   --manual-sdf-resolution 32 \
   --set-mass 30
 ```
 
-`--manual-stp` 也可以传目录。脚本递归发现 `.stp` 和 `.step`，并在输出目录中镜像相对层级。
+`--manual-stp` 也可以是目录。转换器会递归查找 `.stp` 和 `.step`，并保留相对目录结构。
+只添加物理时可以批处理多个文件；启用参考图赋材质时，一次只能处理一个 CAD 资产。
 
-## 参数
+## 主要参数
 
 | 参数 | 说明 |
 | --- | --- |
 | `--manual-stp` | STEP/STP 文件或目录。 |
-| `--cad-usd-output-dir` | CAD Converter 原始 USD 输出目录；不传时使用 `<input>_cad_usd`。 |
-| `--cad-converter-option KEY=VALUE` | 传递给 Omniverse CAD converter 的额外 option，可重复。 |
-| `--intermediate-output-dir` | 添加物理后的 USD 输出。 |
-| `--final-output-dir` | 最终收集目录。 |
-| `--material` | `materials.json` 中的显式物理材质。 |
-| `--approx` | collision approximation；复杂动态 CAD 推荐 `sdf`，手工 CAD 路径会同时自动启用 SDF remeshing。 |
-| `--manual-sdf-resolution` | 手工 CAD 的 SDF 分辨率，默认 `32`。值越高越能保留碰撞细节，但 cooking、内存和碰撞计算开销也越大。 |
-| `--set-mass` | 整个资产总质量 kg；不传时按体积和密度估算。 |
+| `--cad-usd-output-dir` | CAD Converter 原始输出；默认 `<input>_cad_usd`。 |
+| `--cad-converter-option KEY=VALUE` | 额外转换选项，可重复。 |
+| `--intermediate-output-dir` | 完成物理准备后的 USD 输出。 |
+| `--final-output-dir` | 收集依赖后的最终资产目录。 |
+| `--auto-visual-materials` | 在几何准备后、收集依赖前自动赋材质。 |
+| `--visual-reference [ID=]IMAGE` | 同一资产的参考图，提供 2–4 个视角。 |
+| `--visual-foreground-annotations` | 根据这些图片生成的 SAM3 整机前景标注。 |
+| `--visual-material-output-dir` | 材质分析结果和赋材质后的 USD 输出。 |
+| `--acknowledge-mvinverse-noncommercial` | 确认本次运行符合 MVInverse 许可。 |
+| `--allow-policy-material-fallback` | 为未观测或无法判断的零件使用配置中的预设默认材质。 |
+| `--material` | `materials.json` 中的物理材质。 |
+| `--approx` | 碰撞近似；复杂动态 CAD 推荐 `sdf`。 |
+| `--manual-sdf-resolution` | 手工建模 STEP/STP 的 SDF 分辨率，默认 `32`。 |
+| `--set-mass` | 总质量，单位 kg；不传时按体积和密度估算。 |
 
-`--len-x/y/z` 和 `--orientation` 不用于 CAD 路径，因为任意非均匀缩放和包围盒旋转会破坏装配体 transform 语义。
+STEP/STP 不使用 `--len-x/y/z` 或 `--orientation`。任意缩放和包围盒旋转会改变工程尺寸
+与装配语义；单位转换和原点居中则会保留它们。
 
-手工 CAD 不再沿用底层脚本的通用 SDF 默认值 `256`，而是使用 `32`，优先保证复杂装配体的实时性能。如果薄壁、孔洞或小结构的碰撞轮廓明显丢失，再依次提高到 `64`、`128` 或 `256`。该参数只影响手工 STEP/STP 路径，不改变混元和 SAM3D 路径。
+## 处理细节
 
-## USD 层级
+### 先准备几何，再判断视觉材质
 
-CAD Converter 生成的 Xform/Mesh 层级会保留。物理准备不会把所有 mesh join 成一个对象：
+物理几何准备在视觉材质推理之前完成。程序化 MDL 可能使用物体坐标；如果选材后再修改
+单位或 Mesh 局部原点，纹理可能移动或缩放。因此所有材质渲染都使用同一份归一后的几何。
 
-- 顶层资产 root 保持稳定。
-- assembly 子节点 transform 保留。
-- instance/prototype 在物理处理需要时做 deinstance。
-- 物理材质放在资产 anchor 下，避免散落到 stage 根节点。
+参考图赋材质一次处理一个 STEP/STP，并为每个 Mesh 赋值。可见零件使用各自的照片信息，
+无法判断的零件使用配置中的预设默认材质。详见[参考图自动赋材质](./visual-materials.zh.md)。
 
-## 单位
+### 几何和碰撞
 
-最终 stage 使用：
-
-```text
-upAxis = Z
-metersPerUnit = 1.0
-```
-
-如果 CAD Converter 输出以 mm 为单位，`normalize_stage_units_to_meters` 会把 mesh points、translate、pivot 等长度量按比例转换到 m，同时保持世界空间外观和装配关系。
-
-## 世界原点和局部原点
-
-物理阶段使用 `--center-origin`：
-
-1. 计算整个可见资产的世界包围盒中心。
-2. 在保持顶层 root transform 为零的前提下，把下层可见几何移动到世界原点。
-3. 对每个 mesh，把 points 移到局部包围盒中心附近。
-4. 写 `xformOp:translate:meshLocalOrigin` 补偿，因此模型视觉位置不变。
-
-结果是顶层 XYZ transform 为 0，资产几何中心位于世界原点附近，每个 mesh 的局部 points 也不会带很大的偏置。
-
-## 反向面和 PhysX
-
-STEP/STP tessellation 可能产生反向面、开放壳体、非流形边，也可能在装配层级中包含镜像 transform。这些问题在双面渲染时不一定能看出来，但 PhysX 计算碰撞体积和质量时可能失败：
-
-```text
-PhysX error: attachShape ... negative mass
-```
-
-collision cooking 之前，pipeline 现在会执行以下检查：
-
-1. 把 USD mesh orientation 从 `leftHanded` 统一为 `rightHanded`。
-2. 统计边界边、非流形边、共享边面序不一致和无效面。
-3. 对封闭 mesh 应用完整世界变换后计算 signed volume，父级镜像 transform 也会包含在内。
-4. 世界空间体积为负时，反转该 mesh 所有 face index 顺序。
-5. 请求 `--approx sdf` 时，最终保持 `sdf`，并启用 `sdfEnableRemeshing`，让 PhysX 在 SDF cooking 前修复有问题的 tessellation。
-
-修复只调整拓扑方向，不会拍平装配层级，也不会改变模型的视觉位置。开放或非流形视觉几何不会被强制反面，因为这类几何没有可靠的内外方向。如果需要精确 SDF collision，仍建议从 STEP 源文件修复几何。
-
-脚本不会静默替换用户请求的碰撞模式。拓扑警告会指出对应 mesh，SDF remeshing 会处理常见的 CAD 面序、自相交和开放壳体问题。如果 PhysX 仍然报告 cooking 错误，说明该 CAD 几何无法被重网格可靠修复，应回到建模软件中执行几何修复或实体缝合。
+CAD 转换保留装配层级和变换。物理阶段把单位转为米，通过补偿变换把可见资产居中，修复
+方向明确的反向面并生成碰撞数据；开放或非流形网格只报告问题，不猜测修改。SDF 行为、
+分辨率建议和修复方法见[物理处理](./physics.zh.md)。

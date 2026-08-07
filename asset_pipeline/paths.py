@@ -104,6 +104,18 @@ def suffixed_file_path(input_file: str, output_dir: str, suffix: str) -> str:
     return str(Path(output_dir).expanduser() / f"{path.stem}{suffix}{path.suffix}")
 
 
+def collected_root_usd(input_usd: str, final_output_dir: str) -> str:
+    """Return the collector's root USD and fail if the delivery is incomplete."""
+
+    source = Path(input_usd).expanduser()
+    collected = Path(final_output_dir).expanduser() / source.stem / source.name
+    if not collected.is_file():
+        raise FileNotFoundError(
+            f"USD collect did not create expected root file: {collected}"
+        )
+    return str(collected.resolve(strict=True))
+
+
 def converted_usd_root(input_path: str, *, overwrite: bool, suffix: str | None) -> str:
     base = Path(input_path)
     if base.is_file():

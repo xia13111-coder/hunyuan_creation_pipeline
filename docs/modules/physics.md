@@ -4,6 +4,12 @@
 
 This module authors collision, rigid bodies, physics materials, and mass on USD, then collects the USD and its material/texture dependencies. Visual PBR and PhysX materials are separate data systems.
 
+For manual STEP/STP assets, `add_physics.py` first normalizes units and local
+origins, repairs winding, and authors collision, rigid-body, mass, and
+Physics-purpose material data. Qwen/MVInverse then select appearance MDLs on
+that prepared geometry. Visual `allPurpose` bindings and PhysX-purpose
+materials remain separate.
+
 ## Code
 
 ```text
@@ -19,7 +25,9 @@ asset_pipeline/jobs/isaac.py
 
 ## Physics Materials
 
-`--material` explicitly selects a preset from `materials.json`. The code no longer guesses a physics material from prim or visual-material names.
+`--material` explicitly selects a preset from
+[`materials.json`](../../materials.json). The code does not infer a physics
+material from prim names or visual appearance.
 
 | Field | Unit/type | Purpose |
 | --- | --- | --- |
@@ -29,21 +37,17 @@ asset_pipeline/jobs/isaac.py
 | `restitution` | coefficient | Bounciness. `0` is close to no rebound. |
 | `combine` | string | Optional friction/restitution combine mode, such as `average`. |
 
-Current presets:
-
-| Material | Density | Static friction | Dynamic friction | Restitution |
-| --- | ---: | ---: | ---: | ---: |
-| `plastic` | 950 | 0.30 | 0.27 | 0.10 |
-| `steel` | 7850 | 0.50 | 0.45 | 0.05 |
-| `rubber` | 1100 | 1.00 | 0.70 | 0.60 |
-| `wood` | 700 | 0.60 | 0.54 | 0.20 |
-| `copper` | 8960 | 0.40 | 0.36 | 0.05 |
+The configuration contains general presets and more specific metals, polymers,
+elastomers, wood, glass, ceramic, and concrete. Treat them as simulation
+baselines; use measured values when the exact grade and contact pair are known.
+Read the current values from `materials.json` rather than copying them into
+another configuration.
 
 ## Collision Approximation
 
 | Mode | Best use | Tradeoff |
 | --- | --- | --- |
-| `sdf` | Dynamic complex/concave meshes; current recommended default. | Good concave fidelity with higher cooking cost. Manual CAD also enables SDF remeshing. |
+| `sdf` | Dynamic complex/concave meshes; current recommended default. | Good concave fidelity with higher cooking cost. Hand-authored CAD also enables SDF remeshing. |
 | `convexHull` | Simple, mostly convex objects. | Fast and stable, but fills cavities. |
 | `convexDecomposition` | Concave approximation without SDF. | Multiple hulls improve fidelity at higher compute/collision cost. |
 | `boundingCube` | Coarse box proxy. | Fastest and least accurate. Aliases: `box`, `cube`. |
@@ -56,11 +60,13 @@ The main pipeline selects a mode with `--approx`. Direct `add_physics.py` usage 
 
 The direct script defaults `--sdf-res` to `256`. To reduce physics cost for complex CAD assemblies, the manual STEP/STP workflow explicitly passes `--manual-sdf-resolution`, which defaults to `32`.
 
-Before authoring an SDF collider, the script checks mesh topology. Boundary edges, nonmanifold edges, inconsistent shared-edge winding, invalid faces, or near-zero closed volume produce a warning because PhysX cooking may fail or produce a poor collider.
-
-`--approx` is strict: when `--approx sdf` is requested, the authored `physics:approximation` remains `sdf`; topology diagnostics never replace it with `convexDecomposition`. The direct-script option `--force-sdf` is only needed to override a different approximation supplied by rules or other command-line settings.
-
-The manual STEP/STP workflow additionally passes `--sdf-remesh`. It authors `physxSDFMeshCollision:sdfEnableRemeshing = true`, allowing PhysX to rebuild problematic CAD tessellation before computing the SDF. This is intended for inconsistent winding, open shells, and self-intersections; the resulting collision surface can be slightly less accurate than an SDF cooked from a clean closed mesh.
+Before creating an SDF collider, the script reports boundary edges,
+nonmanifold geometry, inconsistent winding, invalid faces, and near-zero
+volume. `--approx sdf` remains `sdf`; diagnostics do not silently replace it.
+The manual STEP/STP path enables SDF remeshing for common CAD tessellation
+problems. Its result may be less accurate than an SDF from a clean closed mesh.
+The low-level `--force-sdf` option is only needed to override another explicit
+approximation.
 
 ## Mass
 
@@ -83,18 +89,24 @@ normalize_stage_units_to_meters
 
 `center_mesh_local_origins` shifts mesh points and compensates visual position with `xformOp:translate:meshLocalOrigin`.
 
+This preparation runs before visual-material inference. Procedural MDLs may use
+object-space coordinates, so changing units or local origins after material
+comparison can move or rescale their patterns. All comparisons and final
+renders therefore use the same normalized geometry. Authored dimensions are
+preserved and no target-size input is required.
+
 `fix_inverted_mesh_winding` first normalizes `leftHanded` meshes to `rightHanded`, then computes signed volume after applying the complete local-to-world transform. This catches both directly inverted meshes and meshes inverted by a mirrored parent transform. A negative closed volume reverses every face index order and clears stale authored normals before PhysX collision cooking.
 
-Typical diagnostic logs are:
-
-```text
-fixed inverted world-space mesh winding: 3 mesh(es)
-[WARN] SDF topology warning on /Asset/Part/Mesh: boundary=12, nonmanifold=0, inconsistent=2, invalid_faces=0; keeping requested sdf
-SDF remeshing enabled on /Asset/Part/Mesh
-```
-
-The first line means winding was repaired while retaining the USD hierarchy and placement. The second means the requested SDF was retained, but the mesh should be inspected if PhysX reports a cooking error.
+Winding repair preserves the USD hierarchy and placement. If PhysX still
+reports a cooking error after an SDF topology warning, inspect or repair that
+source mesh.
 
 ## Final Collection
 
 `collect_usd_flat.py` creates an isolated directory per physics USD, copies the main USD, SubUSDs, materials, and textures, and rewrites required relative resource paths. The result can be used directly as a simulation asset directory.
+
+With reference-image materials enabled, validation runs again after collection.
+It reopens and renders both the USD after material assignment and the collected
+USD, checks every Mesh and `GeomSubset` binding, preserves NVIDIA MDL defaults,
+and verifies that all MDL dependencies resolve inside the final directory. Any
+failure stops the pipeline.

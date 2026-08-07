@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import threading
 import uuid
 from collections import deque
@@ -11,11 +12,17 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from . import hunyuan_generation, runtime
+from .jobs.cad import validate_cad_input_path
 from .jobs.hunyuan import run_generate_model_job
-from .workflows import run_generate_and_process_model_job, run_process_model_job
+from .visual_materials import load_visual_material_config, parse_visual_references
+from .manual_cad import DEFAULT_MANUAL_SDF_RESOLUTION, run_manual_cad_workflow
+from .workflows import (
+    run_generate_and_process_model_job,
+    run_process_model_job,
+)
 
 
 app = FastAPI(
@@ -198,9 +205,23 @@ def submit_job(kind: str, payload: dict[str, Any], func) -> dict[str, Any]:
     return snapshot_job(job_id, log_tail=50)
 
 
+def validate_hunyuan_image_payload(payload: dict[str, Any]) -> None:
+    """Require one, and only one, image source for Hunyuan generation."""
+
+    source_count = sum(
+        bool(payload.get(field_name)) for field_name in ("input_dir", "image_url")
+    )
+    if source_count != 1:
+        raise HTTPException(
+            status_code=400,
+            detail="input_dir、image_url 必须且只能提供一个",
+        )
+
+
 class GenerateModelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     input_dir: str | None = None
-    prompt: str | None = None
     image_url: str | None = None
     output_dir: str = "./downloads"
     face_count: int | None = Field(
@@ -212,6 +233,8 @@ class GenerateModelRequest(BaseModel):
 
 
 class ProcessModelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     input_path: str
     intermediate_output_dir: str
     final_output_dir: str
@@ -230,11 +253,23 @@ class ProcessModelRequest(BaseModel):
     approx: str = Field(
         default="convexDecomposition", description="碰撞体类型，对应 --approx"
     )
+    auto_visual_materials: bool = Field(
+        default=False,
+        description="在 GLB 转 USD 后、物理处理前运行 Qwen + MVInverse 视觉材质阶段",
+    )
+    visual_material_references: list[str] = Field(
+        default_factory=list,
+        description="2..4 个 [ID=]IMAGE 同工件参考图",
+    )
+    visual_material_output_dir: str | None = None
+    visual_material_config: str | None = None
+    acknowledge_mvinverse_noncommercial: bool = False
 
 
 class GenerateAndProcessModelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     input_dir: str | None = None
-    prompt: str | None = None
     image_url: str | None = None
     output_dir: str = "./downloads"
     download_preview: bool = Field(
@@ -270,11 +305,113 @@ class GenerateAndProcessModelRequest(BaseModel):
     set_mass: float | None = None
     material: str = "plastic"
     approx: str = "convexDecomposition"
+    auto_visual_materials: bool = False
+    visual_material_references: list[str] = Field(default_factory=list)
+    visual_material_output_dir: str | None = None
+    visual_material_config: str | None = None
+    acknowledge_mvinverse_noncommercial: bool = False
+
+
+class ProcessManualCadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    input_path: str = Field(description="STEP/STP 文件或目录")
+    intermediate_output_dir: str
+    final_output_dir: str
+    cad_usd_output_dir: str | None = None
+    cad_converter_options: list[str] = Field(default_factory=list)
+    material_file: str | None = None
+    material: str = "plastic"
+    set_mass: float | None = None
+    approx: str = "sdf"
+    sdf_resolution: int = Field(default=DEFAULT_MANUAL_SDF_RESOLUTION, gt=0)
+    auto_visual_materials: bool = False
+    visual_material_references: list[str] = Field(default_factory=list)
+    visual_material_output_dir: str | None = None
+    visual_material_config: str | None = None
+    visual_foreground_annotations: str | None = Field(
+        default=None,
+        description="人工确认的 SAM3 整机前景标注 JSON",
+    )
+    visual_inference_mode: str = Field(
+        default="live",
+        pattern="^(live|auto|bundled)$",
+        description=(
+            "live 强制重新运行 Qwen/MVInverse；auto 允许精确封存恢复；"
+            "bundled 要求命中封存项目"
+        ),
+    )
+    acknowledge_mvinverse_noncommercial: bool = False
+    allow_policy_material_fallback: bool = Field(
+        default=False,
+        description="允许材质策略补齐参考图流程仍未解析的 STEP/STP CAD 零件",
+    )
+
+
+def validate_visual_material_payload(
+    payload: dict[str, Any], *, manual_cad: bool = False
+) -> None:
+    enabled = payload.get("auto_visual_materials") is True
+    policy_fallback = payload.get("allow_policy_material_fallback") is True
+    foreground_annotations = payload.get("visual_foreground_annotations")
+    has_foreground_annotations = foreground_annotations is not None
+    if policy_fallback and not manual_cad:
+        raise HTTPException(
+            status_code=400,
+            detail="allow_policy_material_fallback 仅支持 STEP/STP 手工 CAD 流程",
+        )
+    if has_foreground_annotations and not manual_cad:
+        raise HTTPException(
+            status_code=400,
+            detail="visual_foreground_annotations 仅支持 STEP/STP 手工 CAD 流程",
+        )
+    if (
+        has_foreground_annotations
+        and payload.get("visual_inference_mode", "live") != "live"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="人工 SAM3 前景标注要求 visual_inference_mode=live",
+        )
+    supplied = bool(
+        payload.get("visual_material_references")
+        or payload.get("visual_material_output_dir")
+        or payload.get("visual_material_config")
+        or has_foreground_annotations
+        or payload.get("visual_inference_mode", "live") != "live"
+        or payload.get("acknowledge_mvinverse_noncommercial")
+        or policy_fallback
+    )
+    if supplied and not enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="参考图赋材质参数要求 auto_visual_materials=true",
+        )
+    if not enabled:
+        return
+    if payload.get("acknowledge_mvinverse_noncommercial") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="STEP/STP 参考图自动赋材质要求确认 MVInverse 非商业许可",
+        )
+    try:
+        parse_visual_references(payload.get("visual_material_references") or [])
+        load_visual_material_config(payload.get("visual_material_config"))
+        if has_foreground_annotations:
+            annotation_path = (
+                Path(str(foreground_annotations)).expanduser().resolve(strict=True)
+            )
+            if not annotation_path.is_file():
+                raise ValueError(
+                    "visual_foreground_annotations must reference one JSON file"
+                )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.on_event("startup")
 def check_tencent_key_on_startup() -> None:
-    runtime.require_unified_environment()
+    runtime.configure_runtime()
     refresh_tencent_key_status()
 
 
@@ -327,12 +464,7 @@ def get_job_logs(job_id: str, tail: int = 200) -> dict[str, Any]:
 @app.post("/jobs/generate-model")
 def generate_model(request: GenerateModelRequest) -> dict[str, Any]:
     payload = model_dump(request)
-    if not (
-        payload.get("input_dir") or payload.get("prompt") or payload.get("image_url")
-    ):
-        raise HTTPException(
-            status_code=400, detail="input_dir、prompt、image_url 至少提供一个"
-        )
+    validate_hunyuan_image_payload(payload)
     require_valid_tencent_key()
     return submit_job(
         "generate_model",
@@ -344,10 +476,29 @@ def generate_model(request: GenerateModelRequest) -> dict[str, Any]:
 @app.post("/jobs/process-model")
 def process_model(request: ProcessModelRequest) -> dict[str, Any]:
     payload = model_dump(request)
+    validate_visual_material_payload(payload)
     return submit_job(
         "process_model",
         payload,
         lambda log_cb: run_process_model_job(log_cb=log_cb, **payload),
+    )
+
+
+@app.post("/jobs/process-manual-cad")
+def process_manual_cad(request: ProcessManualCadRequest) -> dict[str, Any]:
+    payload = model_dump(request)
+    try:
+        validate_cad_input_path(
+            payload["input_path"],
+            require_single=bool(payload["auto_visual_materials"]),
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    validate_visual_material_payload(payload, manual_cad=True)
+    return submit_job(
+        "process_manual_cad",
+        payload,
+        lambda log_cb: run_manual_cad_workflow(log_cb=log_cb, **payload),
     )
 
 
@@ -356,12 +507,8 @@ def generate_and_process_model(
     request: GenerateAndProcessModelRequest,
 ) -> dict[str, Any]:
     payload = model_dump(request)
-    if not (
-        payload.get("input_dir") or payload.get("prompt") or payload.get("image_url")
-    ):
-        raise HTTPException(
-            status_code=400, detail="input_dir、prompt、image_url 至少提供一个"
-        )
+    validate_visual_material_payload(payload)
+    validate_hunyuan_image_payload(payload)
     require_valid_tencent_key()
     return submit_job(
         "generate_and_process_model",

@@ -121,7 +121,10 @@ def find_files(root, ext=".glb"):
     for r, _, names in os.walk(root):
         for n in names:
             if n.lower().endswith(ext):
-                out.append(os.path.join(r, n))
+                # Blender's USD exporter resolves relative texture paths from the
+                # USD layer location. Keep the export path absolute so a relative
+                # input root is not accidentally embedded twice in asset paths.
+                out.append(os.path.abspath(os.path.join(r, n)))
     return out
 
 

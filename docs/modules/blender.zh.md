@@ -2,7 +2,7 @@
 
 [English](./blender.md) | [中文](./blender.zh.md) | [文档索引](../README.zh.md)
 
-该模块处理 refine 后的 GLB：按包围盒方向对齐、缩放到目标尺寸、移动几何中心并导出 Z-up USD。它不负责 Hunyuan API 或 PhysX 属性。
+该模块处理精修后的 GLB：按包围盒方向对齐、缩放到目标尺寸、移动几何中心并导出 Z-up USD。它不负责 Hunyuan API 或 PhysX 属性。
 
 ## 代码和顺序
 
@@ -17,7 +17,14 @@ asset_pipeline/workflows.run_postprocess_job
    -> tools/blender/convert_glb_to_usd_zup.py
 ```
 
-Blender 由 `BLENDER_BIN` 指定。preflight 会检查可执行文件、版本以及输入目录中的 GLB 数量。
+Blender 由 `BLENDER_BIN` 指定。预检会检查可执行文件、版本以及输入目录中的 GLB 数量。
+
+GLB 转换成功后，如果启用 `--auto-visual-materials`，转换后的 USD 会交给
+[`asset_pipeline/visual_materials`](./visual-materials.zh.md) 赋材质，物理处理阶段使用通过验证的
+结果。未启用时，转换结果直接进入物理处理阶段。
+
+这段只描述 GLB 后处理分支。手工建模 STEP/STP 不经过 Blender，其顺序是 CAD USD →
+几何准备 → Qwen/MVInverse 选材 → 收集依赖。
 
 ## 坐标轴映射
 
@@ -51,17 +58,18 @@ Blender 由 `BLENDER_BIN` 指定。preflight 会检查可执行文件、版本�
 
 ## USD 转换
 
-`convert_glb_to_usd_zup.py` 使用 Blender USD exporter：
+`convert_glb_to_usd_zup.py` 使用 Blender USD 导出器：
 
-- stage 写入 `upAxis = Z`。
-- pipeline 默认输出 `.usd`。
+- USD 场景写入 `upAxis = Z`。
+- 流程默认输出 `.usd`。
 - 输入为单文件时创建同名输出目录；输入目录时处理目录中的 GLB。
-- 视觉材质和贴图由 Blender exporter 写到 USD 及其资源目录。
+- 视觉材质和贴图由 Blender USD 导出器写到 USD 及其资源目录。
 
 ## 与 CAD 的区别
 
-STEP/STP 不经过本模块。CAD 路径必须保留装配体 transform 和层级，因此直接在 Isaac Sim 中做 CAD-to-USD、单位归一化和原点清理。
+STEP/STP 不经过本模块。CAD 路径必须保留装配体变换和层级，因此直接在 Isaac Sim 中完成 CAD 转 USD、单位归一化和原点清理。
 
-## 输出到 Physics
+## 输出到物理处理阶段
 
-`run_convert_job` 返回 `usd_input_path`。workflow 把这个精确 USD 文件或目录传给 `jobs.isaac.run_add_physics_job`，避免把同目录中无关 USD 一起处理。
+`run_convert_job` 返回 `usd_input_path`。流程只把该 USD 文件或目录传给
+`jobs.isaac.run_add_physics_job`，避免处理同目录中的无关 USD。

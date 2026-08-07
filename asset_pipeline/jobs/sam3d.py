@@ -85,10 +85,13 @@ def run_sam3d_image_job(
     prompt: str | None = None,
     seed: int = 42,
     steps: int = 50,
+    confidence_threshold: float = 0.5,
     log_cb: LogCallback = None,
 ) -> dict:
     if not prompt or not prompt.strip():
         raise ValueError("--sam3d-prompt is required for raw SAM3D image input")
+    if not 0.0 <= confidence_threshold <= 1.0:
+        raise ValueError("--sam3d-confidence-threshold must be between 0 and 1")
 
     work_dir, resolved_mode, image_files = prepare_sam3d_input(
         input_path, output_dir, mode
@@ -103,6 +106,8 @@ def run_sam3d_image_job(
         resolved_mode,
         "--prompt",
         prompt,
+        "--confidence-threshold",
+        str(float(confidence_threshold)),
         "--seed",
         str(int(seed)),
         "--steps",
@@ -129,6 +134,7 @@ def run_sam3d_image_job(
         "work_dir": work_dir,
         "mode": resolved_mode,
         "prompt": prompt,
+        "confidence_threshold": confidence_threshold,
         "seed": seed,
         "steps": steps,
         "source_images": image_files,
