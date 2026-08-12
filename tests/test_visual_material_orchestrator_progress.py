@@ -347,9 +347,15 @@ def _component_score(
     }
 
 
+@pytest.mark.parametrize(
+    "accept_color_h1",
+    [True, False],
+    ids=["h1-winner", "all-h0-retained"],
+)
 def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    accept_color_h1: bool,
 ) -> None:
     destination = tmp_path / "visual_material"
     destination.mkdir()
@@ -509,16 +515,48 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
         **kwargs,
     ) -> None:
         events.append(stage_name)
-        for path in kwargs.get("required_files", ()):
+        required_files = tuple(kwargs.get("required_files", ()))
+
+        def command_path(flag: str) -> Path:
+            index = _command.index(flag)
+            return Path(_command[index + 1])
+
+        for path in required_files:
             path.parent.mkdir(parents=True, exist_ok=True)
-            if path.name.endswith("apply_report.json") or path.name == (
-                "apply_visual_materials_report.json"
-            ):
-                orchestrator.write_object(path, {"applied_count": 4})
-            elif path.suffix.lower() in {".usd", ".usda", ".usdc"}:
+            if path.suffix.lower() in {".usd", ".usda", ".usdc"}:
                 path.write_text("#usda 1.0\n", encoding="utf-8")
+        for path in required_files:
+            if path.suffix.lower() in {".usd", ".usda", ".usdc"}:
+                continue
+            if stage_name.endswith("_apply"):
+                apply_plan = command_path("--plan")
+                output_usd = command_path("--output").resolve(strict=True)
+                orchestrator.write_object(
+                    path,
+                    {
+                        "applied_count": 4,
+                        "plan_sha256": orchestrator.canonical_sha256(
+                            orchestrator.read_object(apply_plan, "fake apply plan")
+                        ),
+                        "output_usd": str(output_usd),
+                    },
+                )
+            elif stage_name.endswith("_registry"):
+                output_usd = command_path("--usd").resolve(strict=True)
+                orchestrator.write_object(
+                    path,
+                    {
+                        "asset_usd": str(output_usd),
+                        "asset_sha256": orchestrator.sha256_file(output_usd),
+                    },
+                )
             elif stage_name.endswith("_render"):
-                orchestrator.write_object(path, {"score_marker": stage_name})
+                rendered = orchestrator.read_object(
+                    command_path("--registry"),
+                    "fake input registry",
+                )
+                rendered["score_marker"] = stage_name
+                orchestrator.write_object(path, rendered)
             else:
                 orchestrator.write_object(path, {"test": stage_name})
 
@@ -538,7 +576,9 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
         elif "identity_final" in marker:
             score = 0.70 if component_id == "AC_01_paint" else 0.60
         elif "color_h1" in marker:
-            score = 0.74 if component_id == "AC_01_paint" else 0.59
+            score = (
+                0.74 if component_id == "AC_01_paint" and accept_color_h1 else 0.59
+            )
         elif "identity_1_render" in marker:
             score = 0.40 if component_id == "AC_01_paint" else 0.60
         elif "identity_2_render" in marker:
@@ -588,9 +628,31 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
             component["component_id"] for component in color_components
         }
         assert (
-            set(trusted_color_score_evidence.h1_rendered_registries_by_component)
+            set(trusted_color_score_evidence.h1_artifacts_by_component)
             == component_ids
         )
+        artifact_root = workspace.appearance.actual_mdl_tournament_dir
+        assert Path(trusted_color_score_evidence.artifact_root) == artifact_root
+        h0 = trusted_color_score_evidence.h0_artifact
+        identity_dir = artifact_root / "identity_final"
+        assert Path(h0.plan) == identity_dir / "plan.json"
+        assert Path(h0.apply_plan) == identity_dir / "plan.json"
+        assert Path(h0.apply_report) == identity_dir / "apply_report.json"
+        assert Path(h0.look_usd) == identity_dir / "look.usda"
+        assert Path(h0.rendered_registry) == (
+            identity_dir / "renders" / "part_registry.rendered.json"
+        )
+        for component_id, h1 in (
+            trusted_color_score_evidence.h1_artifacts_by_component.items()
+        ):
+            color_dir = artifact_root / component_id / "H1_color"
+            assert Path(h1.plan) == color_dir / "plan.json"
+            assert Path(h1.apply_plan) == color_dir / "plan.json"
+            assert Path(h1.apply_report) == color_dir / "apply_report.json"
+            assert Path(h1.look_usd) == color_dir / "look.usda"
+            assert Path(h1.rendered_registry) == (
+                color_dir / "renders" / "part_registry.rendered.json"
+            )
         trusted_score_evidence_calls.append(trusted_color_score_evidence)
         return real_rebind(
             source_audit=source_audit,
@@ -657,15 +719,16 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
         "trusted test evidence",
     )
     assert trusted_score_evidence.spatial_mapping_report == {"test": "registered"}
-    assert trusted_score_evidence.h0_rendered_registry == {
-        "score_marker": "semantic_component_identity_final_render"
-    }
+    assert orchestrator.read_object(
+        Path(trusted_score_evidence.h0_artifact.rendered_registry),
+        "trusted H0 test registry",
+    )["score_marker"] == "semantic_component_identity_final_render"
     audit = result.tournament_document
     assert audit["candidate_count"] == 6
     assert audit["actual_candidate_render_count"] == 6
     assert audit["winner_count"] == 2
     assert audit["component_color_candidate_count"] == 2
-    assert audit["component_color_h1_winner_count"] == 1
+    assert audit["component_color_h1_winner_count"] == int(accept_color_h1)
     assert all(
         component["unsafe_qwen_baseline_discarded"] is True
         for component in audit["components"]
@@ -677,8 +740,14 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
     assert final_by_part["P2"]["material_id"] == paint_ids[1]
     assert final_by_part["P3"]["material_id"] == metal_ids[0]
     assert final_by_part["P4"]["material_id"] == metal_ids[0]
-    assert final_by_part["P1"]["parameters"] == final_by_part["P2"]["parameters"]
-    assert final_by_part["P1"]["parameters"]
+    if accept_color_h1:
+        assert final_by_part["P1"]["parameters"] == final_by_part["P2"][
+            "parameters"
+        ]
+        assert final_by_part["P1"]["parameters"]
+    else:
+        assert not final_by_part["P1"].get("parameters")
+        assert not final_by_part["P2"].get("parameters")
     assert not final_by_part["P3"].get("parameters")
     assert not final_by_part["P4"].get("parameters")
     assert events.index("semantic_component_identity_final_render") > max(
@@ -690,31 +759,32 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
     assert events.index("semantic_component_1_color_h1_render") > events.index(
         "semantic_component_identity_final_render"
     )
-    assert events[-1] == "semantic_component_color_final_render"
+    assert events[-1] == "semantic_component_final_render"
 
-    tampered_plan = copy.deepcopy(result.plan)
-    tampered_assignment = next(
-        assignment
-        for assignment in tampered_plan["assignments"]
-        if assignment["part_id"] == "P1"
-    )
-    tampered_assignment["provenance"][
-        "appearance_component_color_candidate"
-    ]["source_plan_sha256"] = "0" * 64
-    tampered_audit = copy.deepcopy(audit)
-    tampered_audit["component_color_tournament"]["final_plan_sha256"] = (
-        orchestrator.canonical_sha256(tampered_plan)
-    )
-    with pytest.raises(
-        orchestrator.ComponentMdlTournamentError,
-        match="exact color candidate binding",
-    ):
-        orchestrator.rebind_part_id_material_audit_for_component_mdl_tournament(
-            source_audit=source_audit,
-            final_plan=tampered_plan,
-            tournament_audit=tampered_audit,
-            trusted_color_score_evidence=trusted_score_evidence,
+    if accept_color_h1:
+        tampered_plan = copy.deepcopy(result.plan)
+        tampered_assignment = next(
+            assignment
+            for assignment in tampered_plan["assignments"]
+            if assignment["part_id"] == "P1"
         )
+        tampered_assignment["provenance"][
+            "appearance_component_color_candidate"
+        ]["source_plan_sha256"] = "0" * 64
+        tampered_audit = copy.deepcopy(audit)
+        tampered_audit["component_color_tournament"]["final_plan_sha256"] = (
+            orchestrator.canonical_sha256(tampered_plan)
+        )
+        with pytest.raises(
+            orchestrator.ComponentMdlTournamentError,
+            match="exact color candidate binding",
+        ):
+            orchestrator.rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                final_plan=tampered_plan,
+                tournament_audit=tampered_audit,
+                trusted_color_score_evidence=trusted_score_evidence,
+            )
 
     forged_score_audit = copy.deepcopy(audit)
     forged_color_record = forged_score_audit["component_color_tournament"][

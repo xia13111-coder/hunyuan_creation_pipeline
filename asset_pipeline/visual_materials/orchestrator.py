@@ -151,8 +151,10 @@ from qwen_material_pipeline.materials.part_id_parameter_tournament import (
     select_parameter_tournament_winners,
 )
 from qwen_material_pipeline.materials.component_mdl_tournament import (
+    ComponentColorRenderArtifactPaths,
     ComponentColorScoreEvidence,
     ComponentMdlTournamentError,
+    build_component_color_render_artifact_binding,
     build_component_candidate_plan,
     build_component_color_candidate_plan,
     component_candidate_material_ids,
@@ -3076,16 +3078,37 @@ def _run_semantic_hybrid_component_tournament(
         plan_document=identity_plan,
         plan_path=identity_dir / "plan.json",
         instance_path=identity_dir / "instance_plan.json",
-        candidate_look=look_usd,
-        candidate_apply_report=apply_report,
-        candidate_registry=quality_registry,
-        candidate_render_dir=quality_render_dir,
+        candidate_look=identity_dir / "look.usda",
+        candidate_apply_report=identity_dir / "apply_report.json",
+        candidate_registry=identity_dir / "part_registry.json",
+        candidate_render_dir=identity_dir / "renders",
     )
-    identity_score_registry_path = identity_dir / "part_registry.rendered.json"
-    write_object(identity_score_registry_path, identity_rendered)
+    identity_artifact = ComponentColorRenderArtifactPaths(
+        plan=identity_dir / "plan.json",
+        apply_plan=identity_apply_plan,
+        apply_report=identity_dir / "apply_report.json",
+        look_usd=identity_dir / "look.usda",
+        rendered_registry=(
+            identity_dir / "renders" / "part_registry.rendered.json"
+        ),
+    )
+    try:
+        identity_artifact_binding = (
+            build_component_color_render_artifact_binding(
+                artifact_root=tournament_dir,
+                artifact=identity_artifact,
+                expected_plan_sha256=identity_plan_sha256,
+            )
+        )
+    except ComponentMdlTournamentError as exc:
+        raise RuntimeError(
+            "semantic_hybrid H0 render artifacts failed identity binding"
+        ) from exc
 
     color_components: list[dict[str, Any]] = []
-    h1_rendered_registries_by_component: dict[str, Mapping[str, Any]] = {}
+    h1_artifacts_by_component: dict[
+        str, ComponentColorRenderArtifactPaths
+    ] = {}
     final_plan = copy.deepcopy(identity_plan)
     color_h1_winner_count = 0
     for component_index, record in enumerate(component_records, start=1):
@@ -3127,9 +3150,29 @@ def _run_semantic_hybrid_component_tournament(
             candidate_registry=color_dir / "part_registry.json",
             candidate_render_dir=color_dir / "renders",
         )
-        h1_rendered_registries_by_component[component_id] = copy.deepcopy(
-            h1_rendered
+        h1_artifact = ComponentColorRenderArtifactPaths(
+            plan=color_dir / "plan.json",
+            apply_plan=h1_apply_plan,
+            apply_report=color_dir / "apply_report.json",
+            look_usd=color_dir / "look.usda",
+            rendered_registry=(
+                color_dir / "renders" / "part_registry.rendered.json"
+            ),
         )
+        h1_artifacts_by_component[component_id] = h1_artifact
+        try:
+            h1_artifact_binding = (
+                build_component_color_render_artifact_binding(
+                    artifact_root=tournament_dir,
+                    artifact=h1_artifact,
+                    expected_plan_sha256=canonical_sha256(h1_candidate_plan),
+                )
+            )
+        except ComponentMdlTournamentError as exc:
+            raise RuntimeError(
+                "semantic_hybrid H1 render artifacts failed identity binding "
+                f"for {component_id}"
+            ) from exc
         try:
             h1_score = score_component_render(
                 component_id=component_id,
@@ -3197,30 +3240,8 @@ def _run_semantic_hybrid_component_tournament(
             "h0_score": h0_score,
             "h1_score": h1_score,
             "candidate_artifacts": {
-                "plan": str(color_dir / "plan.json"),
-                "apply_plan": str(h1_apply_plan),
-                "look_usd": str(color_dir / "look.usda"),
-                "rendered_registry": str(
-                    color_dir / "renders" / "part_registry.rendered.json"
-                ),
-                "h0_rendered_registry": {
-                    "path": str(identity_score_registry_path),
-                    "sha256": sha256_file(identity_score_registry_path),
-                    "canonical_sha256": canonical_sha256(identity_rendered),
-                },
-                "h1_rendered_registry": {
-                    "path": str(
-                        color_dir
-                        / "renders"
-                        / "part_registry.rendered.json"
-                    ),
-                    "sha256": sha256_file(
-                        color_dir
-                        / "renders"
-                        / "part_registry.rendered.json"
-                    ),
-                    "canonical_sha256": canonical_sha256(h1_rendered),
-                },
+                "h0": copy.deepcopy(identity_artifact_binding),
+                "h1": h1_artifact_binding,
             },
         }
         color_components.append(color_record)
@@ -3272,10 +3293,9 @@ def _run_semantic_hybrid_component_tournament(
             trusted_color_score_evidence=ComponentColorScoreEvidence(
                 evidence=evidence_document,
                 spatial_mapping_report=spatial_document,
-                h0_rendered_registry=identity_rendered,
-                h1_rendered_registries_by_component=(
-                    h1_rendered_registries_by_component
-                ),
+                artifact_root=tournament_dir,
+                h0_artifact=identity_artifact,
+                h1_artifacts_by_component=h1_artifacts_by_component,
             ),
         )
     except ComponentMdlTournamentError as exc:
@@ -3284,31 +3304,29 @@ def _run_semantic_hybrid_component_tournament(
         ) from exc
     write_object(part_id_material_audit, rebound_audit)
 
-    final_instance_plan: Path | None = None
-    final_applied_count = expected_applied_count
-    if color_h1_winner_count:
-        final_rendered, final_apply_plan = apply_registry_render(
-            stage_prefix="semantic_component_color_final",
-            plan_document=final_plan,
-            plan_path=tournament_plan_path,
-            instance_path=(
-                destination
-                / "appearance_component_actual_mdl_tournament_instance_plan.json"
-            ),
-            candidate_look=look_usd,
-            candidate_apply_report=apply_report,
-            candidate_registry=quality_registry,
-            candidate_render_dir=quality_render_dir,
-        )
-        del final_rendered
-        if instance_root_count:
-            final_instance_plan = final_apply_plan
-        final_applied_count = read_object(
-            apply_report,
-            "semantic_hybrid final apply report",
-        )["applied_count"]
-    elif instance_root_count:
-        final_instance_plan = identity_apply_plan
+    # H0 and every H1 remain immutable under ``tournament_dir`` so their
+    # sealed score evidence can be replayed after the selected plan is
+    # published.  Always author and render the selected plan into the global
+    # outputs separately, including when every component retained H0.
+    final_rendered, final_apply_plan = apply_registry_render(
+        stage_prefix="semantic_component_final",
+        plan_document=final_plan,
+        plan_path=tournament_plan_path,
+        instance_path=(
+            destination
+            / "appearance_component_actual_mdl_tournament_instance_plan.json"
+        ),
+        candidate_look=look_usd,
+        candidate_apply_report=apply_report,
+        candidate_registry=quality_registry,
+        candidate_render_dir=quality_render_dir,
+    )
+    del final_rendered
+    final_instance_plan = final_apply_plan if instance_root_count else None
+    final_applied_count = read_object(
+        apply_report,
+        "semantic_hybrid final apply report",
+    )["applied_count"]
     log_message(
         log_cb,
         "Semantic-hybrid component tournament completed: "
