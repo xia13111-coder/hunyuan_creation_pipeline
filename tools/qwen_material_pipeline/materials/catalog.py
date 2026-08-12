@@ -15,6 +15,12 @@ from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
+from qwen_material_pipeline.materials.semantics import (
+    CATALOG_SURFACE_SEMANTICS_SCHEMA_VERSION,
+    infer_catalog_surface_semantics,
+    normalize_catalog_surface_semantics,
+)
+
 
 _PIPELINE_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_ISAAC_MATERIALS = (
@@ -36,7 +42,8 @@ DEFAULT_MATERIAL_ROOT = Path(
         ),
     )
 ).expanduser()
-CATALOG_SCHEMA_VERSION = 1
+CATALOG_SCHEMA_VERSION = 2
+LEGACY_CATALOG_SCHEMA_VERSION = 1
 ALLOWLIST_SCHEMA_VERSION = 1
 
 
@@ -298,6 +305,7 @@ class MaterialRecord:
     colors: tuple[str, ...]
     finishes: tuple[str, ...]
     thumbnail_path: str | None
+    surface_semantics: Mapping[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -312,6 +320,7 @@ class MaterialRecord:
             "colors": list(self.colors),
             "finishes": list(self.finishes),
             "thumbnail_path": self.thumbnail_path,
+            "surface_semantics": dict(self.surface_semantics),
         }
 
     @classmethod
@@ -325,6 +334,28 @@ class MaterialRecord:
             thumbnail = value.get("thumbnail_path")
             if thumbnail is not None and not isinstance(thumbnail, str):
                 raise TypeError("thumbnail_path must be a string or null")
+            family = _required_string(value, "family")
+            raw_surface_semantics = value.get("surface_semantics")
+            if raw_surface_semantics is None:
+                raw_surface_semantics = infer_catalog_surface_semantics(
+                    family=family,
+                    tokens=_query_tokens(
+                        " ".join(
+                            (
+                                _required_string(value, "material_id"),
+                                _required_string(value, "mdl_path"),
+                                _required_string(value, "sub_identifier"),
+                                _required_string(value, "display_name"),
+                                _optional_string(value, "description"),
+                                " ".join(keywords),
+                                " ".join(finishes),
+                            )
+                        )
+                    ),
+                )
+            surface_semantics = normalize_catalog_surface_semantics(
+                raw_surface_semantics
+            )
             return cls(
                 material_id=_required_string(value, "material_id"),
                 mdl_path=_required_string(value, "mdl_path"),
@@ -332,13 +363,14 @@ class MaterialRecord:
                 display_name=_required_string(value, "display_name"),
                 description=_optional_string(value, "description"),
                 keywords=keywords,
-                family=_required_string(value, "family"),
+                family=family,
                 category_path=_optional_string(value, "category_path"),
                 colors=colors,
                 finishes=finishes,
                 thumbnail_path=thumbnail,
+                surface_semantics=surface_semantics,
             )
-        except (KeyError, TypeError) as exc:
+        except (KeyError, TypeError, ValueError) as exc:
             raise MaterialCatalogError(f"invalid material record: {exc}") from exc
 
 
@@ -386,6 +418,13 @@ class MaterialCatalog:
                     record.thumbnail_path,
                     allowed_suffixes={".png", ".jpg", ".jpeg", ".webp"},
                 )
+            try:
+                normalize_catalog_surface_semantics(record.surface_semantics)
+            except ValueError as exc:
+                raise MaterialCatalogError(
+                    "invalid catalog surface semantics for "
+                    f"{record.material_id}: {exc}"
+                ) from exc
             if record.material_id in by_id:
                 raise MaterialCatalogError(
                     f"duplicate material ID: {record.material_id}"
@@ -432,9 +471,13 @@ class MaterialCatalog:
             ) from exc
         if not isinstance(document, dict):
             raise MaterialCatalogError("catalog document must be a JSON object")
-        if document.get("schema_version") != CATALOG_SCHEMA_VERSION:
+        schema_version = document.get("schema_version")
+        if schema_version not in {
+            LEGACY_CATALOG_SCHEMA_VERSION,
+            CATALOG_SCHEMA_VERSION,
+        }:
             raise MaterialCatalogError(
-                f"unsupported catalog schema: {document.get('schema_version')!r}"
+                f"unsupported catalog schema: {schema_version!r}"
             )
         raw_materials = document.get("materials")
         if not isinstance(raw_materials, list):
@@ -448,6 +491,9 @@ class MaterialCatalog:
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": CATALOG_SCHEMA_VERSION,
+            "surface_semantics_schema_version": (
+                CATALOG_SURFACE_SEMANTICS_SCHEMA_VERSION
+            ),
             # Informational only: load() deliberately trusts the caller's
             # configured root.  Keeping this relative makes the generated
             # catalog portable between machines and Isaac asset mounts.
@@ -646,6 +692,10 @@ def _parse_mdl(mdl_file: Path, relative_path: str, root: Path) -> list[MaterialR
         colors = tuple(sorted(_infer_values(searchable_text, _COLOR_ALIASES)))
         finishes = tuple(sorted(_infer_values(searchable_text, _FINISH_ALIASES)))
         thumbnail = _find_thumbnail(mdl_file, sub_identifier, root)
+        surface_semantics = infer_catalog_surface_semantics(
+            family=family,
+            tokens=_query_tokens(searchable_text) | set(finishes),
+        )
         records.append(
             MaterialRecord(
                 material_id=stable_material_id(relative_path, sub_identifier),
@@ -659,6 +709,7 @@ def _parse_mdl(mdl_file: Path, relative_path: str, root: Path) -> list[MaterialR
                 colors=colors,
                 finishes=finishes,
                 thumbnail_path=thumbnail,
+                surface_semantics=surface_semantics,
             )
         )
     return records
