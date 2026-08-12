@@ -3,8 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import unittest
+from unittest import mock
 
+from qwen_material_pipeline.materials import component_mdl_tournament as component_module
 from qwen_material_pipeline.materials.component_mdl_tournament import (
+    ComponentColorScoreEvidence,
     ComponentMdlTournamentError,
     build_component_candidate_plan,
     build_component_color_candidate_plan,
@@ -513,6 +516,8 @@ class ComponentMdlTournamentTests(unittest.TestCase):
         self.assertTrue(binding["same_material_id_as_h0"])
         self.assertEqual(binding["target_family"], "paint")
         self.assertEqual(binding["parameter_mutation_scope"], "reviewed_color3f_linear_only")
+        self.assertEqual(binding["minimum_score_improvement"], 0.015)
+        self.assertEqual(binding["maximum_member_regression"], 0.03)
         self.assertNotIn("parameters", source["assignments"][0])
 
     def test_component_color_candidate_rejects_identity_change_or_unreviewed_profile(
@@ -612,7 +617,7 @@ class ComponentMdlTournamentTests(unittest.TestCase):
 
     def _component_color_rebind_fixture(
         self,
-    ) -> tuple[dict, dict, dict, dict]:
+    ) -> tuple[dict, dict, dict, dict, ComponentColorScoreEvidence]:
         catalog = self._strict_catalog()
         matte = "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte"
         base_plan = self._plan()
@@ -735,7 +740,51 @@ class ComponentMdlTournamentTests(unittest.TestCase):
                 ],
             },
         }
-        return source_audit, identity_plan, color_plan, tournament_audit
+        trusted_score_evidence = ComponentColorScoreEvidence(
+            evidence={"fixture": "reference-evidence"},
+            spatial_mapping_report={"fixture": "spatial-mapping"},
+            h0_rendered_registry={"fixture_score": h0_score},
+            h1_rendered_registries_by_component={
+                "AC_paint": {"fixture_score": h1_score}
+            },
+        )
+        return (
+            source_audit,
+            identity_plan,
+            color_plan,
+            tournament_audit,
+            trusted_score_evidence,
+        )
+
+    def _rebind_with_trusted_scores(
+        self,
+        *,
+        source_audit: dict,
+        final_plan: dict,
+        tournament_audit: dict,
+        trusted_color_score_evidence: ComponentColorScoreEvidence | None,
+    ) -> dict:
+        def replay_score(**kwargs: object) -> dict:
+            self.assertEqual(kwargs["evidence"], {"fixture": "reference-evidence"})
+            self.assertEqual(
+                kwargs["spatial_mapping_report"],
+                {"fixture": "spatial-mapping"},
+            )
+            registry = kwargs["rendered_registry"]
+            self.assertIsInstance(registry, dict)
+            return json.loads(json.dumps(registry["fixture_score"]))
+
+        with mock.patch.object(
+            component_module,
+            "score_component_render",
+            side_effect=replay_score,
+        ):
+            return rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                final_plan=final_plan,
+                tournament_audit=tournament_audit,
+                trusted_color_score_evidence=trusted_color_score_evidence,
+            )
 
     def _reseal_final_plan_hashes(self, plan: dict, tournament_audit: dict) -> None:
         digest = self._sha256(plan)
@@ -743,13 +792,14 @@ class ComponentMdlTournamentTests(unittest.TestCase):
         tournament_audit["component_color_tournament"]["final_plan_sha256"] = digest
 
     def test_rebind_accepts_only_exact_hash_bound_component_color_h1(self) -> None:
-        source_audit, _identity_plan, color_plan, tournament_audit = (
+        source_audit, _identity_plan, color_plan, tournament_audit, trusted = (
             self._component_color_rebind_fixture()
         )
-        rebound = rebind_part_id_material_audit_for_component_mdl_tournament(
+        rebound = self._rebind_with_trusted_scores(
             source_audit=source_audit,
             final_plan=color_plan,
             tournament_audit=tournament_audit,
+            trusted_color_score_evidence=trusted,
         )
         parameters = color_plan["assignments"][0]["parameters"]
         by_part = {row["part_id"]: row for row in rebound["parts"]}
@@ -786,14 +836,15 @@ class ComponentMdlTournamentTests(unittest.TestCase):
             ComponentMdlTournamentError,
             "target, parameters, or semantic payload failed replay",
         ):
-            rebind_part_id_material_audit_for_component_mdl_tournament(
+            self._rebind_with_trusted_scores(
                 source_audit=source_audit,
                 final_plan=color_plan,
                 tournament_audit=tampered,
+                trusted_color_score_evidence=trusted,
             )
 
     def test_rebind_replays_scores_and_rejects_low_score_fake_h1_winner(self) -> None:
-        source_audit, _identity_plan, color_plan, audit = (
+        source_audit, _identity_plan, color_plan, audit, trusted = (
             self._component_color_rebind_fixture()
         )
         record = audit["component_color_tournament"]["components"][0]
@@ -804,7 +855,48 @@ class ComponentMdlTournamentTests(unittest.TestCase):
         record["selection"]["h1_score_sha256"] = self._sha256(record["h1_score"])
         with self.assertRaisesRegex(
             ComponentMdlTournamentError,
-            "deterministic score replay",
+            "trusted render evidence",
+        ):
+            self._rebind_with_trusted_scores(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
+                trusted_color_score_evidence=trusted,
+            )
+
+    def test_rebind_rejects_coherently_resealed_scores_without_render_support(
+        self,
+    ) -> None:
+        source_audit, _identity_plan, color_plan, audit, trusted = (
+            self._component_color_rebind_fixture()
+        )
+        record = audit["component_color_tournament"]["components"][0]
+        record["h0_score"] = self._component_score("AC_paint", 0.1, 0.1)
+        record["h1_score"] = self._component_score("AC_paint", 0.9, 0.9)
+        record["selection"] = select_component_color_winner(
+            component_id="AC_paint",
+            h0_score=record["h0_score"],
+            h1_score=record["h1_score"],
+        )
+        self.assertEqual(record["selection"]["selected_candidate_id"], "H1")
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "trusted render evidence",
+        ):
+            self._rebind_with_trusted_scores(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
+                trusted_color_score_evidence=trusted,
+            )
+
+    def test_rebind_requires_exact_trusted_h1_registry_cover(self) -> None:
+        source_audit, _identity_plan, color_plan, audit, trusted = (
+            self._component_color_rebind_fixture()
+        )
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "requires trusted score evidence",
         ):
             rebind_part_id_material_audit_for_component_mdl_tournament(
                 source_audit=source_audit,
@@ -812,8 +904,106 @@ class ComponentMdlTournamentTests(unittest.TestCase):
                 tournament_audit=audit,
             )
 
+        for bad_cover in (
+            {},
+            {"AC_other": trusted.h1_rendered_registries_by_component["AC_paint"]},
+            {
+                "AC_paint": trusted.h1_rendered_registries_by_component["AC_paint"],
+                "AC_other": trusted.h1_rendered_registries_by_component["AC_paint"],
+            },
+        ):
+            with self.subTest(component_ids=sorted(bad_cover)):
+                malformed = ComponentColorScoreEvidence(
+                    evidence=trusted.evidence,
+                    spatial_mapping_report=trusted.spatial_mapping_report,
+                    h0_rendered_registry=trusted.h0_rendered_registry,
+                    h1_rendered_registries_by_component=bad_cover,
+                )
+                with self.assertRaisesRegex(
+                    ComponentMdlTournamentError,
+                    "exactly cover color components",
+                ):
+                    rebind_part_id_material_audit_for_component_mdl_tournament(
+                        source_audit=source_audit,
+                        final_plan=color_plan,
+                        tournament_audit=audit,
+                        trusted_color_score_evidence=malformed,
+                    )
+
+    def test_rebind_rejects_coherently_resealed_weaker_improvement_threshold(
+        self,
+    ) -> None:
+        source_audit, _identity_plan, color_plan, audit, trusted = (
+            self._component_color_rebind_fixture()
+        )
+        color = audit["component_color_tournament"]
+        record = color["components"][0]
+        record["h0_score"] = self._component_score("AC_paint", 0.4, 0.4)
+        record["h1_score"] = self._component_score("AC_paint", 0.41, 0.41)
+        color["minimum_score_improvement"] = 0.0
+        record["selection"] = select_component_color_winner(
+            component_id="AC_paint",
+            h0_score=record["h0_score"],
+            h1_score=record["h1_score"],
+            minimum_score_improvement=0.0,
+            maximum_member_regression=0.03,
+        )
+        self.assertEqual(record["selection"]["selected_candidate_id"], "H1")
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "approved production contract",
+        ):
+            rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
+                trusted_color_score_evidence=trusted,
+            )
+
+    def test_rebind_rejects_coherently_resealed_weaker_regression_threshold(
+        self,
+    ) -> None:
+        source_audit, _identity_plan, color_plan, audit, trusted = (
+            self._component_color_rebind_fixture()
+        )
+        color = audit["component_color_tournament"]
+        record = color["components"][0]
+        record["h0_score"] = self._component_score(
+            "AC_paint",
+            0.4,
+            0.4,
+            first_pixels=900,
+            second_pixels=100,
+        )
+        record["h1_score"] = self._component_score(
+            "AC_paint",
+            0.48,
+            0.1,
+            first_pixels=900,
+            second_pixels=100,
+        )
+        color["maximum_member_regression"] = 1.0
+        record["selection"] = select_component_color_winner(
+            component_id="AC_paint",
+            h0_score=record["h0_score"],
+            h1_score=record["h1_score"],
+            minimum_score_improvement=0.015,
+            maximum_member_regression=1.0,
+        )
+        self.assertEqual(record["selection"]["selected_candidate_id"], "H1")
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "approved production contract",
+        ):
+            rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
+                trusted_color_score_evidence=trusted,
+            )
+
     def test_rebind_rejects_target_parameter_mismatch_after_hash_reseal(self) -> None:
-        source_audit, _identity_plan, color_plan, audit = (
+        source_audit, _identity_plan, color_plan, audit, trusted = (
             self._component_color_rebind_fixture()
         )
         for assignment in color_plan["assignments"][:2]:
@@ -825,14 +1015,15 @@ class ComponentMdlTournamentTests(unittest.TestCase):
             ComponentMdlTournamentError,
             "target, parameters, or semantic payload failed replay",
         ):
-            rebind_part_id_material_audit_for_component_mdl_tournament(
+            self._rebind_with_trusted_scores(
                 source_audit=source_audit,
                 final_plan=color_plan,
                 tournament_audit=audit,
+                trusted_color_score_evidence=trusted,
             )
 
     def test_rebind_rejects_catalog_payload_and_hash_reseal(self) -> None:
-        source_audit, _identity_plan, color_plan, audit = (
+        source_audit, _identity_plan, color_plan, audit, trusted = (
             self._component_color_rebind_fixture()
         )
         for assignment in color_plan["assignments"][:2]:
@@ -848,14 +1039,15 @@ class ComponentMdlTournamentTests(unittest.TestCase):
             ComponentMdlTournamentError,
             "semantic payload failed replay",
         ):
-            rebind_part_id_material_audit_for_component_mdl_tournament(
+            self._rebind_with_trusted_scores(
                 source_audit=source_audit,
                 final_plan=color_plan,
                 tournament_audit=audit,
+                trusted_color_score_evidence=trusted,
             )
 
     def test_rebind_rejects_semantics_payload_and_hash_reseal(self) -> None:
-        source_audit, _identity_plan, color_plan, audit = (
+        source_audit, _identity_plan, color_plan, audit, trusted = (
             self._component_color_rebind_fixture()
         )
         for assignment in color_plan["assignments"][:2]:
@@ -890,14 +1082,15 @@ class ComponentMdlTournamentTests(unittest.TestCase):
             ComponentMdlTournamentError,
             "identity audit and assignment semantics disagree",
         ):
-            rebind_part_id_material_audit_for_component_mdl_tournament(
+            self._rebind_with_trusted_scores(
                 source_audit=source_audit,
                 final_plan=color_plan,
                 tournament_audit=audit,
+                trusted_color_score_evidence=trusted,
             )
 
     def test_rebind_rebuilds_and_rejects_tampered_candidate_plan_hash(self) -> None:
-        source_audit, _identity_plan, color_plan, audit = (
+        source_audit, _identity_plan, color_plan, audit, trusted = (
             self._component_color_rebind_fixture()
         )
         audit["component_color_tournament"]["components"][0][
@@ -907,10 +1100,11 @@ class ComponentMdlTournamentTests(unittest.TestCase):
             ComponentMdlTournamentError,
             "candidate plan hash failed deterministic rebuild",
         ):
-            rebind_part_id_material_audit_for_component_mdl_tournament(
+            self._rebind_with_trusted_scores(
                 source_audit=source_audit,
                 final_plan=color_plan,
                 tournament_audit=audit,
+                trusted_color_score_evidence=trusted,
             )
 
     def test_rebinds_part_id_audit_after_component_winner(self) -> None:
