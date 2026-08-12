@@ -238,6 +238,155 @@ def _final_visual_mapping(
     return mapping, minimum_comparable_views, reference_manifest
 
 
+def _require_manifest_bound_absolute_view_cover(
+    *,
+    quality_report: Path,
+    reference_manifest: Path,
+    rendered_registry: Path,
+    label: str,
+) -> None:
+    """Require fresh evidence to cover the sealed manifest, not just itself."""
+
+    manifest = read_object(reference_manifest, f"{label} reference manifest")
+    raw_source_views = manifest.get("source_views")
+    if not isinstance(raw_source_views, list) or not raw_source_views:
+        raise RuntimeError(
+            f"{label} reference manifest lacks non-empty source_views"
+        )
+    reference_ids: list[str] = []
+    for index, raw_view in enumerate(raw_source_views):
+        reference_id = (
+            raw_view.get("id") if isinstance(raw_view, Mapping) else None
+        )
+        if not isinstance(reference_id, str) or not reference_id:
+            raise RuntimeError(
+                f"{label} reference manifest source_views[{index}] has "
+                "an invalid ID"
+            )
+        reference_ids.append(reference_id)
+    if len(reference_ids) != len(set(reference_ids)):
+        raise RuntimeError(f"{label} reference manifest repeats source-view IDs")
+    expected_reference_ids = set(reference_ids)
+
+    registry = read_object(rendered_registry, f"{label} rendered registry")
+    render_set = registry.get("render_set")
+    raw_render_views = (
+        render_set.get("views") if isinstance(render_set, Mapping) else None
+    )
+    if not isinstance(raw_render_views, list) or not raw_render_views:
+        raise RuntimeError(f"{label} rendered registry lacks actual render views")
+    render_ids: list[str] = []
+    for index, raw_view in enumerate(raw_render_views):
+        render_id = (
+            raw_view.get("view_id") if isinstance(raw_view, Mapping) else None
+        )
+        if not isinstance(render_id, str) or not render_id:
+            raise RuntimeError(
+                f"{label} rendered registry view[{index}] has an invalid ID"
+            )
+        render_ids.append(render_id)
+    if len(render_ids) != len(set(render_ids)):
+        raise RuntimeError(f"{label} rendered registry repeats render-view IDs")
+    actual_render_ids = set(render_ids)
+
+    quality = read_object(quality_report, f"{label} quality report")
+    inputs = quality.get("inputs")
+    aggregate = quality.get("aggregate")
+    raw_quality_views = quality.get("views")
+    if (
+        not isinstance(inputs, Mapping)
+        or not isinstance(aggregate, Mapping)
+        or not isinstance(raw_quality_views, list)
+    ):
+        raise RuntimeError(f"{label} quality report lacks inputs/aggregate/views")
+    try:
+        reported_manifest = _final_visual_file(
+            inputs.get("reference_manifest"),
+            f"{label} reported reference manifest",
+        )
+        reported_registry = _final_visual_file(
+            inputs.get("rendered_registry"),
+            f"{label} reported rendered registry",
+        )
+    except RuntimeError as exc:
+        raise RuntimeError(f"{label} quality report has stale input bindings") from exc
+    if (
+        reported_manifest != reference_manifest
+        or inputs.get("reference_manifest_sha256")
+        != sha256_file(reference_manifest)
+        or reported_registry != rendered_registry
+        or inputs.get("rendered_registry_sha256") != sha256_file(rendered_registry)
+    ):
+        raise RuntimeError(f"{label} quality report input bindings are stale")
+
+    raw_mapping = inputs.get("selected_view_mapping")
+    if not isinstance(raw_mapping, Mapping):
+        raise RuntimeError(f"{label} quality report lacks selected_view_mapping")
+    mapping: dict[str, str] = {}
+    for reference_id, render_id in raw_mapping.items():
+        if (
+            not isinstance(reference_id, str)
+            or not reference_id
+            or not isinstance(render_id, str)
+            or not render_id
+        ):
+            raise RuntimeError(f"{label} quality report has a malformed view mapping")
+        mapping[reference_id] = render_id
+    if (
+        set(mapping) != expected_reference_ids
+        or len(set(mapping.values())) != len(mapping)
+        or not set(mapping.values()) <= actual_render_ids
+    ):
+        raise RuntimeError(
+            f"{label} quality report does not exactly cover every manifest view"
+        )
+
+    quality_views: dict[str, Mapping[str, Any]] = {}
+    for index, raw_view in enumerate(raw_quality_views):
+        reference_id = (
+            raw_view.get("reference_view_id")
+            if isinstance(raw_view, Mapping)
+            else None
+        )
+        if (
+            not isinstance(reference_id, str)
+            or not reference_id
+            or reference_id in quality_views
+        ):
+            raise RuntimeError(
+                f"{label} quality report view[{index}] has an invalid or "
+                "duplicate reference ID"
+            )
+        quality_views[reference_id] = raw_view
+    expected_count = len(reference_ids)
+    status_counts = {
+        status: sum(
+            view.get("status") == status for view in quality_views.values()
+        )
+        for status in ("PASS", "REVIEW", "FAIL", "UNSCORABLE")
+    }
+    comparable_count = sum(
+        status_counts[status] for status in ("PASS", "REVIEW", "FAIL")
+    )
+    if (
+        set(quality_views) != expected_reference_ids
+        or any(
+            view.get("render_view_id") != mapping[reference_id]
+            for reference_id, view in quality_views.items()
+        )
+        or aggregate.get("reference_view_count") != expected_count
+        or aggregate.get("comparable_view_count") != comparable_count
+        or aggregate.get("passed_view_count") != status_counts["PASS"]
+        or aggregate.get("review_view_count") != status_counts["REVIEW"]
+        or aggregate.get("failed_view_count") != status_counts["FAIL"]
+        or aggregate.get("unscorable_view_count") != status_counts["UNSCORABLE"]
+    ):
+        raise RuntimeError(
+            f"{label} quality report view rows/counts do not exactly match "
+            "the manifest-bound comparison"
+        )
+
+
 def _require_fresh_quality_pass(path: Path, label: str) -> dict[str, Any]:
     report = read_object(path, label)
     aggregate = report.get("aggregate")
@@ -985,6 +1134,7 @@ def _run_final_visual_render_round(
     qwen_python: Path,
     config: VisualMaterialConfig,
     require_absolute_pass: bool,
+    require_manifest_exact_view_cover: bool,
     allow_immutable_library_optimum_review: bool,
     allow_part_id_quality: bool,
     log_cb: LogCallback,
@@ -1123,6 +1273,13 @@ def _run_final_visual_render_round(
             dict(part_id_quality_scope)
         )
         write_object(quality_report, scoped_quality)
+    if require_manifest_exact_view_cover:
+        _require_manifest_bound_absolute_view_cover(
+            quality_report=quality_report.resolve(strict=True),
+            reference_manifest=reference_manifest.resolve(strict=True),
+            rendered_registry=rendered_registry.resolve(strict=True),
+            label=name,
+        )
     if require_absolute_pass:
         _require_fresh_quality_accepted(
             quality_report,
@@ -1753,6 +1910,9 @@ def run_final_visual_acceptance_job(
         qwen_python=config.qwen_python,
         config=config,
         require_absolute_pass=True,
+        require_manifest_exact_view_cover=(
+            require_all_reference_views_absolute_pass
+        ),
         allow_immutable_library_optimum_review=(
             allow_immutable_library_optimum_review
         ),
@@ -1865,6 +2025,9 @@ def run_final_visual_acceptance_job(
         qwen_python=config.qwen_python,
         config=config,
         require_absolute_pass=True,
+        require_manifest_exact_view_cover=(
+            require_all_reference_views_absolute_pass
+        ),
         allow_immutable_library_optimum_review=(
             allow_immutable_library_optimum_review
         ),

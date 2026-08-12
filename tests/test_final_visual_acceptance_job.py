@@ -240,6 +240,7 @@ def _fake_runner(
     quality_status_by_view: dict[str, str] | None = None,
     first_render_resolution: int | None = None,
     first_compare_mapping: dict[str, str] | None = None,
+    compare_mapping: dict[str, str] | None = None,
 ):
     gate_count = 0
     render_count = 0
@@ -311,6 +312,9 @@ def _fake_runner(
                 custom_view_specs = str(view_specs.resolve())
             else:
                 requested = command[command.index("--views") + 1].split(",")
+                rendered_views = [
+                    {"view_id": view_id} for view_id in requested
+                ]
             _write(
                 rendered,
                 {
@@ -355,7 +359,9 @@ def _fake_runner(
                 mapping = json.loads(view_map.read_text())["mapping"]
             else:
                 mapping = {"front_ref": "right", "side_ref": "front"}
-            if compare_count == 1 and first_compare_mapping is not None:
+            if compare_mapping is not None:
+                mapping = compare_mapping
+            elif compare_count == 1 and first_compare_mapping is not None:
                 mapping = first_compare_mapping
             view_statuses = {
                 reference_id: (
@@ -407,7 +413,26 @@ def _fake_runner(
                     },
                     "aggregate": {
                         "status": aggregate_status,
+                        "reference_view_count": len(mapping),
+                        "render_view_count": len(
+                            json.loads(rendered_registry.read_text())["render_set"][
+                                "views"
+                            ]
+                        ),
                         "comparable_view_count": len(comparable_ids),
+                        "passed_view_count": sum(
+                            status == "PASS" for status in view_statuses.values()
+                        ),
+                        "review_view_count": sum(
+                            status == "REVIEW" for status in view_statuses.values()
+                        ),
+                        "failed_view_count": sum(
+                            status == "FAIL" for status in view_statuses.values()
+                        ),
+                        "unscorable_view_count": sum(
+                            status == "UNSCORABLE"
+                            for status in view_statuses.values()
+                        ),
                         "material_appearance_score": (
                             sum(appearance_scores[view_id] for view_id in comparable_ids)
                             / len(comparable_ids)
@@ -735,6 +760,43 @@ def test_semantic_hybrid_requires_every_registered_view_to_pass(
         else "compare"
         for command in commands
     ] == ["registry", "render", "compare"]
+    assert not any("final-visual-gate" in command for command in commands)
+
+
+def test_semantic_hybrid_rejects_self_consistent_partial_manifest_cover(
+    tmp_path: Path,
+) -> None:
+    fixture = _hybrid_part_id_fixture(tmp_path)
+    config = _config(fixture["qwen"])
+    config.material_selection_pipeline_mode = "semantic_hybrid"
+    commands: list[list[str]] = []
+
+    with pytest.raises(RuntimeError, match="exactly cover every manifest view"):
+        run_final_visual_acceptance_job(
+            collected_usd=str(fixture["collected"]),
+            visual_material_result=fixture["result"],
+            _command_runner=_fake_runner(
+                commands,
+                quality_status="PASS",
+                compare_mapping={"front": "front", "iso": "iso"},
+            ),
+            _isaac_python_resolver=lambda: fixture["isaac"],
+            _config_loader=lambda _path: config,
+        )
+
+    compare_commands = [command for command in commands if "compare" in command]
+    assert len(compare_commands) == 1
+    report = Path(
+        compare_commands[0][compare_commands[0].index("--output") + 1]
+    )
+    document = json.loads(report.read_text())
+    assert document["aggregate"]["status"] == "PASS"
+    assert document["aggregate"]["reference_view_count"] == 2
+    assert document["aggregate"]["comparable_view_count"] == 2
+    assert set(document["inputs"]["selected_view_mapping"]) == {
+        "front",
+        "iso",
+    }
     assert not any("final-visual-gate" in command for command in commands)
 
 
