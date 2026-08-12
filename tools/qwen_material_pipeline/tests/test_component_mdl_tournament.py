@@ -1421,6 +1421,184 @@ class ComponentMdlTournamentTests(unittest.TestCase):
             2,
         )
 
+    def _low_confidence_retained_fixture(self) -> tuple[dict, dict, dict]:
+        baseline_material = "mdl:Metals/Steel_Stainless.mdl#Steel_Stainless"
+        rejected_material = (
+            "mdl:Metals/Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
+        )
+        candidate_set = {
+            "schema_version": "qwen-part-id-parameter-candidates/v1",
+            "part_id": "P0126",
+            "material_id": baseline_material,
+            "selection_status": "PENDING_RENDER_COMPARISON",
+            "selected_candidate_id": "H0",
+            "native_h0_is_default": True,
+            "parameters_applied_to_plan": False,
+            "h1_status": "disabled_by_caller",
+            "candidates": [
+                {
+                    "candidate_id": "H0",
+                    "kind": "native_mdl",
+                    "material_id": baseline_material,
+                    "parameters": {},
+                }
+            ],
+        }
+        color_audit = {
+            "status": "native_h0_selected",
+            "material_id": baseline_material,
+            "selected_candidate_id": "H0",
+            "parameters_applied": False,
+        }
+        assignment = {
+            "part_id": "P0126",
+            "material_id": baseline_material,
+            "semantic": "neutral policy fallback",
+            "confidence": 0.0,
+            "evidence_views": [],
+            "status": "policy_fallback",
+            "provenance": {
+                "tier": "source_preserve_unavailable_neutral_fallback",
+                "observed_part_id_qwen_selection_rejected": True,
+                "observed_part_id_qwen_rejection_reason": (
+                    "qwen_confidence_below_applyable_review_floor"
+                ),
+                "rejected_qwen_material_id": rejected_material,
+                "rejected_qwen_confidence": 0.06,
+                "applyable_review_confidence_floor": 0.60,
+                "selected_reference_view_id_for_rejected_qwen": "iso",
+                "candidate_material_ids": [rejected_material],
+                "mdl_parameter_candidates": candidate_set,
+                "mdl_color_parameterization": color_audit,
+            },
+        }
+        source_plan = {
+            "schema_version": "1.0",
+            "assignments": [assignment],
+            "provenance": {},
+        }
+        source_audit = {
+            "schema_version": "qwen-part-id-material-plan-audit/v1",
+            "assignment_unit": "part_id",
+            "base_plan_sha256": "policy-hash",
+            "output_plan_sha256": self._sha256(source_plan),
+            "parts": [
+                {
+                    "part_id": "P0126",
+                    "status": "observed_low_confidence_baseline_retained",
+                    "material_id": baseline_material,
+                    "rejected_qwen_material_id": rejected_material,
+                    "rejected_qwen_confidence": 0.06,
+                    "evidence_view_ids": ["iso"],
+                    "mdl_parameter_candidates": candidate_set,
+                    "mdl_color_parameterization": color_audit,
+                }
+            ],
+            "summary": {
+                "part_count": 1,
+                "independently_selected_count": 0,
+                "unobserved_preserved_count": 0,
+                "observed_low_confidence_baseline_retained_count": 1,
+                "exact_cover": True,
+            },
+        }
+        tournament_audit = {
+            "identity_source_plan_sha256": self._sha256(source_plan),
+            "components": [],
+        }
+        return source_plan, source_audit, tournament_audit
+
+    def test_rebind_preserves_audited_observed_low_confidence_baseline(self) -> None:
+        source_plan, source_audit, tournament_audit = (
+            self._low_confidence_retained_fixture()
+        )
+        rebound = rebind_part_id_material_audit_for_component_mdl_tournament(
+            source_audit=source_audit,
+            source_plan=source_plan,
+            final_plan=source_plan,
+            tournament_audit=tournament_audit,
+        )
+        self.assertEqual(
+            rebound["parts"][0]["status"],
+            "observed_low_confidence_baseline_retained",
+        )
+        self.assertEqual(
+            rebound["summary"][
+                "observed_low_confidence_baseline_retained_count"
+            ],
+            1,
+        )
+
+    def test_rebind_rejects_low_confidence_baseline_mutation_or_winner(self) -> None:
+        source_plan, source_audit, tournament_audit = (
+            self._low_confidence_retained_fixture()
+        )
+        changed = json.loads(json.dumps(source_plan))
+        changed["assignments"][0]["material_id"] = (
+            "mdl:Metals/Steel_Cast.mdl#Steel_Cast"
+        )
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "did not retain its exact audited policy baseline",
+        ):
+            rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                source_plan=source_plan,
+                final_plan=changed,
+                tournament_audit=tournament_audit,
+            )
+
+        forged_winner = json.loads(json.dumps(tournament_audit))
+        forged_winner["components"] = [
+            {
+                "component_id": "AC_forged",
+                "member_part_ids": ["P0126"],
+                "baseline_material_id": source_plan["assignments"][0]["material_id"],
+                "selected_material_id": "mdl:Metals/Steel_Cast.mdl#Steel_Cast",
+            }
+        ]
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "did not retain its exact audited policy baseline",
+        ):
+            rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                source_plan=source_plan,
+                final_plan=source_plan,
+                tournament_audit=forged_winner,
+            )
+
+    def test_rebind_requires_low_confidence_summary_and_source_plan_binding(
+        self,
+    ) -> None:
+        source_plan, source_audit, tournament_audit = (
+            self._low_confidence_retained_fixture()
+        )
+        wrong_summary = json.loads(json.dumps(source_audit))
+        wrong_summary["summary"][
+            "observed_low_confidence_baseline_retained_count"
+        ] = 0
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "summary does not match",
+        ):
+            rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=wrong_summary,
+                source_plan=source_plan,
+                final_plan=source_plan,
+                tournament_audit=tournament_audit,
+            )
+
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "requires its exact component tournament source plan",
+        ):
+            rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                final_plan=source_plan,
+                tournament_audit=tournament_audit,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3390,6 +3390,7 @@ def _run_semantic_hybrid_component_tournament(
                 part_id_material_audit,
                 "pre-semantic-hybrid Part-ID material audit",
             ),
+            source_plan=original_plan,
             final_plan=final_plan,
             tournament_audit=tournament_document,
             trusted_color_score_evidence=ComponentColorScoreEvidence(
@@ -4022,7 +4023,8 @@ def _run_visual_qa_stage(
             "appearance-component actual-MDL baseline render registry",
         )
         component_results: list[dict[str, Any]] = []
-        final_component_plan_document = copy.deepcopy(plan)
+        component_source_plan_document = copy.deepcopy(plan)
+        final_component_plan_document = copy.deepcopy(component_source_plan_document)
         winner_count = 0
         candidate_count = 0
         # A component below this score materially limits the visual result;
@@ -4338,6 +4340,7 @@ def _run_visual_qa_stage(
                             part_id_material_audit,
                             "pre-component-tournament Part-ID material audit",
                         ),
+                        source_plan=component_source_plan_document,
                         final_plan=final_component_plan_document,
                         tournament_audit=component_actual_mdl_tournament_document,
                     )
