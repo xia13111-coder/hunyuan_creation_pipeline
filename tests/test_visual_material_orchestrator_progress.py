@@ -1,15 +1,510 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from asset_pipeline.visual_materials import orchestrator
 from asset_pipeline.visual_materials.stages import runner as stage_runner
+from asset_pipeline.visual_materials.workspace import VisualMaterialWorkspace
 
 
 def _progress_messages(messages: list[str]) -> list[str]:
     return [message for message in messages if message.startswith("[PROGRESS]")]
+
+
+def _observed_surface_part(part_id: str, surface_class: str) -> dict[str, object]:
+    return {
+        "part_id": part_id,
+        "status": "observed",
+        "descriptor": {"surface_class": surface_class},
+    }
+
+
+def test_semantic_hybrid_component_contract_requires_two_thirds_consensus() -> None:
+    semantics, contract = orchestrator._semantic_hybrid_component_contract(
+        component_id="AC_dark",
+        member_part_ids=["P1", "P2", "P3"],
+        part_id_evidence={
+            "parts": [
+                _observed_surface_part("P1", "conductor"),
+                _observed_surface_part("P2", "conductor"),
+                _observed_surface_part("P3", "dielectric"),
+            ]
+        },
+    )
+
+    assert contract["consensus_surface_class"] == "conductor"
+    assert contract["legacy_physical_surface_class"] == "bare_metal"
+    assert contract["consensus_count"] == 2
+    assert all(value["substrate"] == "metal" for value in semantics.values())
+    assert all(
+        value["surface_treatment"] == "bare" for value in semantics.values()
+    )
+
+
+@pytest.mark.parametrize(
+    "surface_classes",
+    [
+        ["conductor", "dielectric", "conductor", "dielectric"],
+        ["dielectric", "dielectric", "unknown"],
+    ],
+)
+def test_semantic_hybrid_component_contract_fails_closed_without_resolved_consensus(
+    surface_classes: list[str],
+) -> None:
+    with pytest.raises(
+        orchestrator.ComponentMdlTournamentError,
+        match="(two-thirds|resolved observed surface evidence)",
+    ):
+        orchestrator._semantic_hybrid_component_contract(
+            component_id="AC_unresolved",
+            member_part_ids=[f"P{index}" for index in range(len(surface_classes))],
+            part_id_evidence={
+                "parts": [
+                    _observed_surface_part(f"P{index}", surface_class)
+                    for index, surface_class in enumerate(surface_classes)
+                ]
+            },
+        )
+
+
+def test_semantic_hybrid_invocation_fails_before_pipeline_stages() -> None:
+    hybrid = SimpleNamespace(material_selection_pipeline_mode="semantic_hybrid")
+
+    with pytest.raises(ValueError, match="fresh fail-closed contract") as exc_info:
+        orchestrator._validate_semantic_hybrid_invocation(
+            config=hybrid,
+            inference_mode="bundled",
+            partial_live_resume=True,
+            require_complete_coverage=False,
+            allow_policy_material_fallback=False,
+        )
+
+    message = str(exc_info.value)
+    assert "bundled is unsupported" in message
+    assert "partial live resume is unsupported" in message
+    assert "require_complete_coverage must be true" in message
+    assert "allow_policy_material_fallback must be true" in message
+
+
+def test_current_pipeline_mode_keeps_hybrid_invocation_gate_disabled() -> None:
+    orchestrator._validate_semantic_hybrid_invocation(
+        config=SimpleNamespace(),
+        inference_mode="bundled",
+        partial_live_resume=True,
+        require_complete_coverage=False,
+        allow_policy_material_fallback=False,
+    )
+
+
+def _absolute_quality(statuses: list[str], aggregate_status: str) -> dict[str, object]:
+    reference_count = len(statuses)
+    return {
+        "aggregate": {
+            "status": aggregate_status,
+            "reference_view_count": reference_count,
+            "comparable_view_count": reference_count,
+            "passed_view_count": statuses.count("PASS"),
+            "review_view_count": statuses.count("REVIEW"),
+            "failed_view_count": statuses.count("FAIL"),
+            "unscorable_view_count": statuses.count("UNSCORABLE"),
+        },
+        "views": [
+            {"reference_view_id": f"view_{index}", "status": status}
+            for index, status in enumerate(statuses)
+        ],
+    }
+
+
+def test_semantic_hybrid_absolute_quality_requires_every_view_pass() -> None:
+    orchestrator._require_semantic_hybrid_absolute_quality_pass(
+        _absolute_quality(["PASS", "PASS", "PASS", "PASS"], "PASS"),
+        expected_reference_view_ids=["view_0", "view_1", "view_2", "view_3"],
+    )
+
+    with pytest.raises(RuntimeError, match="every registered reference view"):
+        orchestrator._require_semantic_hybrid_absolute_quality_pass(
+            _absolute_quality(["PASS", "FAIL", "PASS", "PASS"], "FAIL"),
+            expected_reference_view_ids=["view_0", "view_1", "view_2", "view_3"],
+        )
+
+
+def test_semantic_hybrid_absolute_quality_rejects_omitted_view() -> None:
+    quality = _absolute_quality(["PASS", "PASS"], "PASS")
+    quality["aggregate"]["reference_view_count"] = 3  # type: ignore[index]
+
+    with pytest.raises(RuntimeError, match="absolute visual gate failed"):
+        orchestrator._require_semantic_hybrid_absolute_quality_pass(
+            quality,
+            expected_reference_view_ids=["view_0", "view_1", "view_2"],
+        )
+
+
+def test_semantic_hybrid_absolute_quality_does_not_trust_self_reported_view_count() -> None:
+    forged = _absolute_quality(["PASS", "PASS"], "PASS")
+
+    with pytest.raises(RuntimeError, match="absolute visual gate failed"):
+        orchestrator._require_semantic_hybrid_absolute_quality_pass(
+            forged,
+            expected_reference_view_ids=["view_0", "view_1", "view_2", "view_3"],
+        )
+
+
+def _catalog_surface(
+    *,
+    treatment: str,
+    substrates: list[str],
+    finish: str,
+) -> dict[str, object]:
+    return {
+        "schema_version": "qwen-catalog-surface-semantics/v1",
+        "surface_treatment": treatment,
+        "optical_behavior": "opaque",
+        "finish": finish,
+        "compatible_substrates": substrates,
+        "confidence": "high",
+        "inference_source": "test_reviewed_catalog/v1",
+    }
+
+
+def _component_score(
+    component_id: str,
+    members: list[str],
+    appearance_score: float,
+) -> dict[str, object]:
+    member_scores = [
+        {
+            "part_id": part_id,
+            "comparison_pixel_count": 100,
+            "appearance_score": appearance_score,
+        }
+        for part_id in sorted(members)
+    ]
+    return {
+        "schema_version": "qwen-appearance-component-actual-mdl-tournament/v1",
+        "component_id": component_id,
+        "member_part_ids": sorted(members),
+        "member_score_count": len(members),
+        "comparison_pixel_count": 100 * len(members),
+        "appearance_score": appearance_score,
+        "color_score": appearance_score,
+        "luma_score": appearance_score,
+        "lab_delta_e": round(100.0 * (1.0 - appearance_score), 8),
+        "member_scores": member_scores,
+    }
+
+
+def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "visual_material"
+    destination.mkdir()
+    source = tmp_path / "asset.usda"
+    source.write_text("#usda 1.0\n", encoding="utf-8")
+    workspace = VisualMaterialWorkspace.create(
+        destination=destination,
+        source=source,
+    )
+    paint_ids = [
+        "mdl:Miscellaneous/Paint_Gloss.mdl#Paint_Gloss",
+        "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte",
+        "mdl:Miscellaneous/Paint_Satin.mdl#Paint_Satin",
+    ]
+    metal_ids = [
+        "mdl:Metals/Aluminum_Cast.mdl#Aluminum_Cast",
+        "mdl:Metals/Aluminum_Polished.mdl#Aluminum_Polished",
+        "mdl:Metals/Brass.mdl#Brass",
+    ]
+    unsafe_paint_h0 = "mdl:Textiles/Linen_Blue.mdl#Linen_Blue"
+    unsafe_metal_h0 = "mdl:Water/Water.mdl#Water"
+    source_plan = {
+        "schema_version": "1.0",
+        "assignments": [
+            {"part_id": "P1", "material_id": unsafe_paint_h0},
+            {"part_id": "P2", "material_id": unsafe_paint_h0},
+            {"part_id": "P3", "material_id": unsafe_metal_h0},
+            {"part_id": "P4", "material_id": unsafe_metal_h0},
+        ],
+        "provenance": {"test": "native_qwen_h0"},
+    }
+    source_audit = {
+        "parts": [
+            {
+                "part_id": assignment["part_id"],
+                "status": "independently_selected",
+                "material_id": assignment["material_id"],
+            }
+            for assignment in source_plan["assignments"]
+        ],
+        "summary": {
+            "part_count": 4,
+            "independently_selected_count": 4,
+            "unobserved_preserved_count": 0,
+            "exact_cover": True,
+        },
+    }
+    orchestrator.write_object(
+        workspace.appearance.mdl_selection_audit,
+        {
+            "selections": [
+                {
+                    "component_id": "AC_01_paint",
+                    "member_part_ids": ["P1", "P2"],
+                    "material_id": unsafe_paint_h0,
+                    "canonical_reference_rgb": [0.2, 0.45, 0.8],
+                },
+                {
+                    "component_id": "AC_02_metal",
+                    "member_part_ids": ["P3", "P4"],
+                    "material_id": unsafe_metal_h0,
+                    "canonical_reference_rgb": [0.25, 0.27, 0.3],
+                },
+            ]
+        },
+    )
+    orchestrator.write_object(
+        workspace.appearance.retrieval_result,
+        {
+            "groups": [
+                {
+                    "group_id": "AC_01_paint",
+                    "color_ranking": [
+                        {"rank": index, "material_id": material_id}
+                        for index, material_id in enumerate(paint_ids, start=1)
+                    ],
+                },
+                {
+                    "group_id": "AC_02_metal",
+                    "color_ranking": [
+                        {"rank": index, "material_id": material_id}
+                        for index, material_id in enumerate(metal_ids, start=1)
+                    ],
+                },
+            ]
+        },
+    )
+    orchestrator.write_object(
+        workspace.appearance.qwen_result,
+        {"visual_compatibility_gate": {"parts": []}},
+    )
+    orchestrator.write_object(
+        workspace.part_id.evidence,
+        {
+            "parts": [
+                _observed_surface_part("P1", "dielectric"),
+                _observed_surface_part("P2", "dielectric"),
+                _observed_surface_part("P3", "conductor"),
+                _observed_surface_part("P4", "conductor"),
+            ]
+        },
+    )
+    orchestrator.write_object(workspace.part_id.material_audit, source_audit)
+    spatial_report = workspace.inference.root / "spatial_mapping_report.json"
+    orchestrator.write_object(spatial_report, {"test": "registered"})
+    orchestrator.write_object(
+        workspace.source.rendered_registry,
+        {"test": "source_registry"},
+    )
+    orchestrator.write_object(
+        workspace.quality.rendered_registry,
+        {"score_marker": "unsafe_initial"},
+    )
+    catalog_path = workspace.inference.root / "catalog.json"
+    catalog_materials = [
+        {
+            "material_id": material_id,
+            "family": "paint",
+            "surface_semantics": _catalog_surface(
+                treatment="paint",
+                substrates=["metal", "polymer", "wood"],
+                finish=finish,
+            ),
+        }
+        for material_id, finish in zip(
+            paint_ids,
+            ["glossy", "matte", "satin"],
+            strict=True,
+        )
+    ] + [
+        {
+            "material_id": material_id,
+            "family": "metal",
+            "surface_semantics": _catalog_surface(
+                treatment="bare",
+                substrates=["metal"],
+                finish=finish,
+            ),
+        }
+        for material_id, finish in zip(
+            metal_ids,
+            ["smooth", "polished", "brushed"],
+            strict=True,
+        )
+    ]
+    orchestrator.write_object(
+        catalog_path,
+        {"schema_version": 2, "materials": catalog_materials},
+    )
+
+    events: list[str] = []
+
+    def fake_stage(
+        stage_name: str,
+        _command: list[str],
+        _log_cb,
+        **kwargs,
+    ) -> None:
+        events.append(stage_name)
+        for path in kwargs.get("required_files", ()):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.name.endswith("apply_report.json") or path.name == (
+                "apply_visual_materials_report.json"
+            ):
+                orchestrator.write_object(path, {"applied_count": 4})
+            elif path.suffix.lower() in {".usd", ".usda", ".usdc"}:
+                path.write_text("#usda 1.0\n", encoding="utf-8")
+            elif stage_name.endswith("_render"):
+                orchestrator.write_object(path, {"score_marker": stage_name})
+            else:
+                orchestrator.write_object(path, {"test": stage_name})
+
+    unsafe_baseline_score_calls: list[str] = []
+
+    def fake_score_component_render(
+        *,
+        component_id: str,
+        member_part_ids: list[str],
+        rendered_registry: dict[str, object],
+        **_kwargs,
+    ) -> dict[str, object]:
+        marker = str(rendered_registry.get("score_marker"))
+        if marker == "unsafe_initial":
+            unsafe_baseline_score_calls.append(component_id)
+            score = 0.99
+        elif "identity_final" in marker:
+            score = 0.70 if component_id == "AC_01_paint" else 0.60
+        elif "color_h1" in marker:
+            score = 0.74 if component_id == "AC_01_paint" else 0.59
+        elif "identity_1_render" in marker:
+            score = 0.40 if component_id == "AC_01_paint" else 0.60
+        elif "identity_2_render" in marker:
+            score = 0.70 if component_id == "AC_01_paint" else 0.55
+        elif "identity_3_render" in marker:
+            score = 0.50
+        else:  # pragma: no cover - makes unexpected ordering immediately visible
+            raise AssertionError(f"unexpected score marker: {marker}")
+        return _component_score(component_id, member_part_ids, score)
+
+    monkeypatch.setattr(orchestrator, "_run_stage", fake_stage)
+    monkeypatch.setattr(
+        orchestrator,
+        "score_component_render",
+        fake_score_component_render,
+    )
+    config = SimpleNamespace(
+        material_root=tmp_path / "materials",
+        exact_mdl_tournament_max_candidates=3,
+        exact_mdl_tournament_minimum_score_improvement=0.015,
+        render_resolution=32,
+        render_rt_subframes=1,
+        quality_lighting_profile="studio_softbox_v1",
+        analysis_up_axis="Z",
+        analysis_front_axis="-Y",
+    )
+    context = SimpleNamespace(
+        config=config,
+        source=source,
+        isaac_python=tmp_path / "isaac_python",
+        destination=destination,
+        workspace=workspace,
+    )
+    prepared = SimpleNamespace(
+        rendered_registry=workspace.source.rendered_registry,
+        instance_root_count=0,
+    )
+    planning = SimpleNamespace(
+        effective_catalog=catalog_path,
+        use_policy_fallback=True,
+    )
+    look = SimpleNamespace(
+        rendered_registry_document={"parts": []},
+        apply_subcommand="apply-part-plan",
+        apply_asset_flag="--asset",
+        apply_asset=source,
+    )
+
+    result = orchestrator._run_semantic_hybrid_component_tournament(
+        context,
+        prepared_source=prepared,
+        planning=planning,
+        look=look,
+        source_plan=source_plan,
+        spatial_report_path=spatial_report,
+        quality_render_view_arguments=("--view", "front=0,0,1"),
+        expected_applied_count=4,
+        log_cb=None,
+        command_runner=lambda *_args, **_kwargs: None,
+    )
+
+    assert unsafe_baseline_score_calls == []
+    audit = result.tournament_document
+    assert audit["candidate_count"] == 6
+    assert audit["actual_candidate_render_count"] == 6
+    assert audit["winner_count"] == 2
+    assert audit["component_color_candidate_count"] == 2
+    assert audit["component_color_h1_winner_count"] == 1
+    assert all(
+        component["unsafe_qwen_baseline_discarded"] is True
+        for component in audit["components"]
+    )
+    final_by_part = {
+        assignment["part_id"]: assignment for assignment in result.assignments
+    }
+    assert final_by_part["P1"]["material_id"] == paint_ids[1]
+    assert final_by_part["P2"]["material_id"] == paint_ids[1]
+    assert final_by_part["P3"]["material_id"] == metal_ids[0]
+    assert final_by_part["P4"]["material_id"] == metal_ids[0]
+    assert final_by_part["P1"]["parameters"] == final_by_part["P2"]["parameters"]
+    assert final_by_part["P1"]["parameters"]
+    assert not final_by_part["P3"].get("parameters")
+    assert not final_by_part["P4"].get("parameters")
+    assert events.index("semantic_component_identity_final_render") > max(
+        index
+        for index, event in enumerate(events)
+        if "_identity_" in event and event.endswith("_render")
+        and event != "semantic_component_identity_final_render"
+    )
+    assert events.index("semantic_component_1_color_h1_render") > events.index(
+        "semantic_component_identity_final_render"
+    )
+    assert events[-1] == "semantic_component_color_final_render"
+
+    tampered_plan = copy.deepcopy(result.plan)
+    tampered_assignment = next(
+        assignment
+        for assignment in tampered_plan["assignments"]
+        if assignment["part_id"] == "P1"
+    )
+    tampered_assignment["provenance"][
+        "appearance_component_color_candidate"
+    ]["source_plan_sha256"] = "0" * 64
+    tampered_audit = copy.deepcopy(audit)
+    tampered_audit["component_color_tournament"]["final_plan_sha256"] = (
+        orchestrator.canonical_sha256(tampered_plan)
+    )
+    with pytest.raises(
+        orchestrator.ComponentMdlTournamentError,
+        match="exact color candidate binding",
+    ):
+        orchestrator.rebind_part_id_material_audit_for_component_mdl_tournament(
+            source_audit=source_audit,
+            final_plan=tampered_plan,
+            tournament_audit=tampered_audit,
+        )
 
 
 def test_run_stage_reports_start_and_complete_with_real_elapsed(
