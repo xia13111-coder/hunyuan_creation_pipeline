@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 
 from qwen_material_pipeline.evidence.part_id_projection import (
+    PartIdProjectionError,
     _register_similarity_mask,
     _select_material_observation_index,
     build_part_id_material_plan,
@@ -33,6 +34,63 @@ def canonical_sha256(value: object) -> str:
 
 
 class PartIdProjectionTests(unittest.TestCase):
+    def test_unobserved_p0181_group_baseline_remains_fail_closed(self) -> None:
+        evidence_unsigned = {
+            "schema_version": "qwen-part-id-reference-evidence/v1",
+            "assignment_unit": "part_id",
+            "parts": [
+                {
+                    "part_id": "P0181",
+                    "status": "unobserved",
+                    "observations": [],
+                    "descriptor": None,
+                }
+            ],
+        }
+        evidence = {
+            **evidence_unsigned,
+            "integrity": {"document_sha256": canonical_sha256(evidence_unsigned)},
+        }
+        retrieval_unsigned = {
+            "schema_version": "qwen-visual-material-retrieval-result/v1",
+            "groups": [],
+        }
+        retrieval = {
+            **retrieval_unsigned,
+            "integrity": {"result_sha256": canonical_sha256(retrieval_unsigned)},
+        }
+        base_plan = {
+            "schema_version": "1.0",
+            "assignments": [
+                {
+                    "part_id": "P0181",
+                    "material_id": (
+                        "mdl:Metals/Aluminum_Anodized_Blue.mdl"
+                        "#Aluminum_Anodized_Blue"
+                    ),
+                    "semantic": "group-derived blue source accent",
+                    "confidence": 0.0,
+                    "evidence_views": [],
+                    "status": "policy_fallback",
+                    "provenance": {
+                        "tier": "corroborated_source_visual_nvidia_mdl",
+                        "canonical_group_id": "G05",
+                    },
+                }
+            ],
+            "provenance": {},
+        }
+
+        with self.assertRaisesRegex(
+            PartIdProjectionError,
+            "unobserved Part ID P0181.*independent policy fallback",
+        ):
+            build_part_id_material_plan(
+                base_plan=base_plan,
+                evidence=evidence,
+                retrieval_result=retrieval,
+            )
+
     def test_tiny_chromatic_component_can_propose_h1_without_mvinverse_pixel(
         self,
     ) -> None:

@@ -180,6 +180,10 @@ from qwen_material_pipeline.materials.publish_quality_gate import (
     build_publish_quality_gate,
     require_publish_quality_gate_passed,
 )
+from qwen_material_pipeline.materials.policy_exact_cover import (
+    PolicyExactCoverError,
+    build_policy_exact_cover,
+)
 from qwen_material_pipeline.materials.selection_lock import (
     build_material_selection_lock,
     validate_material_selection_lock,
@@ -1295,6 +1299,7 @@ class PolicyPartIdStageResult:
     policy_fallback_count: int
     policy_plan_document: dict[str, Any] | None
     policy_audit_document: dict[str, Any] | None
+    policy_input_document: dict[str, Any] | None
     plan: dict[str, Any]
     assignments: list[dict[str, Any]]
     selection_lock_document: dict[str, Any] | None
@@ -1640,6 +1645,7 @@ def _run_policy_part_id_stage(
     _command_runner = command_runner
     policy_plan_document: dict[str, Any] | None = None
     policy_audit_document: dict[str, Any] | None = None
+    policy_input_document: dict[str, Any] | None = None
 
     inference = run_material_inference(
         context,
@@ -1684,7 +1690,7 @@ def _run_policy_part_id_stage(
         # unverified and starts unresolved parts from a neutral material.
         # Strong Qwen/spatial evidence and the later QA-repair pass remain
         # free to replace that neutral baseline automatically.
-        policy_input_document: dict[str, Any] = {
+        policy_input_document = {
             "schema_version": POLICY_INPUT_SCHEMA_VERSION,
             "source_visual_strategy": "neutralize_unverified",
         }
@@ -1971,6 +1977,97 @@ def _run_policy_part_id_stage(
             "Selected-view coverage: "
             f"{evidence_document['summary'].get('selected_reference_view_coverage', {})}.",
         )
+        if _semantic_hybrid_enabled(config):
+            if policy_input_document is None:
+                raise RuntimeError(
+                    "semantic_hybrid Part-ID evidence convergence lacks the "
+                    "validated policy input"
+                )
+            registry_document = read_object(
+                rendered_registry,
+                "rendered registry for semantic-hybrid policy convergence",
+            )
+            staged_result_document = read_object(
+                staged_result,
+                "staged result for semantic-hybrid policy convergence",
+            )
+            confidence_gate_document = read_object(
+                confidence_gate,
+                "confidence gate for semantic-hybrid policy convergence",
+            )
+            base_plan_document = read_object(
+                staged_material_plan,
+                "autonomous plan for semantic-hybrid policy convergence",
+            )
+            group_materials_document = read_object(
+                group_materials,
+                "group materials for semantic-hybrid policy convergence",
+            )
+            mvinverse_pbr_document = read_object(
+                mvinverse_pbr_evidence,
+                "MVInverse PBR evidence for semantic-hybrid policy convergence",
+            )
+            palette_fusion_document = read_object(
+                analysis_dir / "palette_fusion.json",
+                "palette fusion for semantic-hybrid policy convergence",
+            )
+            whitelist_document = read_object(
+                effective_whitelist,
+                "material whitelist for semantic-hybrid policy convergence",
+            )
+            try:
+                policy_plan_document, policy_audit_document = (
+                    build_policy_exact_cover(
+                        registry=registry_document,
+                        staged_result=staged_result_document,
+                        confidence_gate=confidence_gate_document,
+                        whitelist=whitelist_document,
+                        policy=policy_input_document,
+                        base_plan=base_plan_document,
+                        group_materials=group_materials_document,
+                        mvinverse_pbr_evidence=mvinverse_pbr_document,
+                        palette_fusion=palette_fusion_document,
+                        part_id_evidence=evidence_document,
+                        acknowledge_policy_fallback=True,
+                        immutable_mdl_after_selection=(
+                            config.immutable_mdl_after_selection
+                        ),
+                    )
+                )
+            except PolicyExactCoverError as exc:
+                raise RuntimeError(
+                    "semantic_hybrid could not converge its hidden-Part-ID "
+                    f"policy baseline: {exc}"
+                ) from exc
+            policy_fallback_count = _validate_policy_exact_cover_bundle(
+                plan=policy_plan_document,
+                audit=policy_audit_document,
+                registry=registry_document,
+                staged_result=staged_result_document,
+                confidence_gate=confidence_gate_document,
+                base_plan=base_plan_document,
+                group_materials=group_materials_document,
+                mvinverse_pbr_evidence=mvinverse_pbr_document,
+                whitelist=whitelist_document,
+                palette_fusion=palette_fusion_document,
+                part_id_evidence=evidence_document,
+                expected_source_visual_strategy="neutralize_unverified",
+                expected_policy_overrides=policy_input_document,
+                expected_immutable_mdl_after_selection=(
+                    config.immutable_mdl_after_selection
+                ),
+            )
+            write_object(policy_plan, policy_plan_document)
+            write_object(policy_audit, policy_audit_document)
+            convergence_summary = policy_audit_document["summary"]
+            log_message(
+                log_cb,
+                "Semantic-hybrid policy baseline converged to final Part-ID "
+                "visibility: "
+                f"{convergence_summary['part_id_evidence_unobserved_count']} "
+                "unobserved parts now use independent policy fallbacks; no "
+                "palette/material group or identity propagation can assign them.",
+            )
         retrieval_request_document = build_part_id_retrieval_request(
             evidence=evidence_document,
             catalog=effective_catalog,
@@ -2330,6 +2427,11 @@ def _run_policy_part_id_stage(
         policy_fallback_count=policy_fallback_count,
         policy_plan_document=policy_plan_document,
         policy_audit_document=policy_audit_document,
+        policy_input_document=(
+            copy.deepcopy(policy_input_document)
+            if policy_input_document is not None
+            else None
+        ),
         plan=plan,
         assignments=assignments,
         selection_lock_document=selection_lock_document,
@@ -7596,6 +7698,7 @@ def _run_finalize_assignment_stage(
     use_policy_fallback = planning.use_policy_fallback
     policy_fallback_count = planning.policy_fallback_count
     policy_audit_document = planning.policy_audit_document
+    trusted_policy_input_document = planning.policy_input_document
     selection_lock_document = planning.selection_lock_document
     assignments = visual_qa.assignments
     parameter_tournament_document = visual_qa.parameter_tournament_document
@@ -7660,8 +7763,11 @@ def _run_finalize_assignment_stage(
     inference_paths = workspace.inference
     analysis_dir = inference_paths.root
     unattended_result = inference_paths.unattended_result
+    staged_result = inference_paths.staged_result
     confidence_gate = inference_paths.confidence_gate
     staged_material_plan = inference_paths.staged_material_plan
+    group_materials = inference_paths.group_materials
+    mvinverse_pbr_evidence = inference_paths.mvinverse_pbr_evidence
     policy_input = inference_paths.policy_input
     policy_plan = inference_paths.policy_plan
     policy_audit = inference_paths.policy_audit
@@ -7712,12 +7818,111 @@ def _run_finalize_assignment_stage(
     _command_runner = command_runner
 
     publish_quality_gate_document: dict[str, Any] | None = None
+    prepublish_confidence_gate_document: Mapping[str, Any] | None = None
+    prepublish_final_plan_document: Mapping[str, Any] | None = None
     publish_gate_required = bool(
         config.immutable_mdl_after_selection
         or require_complete_coverage
         or use_policy_fallback
     )
     if publish_gate_required:
+        prepublish_confidence_gate_document = read_object(
+            confidence_gate,
+            "pre-publish material confidence gate",
+        )
+        prepublish_final_plan_document = read_object(
+            effective_material_plan,
+            "pre-publish final effective material plan",
+        )
+        prepublish_policy_audit_document = (
+            read_object(policy_audit, "pre-publish policy exact-cover audit")
+            if use_policy_fallback
+            else None
+        )
+        prepublish_policy_plan_document = (
+            read_object(policy_plan, "pre-publish policy exact-cover plan")
+            if use_policy_fallback
+            and config.material_assignment_unit == "part_id"
+            else None
+        )
+        prepublish_part_id_audit_document = (
+            read_object(
+                part_id_material_audit,
+                "pre-publish Part-ID material audit",
+            )
+            if config.material_assignment_unit == "part_id"
+            else None
+        )
+        prepublish_rendered_registry_document = read_object(
+            rendered_registry,
+            "pre-publish rendered part registry",
+        )
+        prepublish_source_policy_document: Mapping[str, Any] | None = None
+        prepublish_part_id_evidence_document: Mapping[str, Any] | None = None
+        if _semantic_hybrid_enabled(config):
+            if (
+                prepublish_policy_plan_document is None
+                or prepublish_policy_audit_document is None
+                or prepublish_part_id_audit_document is None
+            ):
+                raise RuntimeError(
+                    "semantic_hybrid pre-publish replay lacks its policy or "
+                    "Part-ID audit"
+                )
+            prepublish_part_id_evidence_document = read_object(
+                part_id_evidence_path,
+                "pre-publish semantic-hybrid Part-ID evidence",
+            )
+            persisted_source_policy_document = read_object(
+                policy_input,
+                "pre-publish semantic-hybrid source policy",
+            )
+            if (
+                trusted_policy_input_document is None
+                or persisted_source_policy_document
+                != trusted_policy_input_document
+            ):
+                raise RuntimeError(
+                    "semantic_hybrid persisted source policy differs from the "
+                    "trusted in-memory policy"
+                )
+            prepublish_source_policy_document = trusted_policy_input_document
+            _validate_policy_exact_cover_bundle(
+                plan=prepublish_policy_plan_document,
+                audit=prepublish_policy_audit_document,
+                registry=prepublish_rendered_registry_document,
+                staged_result=read_object(
+                    staged_result,
+                    "pre-publish semantic-hybrid staged result",
+                ),
+                confidence_gate=prepublish_confidence_gate_document,
+                base_plan=read_object(
+                    staged_material_plan,
+                    "pre-publish semantic-hybrid autonomous plan",
+                ),
+                group_materials=read_object(
+                    group_materials,
+                    "pre-publish semantic-hybrid group materials",
+                ),
+                mvinverse_pbr_evidence=read_object(
+                    mvinverse_pbr_evidence,
+                    "pre-publish semantic-hybrid MVInverse evidence",
+                ),
+                whitelist=read_object(
+                    effective_whitelist,
+                    "pre-publish semantic-hybrid material whitelist",
+                ),
+                palette_fusion=read_object(
+                    analysis_dir / "palette_fusion.json",
+                    "pre-publish semantic-hybrid palette fusion",
+                ),
+                part_id_evidence=prepublish_part_id_evidence_document,
+                expected_source_visual_strategy="neutralize_unverified",
+                expected_policy_overrides=trusted_policy_input_document,
+                expected_immutable_mdl_after_selection=(
+                    config.immutable_mdl_after_selection
+                ),
+            )
         publish_annotation_document = (
             read_object(
                 visual_group_annotation_audit,
@@ -7741,34 +7946,14 @@ def _run_finalize_assignment_stage(
             publish_queue_document = raw_publish_queue
         try:
             publish_quality_gate_document = build_publish_quality_gate(
-                confidence_gate=read_object(
-                    confidence_gate,
-                    "pre-publish material confidence gate",
-                ),
-                final_plan=read_object(
-                    effective_material_plan,
-                    "pre-publish final effective material plan",
-                ),
+                confidence_gate=prepublish_confidence_gate_document,
+                final_plan=prepublish_final_plan_document,
                 annotation_audit=publish_annotation_document,
-                policy_audit=(
-                    read_object(policy_audit, "pre-publish policy exact-cover audit")
-                    if use_policy_fallback
-                    else None
-                ),
-                policy_plan=(
-                    read_object(policy_plan, "pre-publish policy exact-cover plan")
-                    if use_policy_fallback
-                    and config.material_assignment_unit == "part_id"
-                    else None
-                ),
-                part_id_material_audit=(
-                    read_object(
-                        part_id_material_audit,
-                        "pre-publish Part-ID material audit",
-                    )
-                    if config.material_assignment_unit == "part_id"
-                    else None
-                ),
+                policy_audit=prepublish_policy_audit_document,
+                policy_plan=prepublish_policy_plan_document,
+                part_id_material_audit=prepublish_part_id_audit_document,
+                source_policy=prepublish_source_policy_document,
+                part_id_evidence=prepublish_part_id_evidence_document,
                 queue_audit=publish_queue_document,
                 tournament_audit=(
                     read_object(
@@ -7778,10 +7963,7 @@ def _run_finalize_assignment_stage(
                     if exact_mdl_tournament_audit.is_file()
                     else None
                 ),
-                rendered_registry=read_object(
-                    rendered_registry,
-                    "pre-publish rendered part registry",
-                ),
+                rendered_registry=prepublish_rendered_registry_document,
                 spatial_mapping_report=read_object(
                     analysis_dir / "spatial_mapping_report.json",
                     "pre-publish spatial mapping report",
@@ -7895,13 +8077,14 @@ def _run_finalize_assignment_stage(
                 "choices without exact-MDL render confirmation: "
                 f"{unresolved_disagreement_group_ids}"
             )
-        final_plan_document = read_object(
-            effective_material_plan,
-            "final render-validated material selection",
-        )
+        if prepublish_final_plan_document is None:
+            raise RuntimeError(
+                "The immutable material selection lacks its pre-publish "
+                "validated final plan"
+            )
         try:
             selection_lock_document = build_material_selection_lock(
-                plan=final_plan_document,
+                plan=prepublish_final_plan_document,
                 catalog_path=effective_catalog,
                 material_root=config.material_root,
             )
