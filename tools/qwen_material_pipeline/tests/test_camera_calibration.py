@@ -5,9 +5,11 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 
 import qwen_material_pipeline.evidence.camera_calibration as camera_calibration
 from qwen_material_pipeline.evidence.camera_calibration import (
@@ -73,6 +75,228 @@ def test_camera_render_retries_cleanly_after_transient_isaac_startup_failure(
     assert calls == 2
     assert rendered == (output / "part_registry.rendered.json").resolve()
     assert not (output / "stale.txt").exists()
+
+
+def test_inprocess_camera_render_cleans_partial_output_and_never_retries_failure(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "renders"
+    output.mkdir()
+    (output / "stale.txt").write_text("partial", encoding="utf-8")
+    calls = 0
+
+    def fail_once(**kwargs) -> Path:
+        nonlocal calls
+        calls += 1
+        assert not (kwargs["output_dir"] / "stale.txt").exists()
+        kwargs["output_dir"].mkdir(parents=True)
+        (kwargs["output_dir"] / "partial.txt").write_text(
+            "poisoned", encoding="utf-8"
+        )
+        raise ValueError("render failed")
+
+    with pytest.raises(RuntimeError, match="refusing to reuse this Isaac session"):
+        camera_calibration._run_render(
+            isaac_python=tmp_path / "isaac-python.sh",
+            registry=tmp_path / "registry.json",
+            output_dir=output,
+            view_specs=tmp_path / "views.json",
+            resolution=256,
+            rt_subframes=2,
+            analysis_up_axis="z",
+            analysis_front_axis="-y",
+            render_runner=fail_once,
+        )
+
+    assert calls == 1
+
+
+def test_inprocess_renderer_adapter_preserves_camera_render_contract(
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_render_part_views(**kwargs):
+        captured.update(kwargs)
+        output = Path(kwargs["output_dir"]) / "part_registry.rendered.json"
+        output.parent.mkdir(parents=True)
+        output.write_text("{}", encoding="utf-8")
+        return {"output_registry": str(output)}
+
+    runner = camera_calibration._make_inprocess_render_runner(
+        render_part_views=fake_render_part_views,
+        axis_vectors={"z": (0.0, 0.0, 1.0), "-y": (0.0, -1.0, 0.0)},
+    )
+    output_dir = tmp_path / "renders"
+    output = runner(
+        registry=tmp_path / "registry.json",
+        output_dir=output_dir,
+        view_specs=tmp_path / "views.json",
+        resolution=384,
+        rt_subframes=3,
+        analysis_up_axis="z",
+        analysis_front_axis="-y",
+    )
+
+    assert output == output_dir / "part_registry.rendered.json"
+    assert captured == {
+        "registry_path": tmp_path / "registry.json",
+        "output_dir": output_dir,
+        "resolution": 384,
+        "view_names": None,
+        "rt_subframes": 3,
+        "analysis_up_axis": (0.0, 0.0, 1.0),
+        "analysis_front_axis": (0.0, -1.0, 0.0),
+        "lighting_profile": "geometry",
+        "showcase": False,
+        "generate_part_evidence": False,
+        "custom_view_specs_path": tmp_path / "views.json",
+    }
+
+
+def test_inprocess_backend_starts_and_closes_one_app_for_multiple_batches(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    render_calls: list[Path] = []
+
+    class FakeApp:
+        def close(self) -> None:
+            events.append("close")
+
+    def app_factory(config):
+        assert config == {"headless": True, "create_new_stage": False}
+        events.append("start")
+        return FakeApp()
+
+    def fake_render_part_views(**kwargs):
+        render_calls.append(Path(kwargs["output_dir"]))
+        output = Path(kwargs["output_dir"]) / "part_registry.rendered.json"
+        output.parent.mkdir(parents=True)
+        output.write_text("{}", encoding="utf-8")
+        return {"output_registry": str(output)}
+
+    def load_render_module():
+        assert events == ["start"]
+        events.append("import-render")
+        return SimpleNamespace(
+            render_part_views=fake_render_part_views,
+            AXIS_VECTORS={"z": (0.0, 0.0, 1.0), "-y": (0.0, -1.0, 0.0)},
+        )
+
+    def fake_calibrate(_args, *, render_runner):
+        for name in ("phase_a", "phase_b"):
+            render_runner(
+                registry=tmp_path / "registry.json",
+                output_dir=tmp_path / name,
+                view_specs=tmp_path / f"{name}.json",
+                resolution=256,
+                rt_subframes=2,
+                analysis_up_axis="z",
+                analysis_front_axis="-y",
+            )
+        return {"views": []}
+
+    monkeypatch.setattr(camera_calibration, "_calibrate_from_args", fake_calibrate)
+    exit_code, report = camera_calibration._run_inprocess_backend(
+        SimpleNamespace(),
+        simulation_app_factory=app_factory,
+        render_module_loader=load_render_module,
+    )
+
+    assert exit_code == 0
+    assert report == {"views": []}
+    assert render_calls == [tmp_path / "phase_a", tmp_path / "phase_b"]
+    assert events == ["start", "import-render", "close"]
+
+
+def test_inprocess_budget_exit_still_closes_the_only_app(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeApp:
+        def close(self) -> None:
+            events.append("close")
+
+    def fake_calibrate(_args, *, render_runner):
+        assert callable(render_runner)
+        raise camera_calibration._RenderBatchBudgetReached("sealed front/nano")
+
+    monkeypatch.setattr(camera_calibration, "_calibrate_from_args", fake_calibrate)
+    exit_code, report = camera_calibration._run_inprocess_backend(
+        SimpleNamespace(),
+        simulation_app_factory=lambda _config: FakeApp(),
+        render_module_loader=lambda: SimpleNamespace(
+            render_part_views=lambda **_kwargs: {},
+            AXIS_VECTORS={},
+        ),
+    )
+
+    assert exit_code == camera_calibration.SUPERVISOR_RESTART_EXIT_CODE
+    assert report is None
+    assert events == ["close"]
+
+
+def test_supervisor_rotates_budget_sessions_and_retries_true_failures(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    isaac_python = tmp_path / "python.sh"
+    isaac_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    args = SimpleNamespace(
+        registry=tmp_path / "registry.json",
+        reference_manifest=tmp_path / "references.json",
+        spatial_mapping=None,
+        initial_view_specs=None,
+        search_phases=None,
+        isaac_python=isaac_python,
+        output_dir=tmp_path / "camera",
+        reference_ids=None,
+        search_resolution=256,
+        final_resolution=512,
+        rt_subframes=2,
+        analysis_up_axis="z",
+        analysis_front_axis="-y",
+        max_new_render_batches=None,
+    )
+    return_codes = iter(
+        [
+            1,
+            camera_calibration.SUPERVISOR_RESTART_EXIT_CODE,
+            1,
+            1,
+            0,
+        ]
+    )
+    commands: list[list[str]] = []
+    sleeps: list[float] = []
+
+    def fake_run(command, *, check, env):
+        assert check is False
+        assert Path(env["PYTHONPATH"].split(os.pathsep)[0]) == (
+            Path(camera_calibration.__file__).resolve().parents[2]
+        )
+        commands.append(list(command))
+        return SimpleNamespace(returncode=next(return_codes))
+
+    monkeypatch.setattr(camera_calibration.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        camera_calibration.time, "sleep", lambda seconds: sleeps.append(seconds)
+    )
+
+    assert camera_calibration._run_supervisor_backend(args) == 0
+    assert len(commands) == 5
+    assert all(command == commands[0] for command in commands)
+    assert commands[0][0] == str(isaac_python.resolve())
+    assert commands[0][commands[0].index("--render-backend") + 1] == "inprocess"
+    assert commands[0][commands[0].index("--max-new-render-batches") + 1] == "8"
+    assert sleeps == [
+        camera_calibration.RENDER_RETRY_DELAY_SECONDS,
+        camera_calibration.RENDER_RETRY_DELAY_SECONDS,
+        camera_calibration.RENDER_RETRY_DELAY_SECONDS,
+    ]
 
 
 def test_camera_phase_checkpoint_reuse_requires_exact_candidate_specs(

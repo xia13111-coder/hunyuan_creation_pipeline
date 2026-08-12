@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import importlib
 import json
 import math
 import os
@@ -19,7 +20,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import cv2
 import numpy as np
@@ -36,6 +37,8 @@ VIEW_SPEC_SCHEMA_VERSION = "qwen-camera-view-specs/v1"
 FINALIST_COUNT = 5
 RENDER_RETRY_ATTEMPTS = 3
 RENDER_RETRY_DELAY_SECONDS = 3.0
+SUPERVISOR_RENDER_BATCH_LIMIT = 8
+SUPERVISOR_RESTART_EXIT_CODE = 75
 MAX_FOCAL_LENGTH_MM = 2000.0
 CAMERA_OBJECTIVE_VERSION = "hierarchical_visible_part_alignment/v8"
 COMPLETE_ALIGNMENT_MINIMUM_IOU = 0.97
@@ -58,6 +61,12 @@ CAMERA_PHASES = (
     "pico",
     "target_pico",
 )
+
+RenderRunner = Callable[..., Path]
+
+
+class _RenderBatchBudgetReached(RuntimeError):
+    """Request a fresh Isaac process after a sealed camera-search phase."""
 
 
 def _read_object(path: Path) -> dict[str, Any]:
@@ -1360,7 +1369,45 @@ def _run_render(
     rt_subframes: int,
     analysis_up_axis: str,
     analysis_front_axis: str,
+    render_runner: RenderRunner | None = None,
 ) -> Path:
+    rendered = output_dir / "part_registry.rendered.json"
+    if render_runner is not None:
+        # An in-process failure may leave Kit or Replicator poisoned.  Clean
+        # the exact batch before starting, make one attempt, and let the whole
+        # Isaac child exit on any exception.  The supervisor can then retry in
+        # a genuinely fresh process while completed phase checkpoints remain.
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        print(
+            f"[CAMERA] in-process render {view_specs} -> {output_dir}",
+            flush=True,
+        )
+        try:
+            result = Path(
+                render_runner(
+                    registry=registry,
+                    output_dir=output_dir,
+                    view_specs=view_specs,
+                    resolution=resolution,
+                    rt_subframes=rt_subframes,
+                    analysis_up_axis=analysis_up_axis,
+                    analysis_front_axis=analysis_front_axis,
+                )
+            ).expanduser().resolve(strict=True)
+        except Exception as exc:
+            raise RuntimeError(
+                "In-process camera render failed; refusing to reuse this "
+                f"Isaac session: {output_dir}"
+            ) from exc
+        expected = rendered.resolve()
+        if result != expected:
+            raise RuntimeError(
+                "In-process camera renderer returned an unexpected registry: "
+                f"{result} (expected {expected})"
+            )
+        return result
+
     command = [
         str(isaac_python),
         "-m",
@@ -1382,7 +1429,6 @@ def _run_render(
         f"--analysis-front-axis={analysis_front_axis}",
         "--rgb-only",
     ]
-    rendered = output_dir / "part_registry.rendered.json"
     environment = os.environ.copy()
     tools_root = Path(__file__).resolve().parents[2]
     inherited_pythonpath = environment.get("PYTHONPATH")
@@ -1859,6 +1905,8 @@ def calibrate(
     analysis_front_axis: str,
     initial_view_specs: Path | None = None,
     search_phases: Sequence[str] | None = None,
+    render_runner: RenderRunner | None = None,
+    max_new_render_batches: int | None = None,
 ) -> dict[str, Any]:
     registry = registry.expanduser().resolve(strict=True)
     reference_manifest = reference_manifest.expanduser().resolve(strict=True)
@@ -1880,6 +1928,8 @@ def calibrate(
         raise ValueError(
             "Unknown camera calibration search phases: " + ", ".join(invalid_phases)
         )
+    if max_new_render_batches is not None and max_new_render_batches <= 0:
+        raise ValueError("max_new_render_batches must be a positive integer")
     isaac_python = isaac_python.expanduser().resolve(strict=True)
     destination = output_dir.expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
@@ -1924,6 +1974,7 @@ def calibrate(
     winners: dict[str, dict[str, Any]] = {}
     phases: dict[str, list[dict[str, Any]]] = {}
     finalists: dict[str, list[dict[str, Any]]] = {}
+    new_render_batches = 0
     for view_index, reference_id in enumerate(requested, start=1):
         print(
             f"[CAMERA] reference {view_index}/{len(requested)} {reference_id}",
@@ -1965,6 +2016,7 @@ def calibrate(
                     rt_subframes=rt_subframes,
                     analysis_up_axis=analysis_up_axis,
                     analysis_front_axis=analysis_front_axis,
+                    render_runner=render_runner,
                 )
                 winner, candidates = _score_candidates(
                     reference_id=reference_id,
@@ -1982,6 +2034,7 @@ def calibrate(
                         "candidates": candidates,
                     },
                 )
+                new_render_batches += 1
             phase_records.append(
                 {
                     "phase": phase,
@@ -2008,6 +2061,16 @@ def calibrate(
                 f"boundary_p95={winner['boundary_p95_px']:.2f}px",
                 flush=True,
             )
+            if (
+                max_new_render_batches is not None
+                and new_render_batches >= max_new_render_batches
+            ):
+                # The score document above is the atomic resume checkpoint.
+                # Never recycle between rendering and scoring a phase.
+                raise _RenderBatchBudgetReached(
+                    "Camera render-batch budget reached after sealed phase "
+                    f"{reference_id}/{phase}"
+                )
         finalists[reference_id] = _global_finalists(
             phase_candidate_pool,
             count=FINALIST_COUNT,
@@ -2040,6 +2103,7 @@ def calibrate(
         rt_subframes=rt_subframes,
         analysis_up_axis=analysis_up_axis,
         analysis_front_axis=analysis_front_axis,
+        render_runner=render_runner,
     )
     for reference_id in requested:
         winner, candidates = _score_candidates(
@@ -2224,6 +2288,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--isaac-python", type=Path, required=True)
+    parser.add_argument(
+        "--render-backend",
+        choices=("subprocess", "inprocess", "supervisor"),
+        default="subprocess",
+        help=(
+            "subprocess preserves the legacy one-Isaac-process-per-batch "
+            "behavior; inprocess reuses this Isaac process; supervisor "
+            "rotates bounded inprocess children"
+        ),
+    )
+    parser.add_argument(
+        "--max-new-render-batches",
+        type=int,
+        help=(
+            "internal inprocess child budget; supervisor defaults to "
+            f"{SUPERVISOR_RENDER_BATCH_LIMIT}"
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--reference-ids",
@@ -2237,9 +2319,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    report = calibrate(
+def _calibrate_from_args(
+    args: argparse.Namespace,
+    *,
+    render_runner: RenderRunner | None = None,
+) -> dict[str, Any]:
+    return calibrate(
         registry=args.registry,
         reference_manifest=args.reference_manifest,
         spatial_mapping=args.spatial_mapping,
@@ -2261,7 +2346,197 @@ def main() -> int:
             if args.search_phases
             else None
         ),
+        render_runner=render_runner,
+        max_new_render_batches=args.max_new_render_batches,
     )
+
+
+def _make_inprocess_render_runner(
+    *,
+    render_part_views: Callable[..., Mapping[str, Any]],
+    axis_vectors: Mapping[str, tuple[float, float, float]],
+) -> RenderRunner:
+    """Adapt the reusable USD renderer to the camera batch contract."""
+
+    def run(
+        *,
+        registry: Path,
+        output_dir: Path,
+        view_specs: Path,
+        resolution: int,
+        rt_subframes: int,
+        analysis_up_axis: str,
+        analysis_front_axis: str,
+    ) -> Path:
+        report = render_part_views(
+            registry_path=registry,
+            output_dir=output_dir,
+            resolution=resolution,
+            view_names=None,
+            rt_subframes=rt_subframes,
+            analysis_up_axis=axis_vectors[analysis_up_axis],
+            analysis_front_axis=axis_vectors[analysis_front_axis],
+            lighting_profile="geometry",
+            showcase=False,
+            generate_part_evidence=False,
+            custom_view_specs_path=view_specs,
+        )
+        output_registry = report.get("output_registry")
+        if not isinstance(output_registry, str) or not output_registry:
+            raise RuntimeError("In-process renderer did not report output_registry")
+        return Path(output_registry)
+
+    return run
+
+
+def _run_inprocess_backend(
+    args: argparse.Namespace,
+    *,
+    simulation_app_factory: Callable[[Mapping[str, bool]], Any] | None = None,
+    render_module_loader: Callable[[], Any] | None = None,
+) -> tuple[int, dict[str, Any] | None]:
+    """Run all allowed batches under exactly one SimulationApp instance."""
+
+    if simulation_app_factory is None:
+        from isaacsim import SimulationApp
+
+        simulation_app_factory = SimulationApp
+    app = simulation_app_factory({"headless": True, "create_new_stage": False})
+    try:
+        # Importing this module initializes its Isaac-facing dependencies, so
+        # it must happen only after SimulationApp has finished starting.
+        render_module = (
+            render_module_loader()
+            if render_module_loader is not None
+            else importlib.import_module("qwen_material_pipeline.usd.render")
+        )
+        runner = _make_inprocess_render_runner(
+            render_part_views=render_module.render_part_views,
+            axis_vectors=render_module.AXIS_VECTORS,
+        )
+        try:
+            return 0, _calibrate_from_args(args, render_runner=runner)
+        except _RenderBatchBudgetReached as exc:
+            print(f"[CAMERA] {exc}; requesting a fresh Isaac session", flush=True)
+            return SUPERVISOR_RESTART_EXIT_CODE, None
+    finally:
+        app.close()
+
+
+def _forwarded_calibration_arguments(
+    args: argparse.Namespace,
+    *,
+    render_backend: str,
+    max_new_render_batches: int | None,
+) -> list[str]:
+    output = [
+        "--registry",
+        str(args.registry),
+        "--reference-manifest",
+        str(args.reference_manifest),
+    ]
+    if args.spatial_mapping is not None:
+        output.extend(["--spatial-mapping", str(args.spatial_mapping)])
+    if args.initial_view_specs is not None:
+        output.extend(["--initial-view-specs", str(args.initial_view_specs)])
+    if args.search_phases:
+        output.extend(["--search-phases", args.search_phases])
+    output.extend(
+        [
+            "--isaac-python",
+            str(args.isaac_python),
+            "--render-backend",
+            render_backend,
+            "--output-dir",
+            str(args.output_dir),
+        ]
+    )
+    if args.reference_ids:
+        output.extend(["--reference-ids", args.reference_ids])
+    output.extend(
+        [
+            "--search-resolution",
+            str(args.search_resolution),
+            "--final-resolution",
+            str(args.final_resolution),
+            "--rt-subframes",
+            str(args.rt_subframes),
+            "--analysis-up-axis",
+            args.analysis_up_axis,
+            f"--analysis-front-axis={args.analysis_front_axis}",
+        ]
+    )
+    if max_new_render_batches is not None:
+        output.extend(
+            ["--max-new-render-batches", str(max_new_render_batches)]
+        )
+    return output
+
+
+def _run_supervisor_backend(args: argparse.Namespace) -> int:
+    batch_limit = (
+        args.max_new_render_batches
+        if args.max_new_render_batches is not None
+        else SUPERVISOR_RENDER_BATCH_LIMIT
+    )
+    if batch_limit <= 0:
+        raise ValueError("max_new_render_batches must be a positive integer")
+    command = [
+        str(args.isaac_python.expanduser().resolve(strict=True)),
+        "-m",
+        "qwen_material_pipeline",
+        "calibrate-cameras",
+        *_forwarded_calibration_arguments(
+            args,
+            render_backend="inprocess",
+            max_new_render_batches=batch_limit,
+        ),
+    ]
+    environment = os.environ.copy()
+    tools_root = Path(__file__).resolve().parents[2]
+    inherited_pythonpath = environment.get("PYTHONPATH")
+    pythonpath_entries = (
+        []
+        if not inherited_pythonpath
+        else [
+            entry
+            for entry in inherited_pythonpath.split(os.pathsep)
+            if entry and Path(entry).expanduser().resolve() != tools_root
+        ]
+    )
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(tools_root), *pythonpath_entries)
+    )
+    failures = 0
+    while True:
+        print("[CAMERA] supervisor starting bounded Isaac session", flush=True)
+        try:
+            completed = subprocess.run(command, check=False, env=environment)
+            return_code = int(completed.returncode)
+        except FileNotFoundError:
+            return_code = 127
+        if return_code == 0:
+            return 0
+        if return_code == SUPERVISOR_RESTART_EXIT_CODE:
+            failures = 0
+            continue
+        failures += 1
+        if failures >= RENDER_RETRY_ATTEMPTS:
+            raise RuntimeError(
+                "Camera calibration failed in "
+                f"{RENDER_RETRY_ATTEMPTS} fresh Isaac sessions "
+                f"(last exit code {return_code})"
+            )
+        print(
+            "[CAMERA] bounded Isaac session failed; retrying from verified "
+            f"phase checkpoints in {RENDER_RETRY_DELAY_SECONDS:.0f}s "
+            f"({failures}/{RENDER_RETRY_ATTEMPTS})",
+            flush=True,
+        )
+        time.sleep(RENDER_RETRY_DELAY_SECONDS)
+
+
+def _print_report(args: argparse.Namespace, report: Mapping[str, Any]) -> None:
     print(
         json.dumps(
             {
@@ -2276,6 +2551,25 @@ def main() -> int:
             ensure_ascii=False,
         )
     )
+
+
+def main() -> int:
+    args = parse_args()
+    if args.render_backend == "supervisor":
+        return _run_supervisor_backend(args)
+    if args.render_backend == "inprocess":
+        exit_code, report = _run_inprocess_backend(args)
+        if exit_code != 0:
+            return exit_code
+        assert report is not None
+    else:
+        if args.max_new_render_batches is not None:
+            raise ValueError(
+                "--max-new-render-batches is valid only for inprocess or "
+                "supervisor backends"
+            )
+        report = _calibrate_from_args(args)
+    _print_report(args, report)
     return 0
 
 
