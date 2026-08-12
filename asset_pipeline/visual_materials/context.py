@@ -26,6 +26,10 @@ ResumeValidator = Callable[
     ],
     bool,
 ]
+PreDestinationValidator = Callable[
+    [VisualMaterialConfig, str, Path | None],
+    None,
+]
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,7 @@ class VisualMaterialPipelineContext:
         isaac_python_resolver: IsaacPythonResolver,
         reference_parser: ReferenceParser,
         resume_validator: ResumeValidator,
+        pre_destination_validator: PreDestinationValidator | None = None,
     ) -> "VisualMaterialPipelineContext":
         if inference_mode not in VISUAL_INFERENCE_MODES:
             raise ValueError(
@@ -123,13 +128,26 @@ class VisualMaterialPipelineContext:
         if not isaac.is_file() or not os.access(isaac, os.X_OK):
             raise FileNotFoundError(f"Isaac Sim Python is unavailable: {isaac}")
 
+        requested_destination = (
+            Path(output_dir).expanduser().resolve()
+            if output_dir is not None
+            else None
+        )
+        if pre_destination_validator is not None:
+            pre_destination_validator(
+                config,
+                inference_mode,
+                requested_destination,
+            )
+
         if output_dir is None:
             destination = unique_path(
                 source.parent.parent / f"{source.stem}_visual_material"
             ).resolve()
             partial_live_resume = False
         else:
-            destination = Path(output_dir).expanduser().resolve()
+            assert requested_destination is not None
+            destination = requested_destination
             partial_live_resume = inference_mode == "live" and resume_validator(
                 destination,
                 parsed_references,
