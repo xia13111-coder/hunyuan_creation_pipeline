@@ -4,6 +4,7 @@ import io
 import inspect
 import json
 import math
+from collections.abc import Callable
 
 import pytest
 
@@ -41,22 +42,63 @@ class _FakeContext:
         name: str,
         *,
         close_result: object = True,
+        close_after_updates: int = 0,
     ) -> None:
         self.events = events
         self.name = name
         self.close_result = close_result
+        self.close_after_updates = close_after_updates
+        self._stage: object | None = object()
+        self._close_requested = False
+        self._post_close_updates = 0
 
     def close_stage(self) -> object:
         self.events.append(f"{self.name}.close")
+        if self.close_result is True:
+            self._close_requested = True
+            if self.close_after_updates == 0:
+                self._stage = None
         return self.close_result
+
+    def get_stage(self) -> object | None:
+        return self._stage
+
+    def advance_kit_update(self) -> None:
+        if not self._close_requested or self._stage is None:
+            return
+        self._post_close_updates += 1
+        if self._post_close_updates >= self.close_after_updates:
+            self._stage = None
+
+
+class _FakeKitApp:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        on_update: Callable[[], None] | None = None,
+        update_error: BaseException | None = None,
+    ) -> None:
+        self.events = events
+        self.on_update = on_update
+        self.update_error = update_error
+
+    def update(self) -> None:
+        self.events.append("kit.update")
+        if self.update_error is not None:
+            raise self.update_error
+        if self.on_update is not None:
+            self.on_update()
 
 
 class _FakeRenderProduct:
     def __init__(self, events: list[str], name: str) -> None:
         self.events = events
         self.name = name
+        self.destroy_calls = 0
 
     def destroy(self) -> None:
+        self.destroy_calls += 1
         self.events.append(f"{self.name}.destroy")
 
 
@@ -378,6 +420,7 @@ def test_render_lifecycle_is_fully_stopped_before_sequential_invocations(
     events: list[str] = []
     orchestrator = _FakeOrchestrator(events)
     invocation = 0
+    products: list[_FakeRenderProduct] = []
 
     def fake_render_once(**kwargs: object) -> dict[str, object]:
         nonlocal invocation
@@ -386,14 +429,19 @@ def test_render_lifecycle_is_fully_stopped_before_sequential_invocations(
         assert isinstance(lifecycle, _RenderLifecycle)
         context = _FakeContext(events, f"context{invocation}")
         product = _FakeRenderProduct(events, f"product{invocation}")
+        products.append(product)
         annotator = _FakeAnnotator(events, f"annotator{invocation}")
         lifecycle.register_open_stage(context)
-        lifecycle.register_render_product(product)
         lifecycle.attach_annotator(annotator, product)
         lifecycle.step(orchestrator, batch=invocation)
         return {"invocation": invocation}
 
     monkeypatch.setattr(render_module, "_render_part_views_once", fake_render_once)
+    monkeypatch.setattr(
+        render_module,
+        "_get_kit_app",
+        lambda: _FakeKitApp(events),
+    )
 
     first = render_module.render_part_views(
         registry_path="unused.json", output_dir="unused"
@@ -405,110 +453,135 @@ def test_render_lifecycle_is_fully_stopped_before_sequential_invocations(
     assert first == {"invocation": 1}
     assert second == {"invocation": 2}
     assert orchestrator.state == "STOPPED"
+    assert [product.destroy_calls for product in products] == [0, 0]
     assert events == [
         "annotator1.attach:product1",
         "orchestrator.step:1",
         "orchestrator.stop",
         "orchestrator.wait",
         "annotator1.detach:product1",
-        "product1.destroy",
         "context1.close",
+        "kit.update",
+        "kit.update",
         "annotator2.attach:product2",
         "orchestrator.step:2",
         "orchestrator.stop",
         "orchestrator.wait",
         "annotator2.detach:product2",
-        "product2.destroy",
         "context2.close",
+        "kit.update",
+        "kit.update",
     ]
 
 
 def test_render_body_exception_still_releases_every_resource(monkeypatch) -> None:
     events: list[str] = []
     orchestrator = _FakeOrchestrator(events)
+    products: list[_FakeRenderProduct] = []
 
     def failing_render_once(**kwargs: object) -> dict[str, object]:
         lifecycle = kwargs["_lifecycle"]
         assert isinstance(lifecycle, _RenderLifecycle)
         context = _FakeContext(events, "context")
         product = _FakeRenderProduct(events, "product")
+        products.append(product)
         annotator = _FakeAnnotator(events, "annotator")
         lifecycle.register_open_stage(context)
-        lifecycle.register_render_product(product)
         lifecycle.attach_annotator(annotator, product)
         lifecycle.step(orchestrator, batch="failure")
         raise ValueError("synthetic render body failure")
 
     monkeypatch.setattr(render_module, "_render_part_views_once", failing_render_once)
+    monkeypatch.setattr(
+        render_module,
+        "_get_kit_app",
+        lambda: _FakeKitApp(events),
+    )
 
     with pytest.raises(ValueError, match="synthetic render body failure"):
         render_module.render_part_views(
             registry_path="unused.json", output_dir="unused"
         )
 
-    assert events[-5:] == [
+    assert products[0].destroy_calls == 0
+    assert events[-6:] == [
         "orchestrator.stop",
         "orchestrator.wait",
         "annotator.detach:product",
-        "product.destroy",
         "context.close",
+        "kit.update",
+        "kit.update",
     ]
 
 
 def test_partial_annotator_attach_is_registered_before_failure(monkeypatch) -> None:
     events: list[str] = []
+    products: list[_FakeRenderProduct] = []
 
     def failing_attach_once(**kwargs: object) -> dict[str, object]:
         lifecycle = kwargs["_lifecycle"]
         assert isinstance(lifecycle, _RenderLifecycle)
         context = _FakeContext(events, "context")
         product = _FakeRenderProduct(events, "product")
+        products.append(product)
         annotator = _FakeAnnotator(
             events,
             "annotator",
             attach_error=RuntimeError("synthetic attach failure"),
         )
         lifecycle.register_open_stage(context)
-        lifecycle.register_render_product(product)
         lifecycle.attach_annotator(annotator, product)
         raise AssertionError("unreachable")
 
     monkeypatch.setattr(render_module, "_render_part_views_once", failing_attach_once)
+    monkeypatch.setattr(
+        render_module,
+        "_get_kit_app",
+        lambda: _FakeKitApp(events),
+    )
 
     with pytest.raises(RuntimeError, match="synthetic attach failure"):
         render_module.render_part_views(
             registry_path="unused.json", output_dir="unused"
         )
 
+    assert products[0].destroy_calls == 0
     assert events == [
         "annotator.attach:product",
         "annotator.detach:product",
-        "product.destroy",
         "context.close",
+        "kit.update",
+        "kit.update",
     ]
 
 
-def test_wait_failure_still_detaches_destroys_and_closes_stage(monkeypatch) -> None:
+def test_wait_failure_still_detaches_closes_and_drains_stage(monkeypatch) -> None:
     events: list[str] = []
     orchestrator = _FakeOrchestrator(
         events,
         wait_error=RuntimeError("synthetic wait failure"),
     )
+    products: list[_FakeRenderProduct] = []
 
     def successful_render_once(**kwargs: object) -> dict[str, object]:
         lifecycle = kwargs["_lifecycle"]
         assert isinstance(lifecycle, _RenderLifecycle)
         context = _FakeContext(events, "context")
         product = _FakeRenderProduct(events, "product")
+        products.append(product)
         annotator = _FakeAnnotator(events, "annotator")
         lifecycle.register_open_stage(context)
-        lifecycle.register_render_product(product)
         lifecycle.attach_annotator(annotator, product)
         lifecycle.step(orchestrator, batch="wait-failure")
         return {"rendered": True}
 
     monkeypatch.setattr(
         render_module, "_render_part_views_once", successful_render_once
+    )
+    monkeypatch.setattr(
+        render_module,
+        "_get_kit_app",
+        lambda: _FakeKitApp(events),
     )
 
     with pytest.raises(_RenderCleanupError, match="synthetic wait failure") as raised:
@@ -519,10 +592,12 @@ def test_wait_failure_still_detaches_destroys_and_closes_stage(monkeypatch) -> N
     assert [operation for operation, _ in raised.value.failures] == [
         "orchestrator.wait_until_complete"
     ]
-    assert events[-3:] == [
+    assert products[0].destroy_calls == 0
+    assert events[-4:] == [
         "annotator.detach:product",
-        "product.destroy",
         "context.close",
+        "kit.update",
+        "kit.update",
     ]
 
 
@@ -535,6 +610,70 @@ def test_close_stage_must_return_literal_true() -> None:
         lifecycle.cleanup()
 
     assert events == ["context.close"]
+
+
+def test_stage_close_is_drained_until_empty_after_minimum_updates(monkeypatch) -> None:
+    events: list[str] = []
+    context = _FakeContext(events, "context", close_after_updates=3)
+    app = _FakeKitApp(events, on_update=context.advance_kit_update)
+    lifecycle = _RenderLifecycle()
+    lifecycle.register_open_stage(context)
+    monkeypatch.setattr(render_module, "_get_kit_app", lambda: app)
+
+    lifecycle.cleanup()
+
+    assert context.get_stage() is None
+    assert events == [
+        "context.close",
+        "kit.update",
+        "kit.update",
+        "kit.update",
+    ]
+
+
+def test_post_close_update_failure_is_fail_closed(monkeypatch) -> None:
+    events: list[str] = []
+    context = _FakeContext(events, "context")
+    app = _FakeKitApp(
+        events,
+        update_error=RuntimeError("synthetic Kit update failure"),
+    )
+    lifecycle = _RenderLifecycle()
+    lifecycle.register_open_stage(context)
+    monkeypatch.setattr(render_module, "_get_kit_app", lambda: app)
+
+    with pytest.raises(
+        _RenderCleanupError, match="synthetic Kit update failure"
+    ) as raised:
+        lifecycle.cleanup()
+
+    assert [operation for operation, _ in raised.value.failures] == [
+        "usd_context.await_stage_closed"
+    ]
+    assert events == ["context.close", "kit.update"]
+
+
+def test_post_close_stage_timeout_is_fail_closed(monkeypatch) -> None:
+    events: list[str] = []
+    context = _FakeContext(events, "context", close_after_updates=100)
+    app = _FakeKitApp(events, on_update=context.advance_kit_update)
+    lifecycle = _RenderLifecycle()
+    lifecycle.register_open_stage(context)
+    monkeypatch.setattr(render_module, "POST_CLOSE_MAX_KIT_UPDATES", 3)
+    monkeypatch.setattr(render_module, "_get_kit_app", lambda: app)
+
+    with pytest.raises(_RenderCleanupError, match="remained open") as raised:
+        lifecycle.cleanup()
+
+    assert [operation for operation, _ in raised.value.failures] == [
+        "usd_context.await_stage_closed"
+    ]
+    assert events == [
+        "context.close",
+        "kit.update",
+        "kit.update",
+        "kit.update",
+    ]
 
 
 def test_pose_bank_expands_to_deterministic_upper_hemisphere_views() -> None:

@@ -143,6 +143,8 @@ ISAAC_STARTUP_PROGRESS_STAGE = "isaac_startup"
 RENDER_BUSINESS_PROGRESS_STAGE = "render_business"
 RENDER_CAPTURE_PROGRESS_STAGE = "render_capture"
 RENDER_VIEWS_PROGRESS_STAGE = "render_views"
+POST_CLOSE_MIN_KIT_UPDATES = 2
+POST_CLOSE_MAX_KIT_UPDATES = 120
 
 _ProgressItem = TypeVar("_ProgressItem")
 
@@ -159,21 +161,49 @@ class _RenderCleanupError(RuntimeError):
         super().__init__(f"Render resource cleanup failed ({details})")
 
 
+def _get_kit_app() -> Any:
+    """Return Kit's application interface after SimulationApp has started."""
+
+    import omni.kit.app
+
+    return omni.kit.app.get_app()
+
+
+def _wait_for_stage_to_close(context: Any, app: Any) -> None:
+    """Pump Kit until stage-close hooks retire renderer resources.
+
+    Replicator owns RenderProduct and HydraTexture teardown through its USD
+    stage-closing/stage-closed hooks.  Those hooks and the renderer retire work
+    over Kit updates, so opening another stage immediately after close_stage()
+    can otherwise race resources from the previous render batch.
+    """
+
+    updates = 0
+    while updates < POST_CLOSE_MIN_KIT_UPDATES or context.get_stage() is not None:
+        if updates >= POST_CLOSE_MAX_KIT_UPDATES:
+            raise RuntimeError(
+                "USD stage remained open after "
+                f"{POST_CLOSE_MAX_KIT_UPDATES} post-close Kit updates"
+            )
+        app.update()
+        updates += 1
+
+
 class _RenderLifecycle:
     """Own every Kit/Replicator resource created by one render invocation.
 
     Camera calibration can call :func:`render_part_views` repeatedly inside a
     single SimulationApp.  Replicator shutdown is asynchronous, so merely
     calling ``stop`` leaves the next invocation racing an orchestrator in the
-    STOPPING state.  This owner records resources before operations that can
-    partially fail and releases every resource even when an earlier release
-    operation raises.
+    STOPPING state.  Annotators are detached explicitly, while Replicator's
+    stage-close hooks remain the sole owner of RenderProduct and HydraTexture
+    destruction.  Cleanup attempts every independent operation even when an
+    earlier one raises.
     """
 
     def __init__(self) -> None:
         self._context: Any | None = None
         self._stage_opened = False
-        self._render_products: list[Any] = []
         self._annotators: list[tuple[Any, Any]] = []
         self._orchestrator: Any | None = None
         self._orchestrator_step_attempted = False
@@ -186,11 +216,6 @@ class _RenderLifecycle:
             raise RuntimeError("Render lifecycle already owns an open USD stage")
         self._context = context
         self._stage_opened = True
-
-    def register_render_product(self, render_product: Any) -> None:
-        """Record a render product immediately after creation succeeds."""
-
-        self._render_products.append(render_product)
 
     def attach_annotator(self, annotator: Any, render_product: Any) -> None:
         """Record an annotator before attach so partial attaches are releasable."""
@@ -241,25 +266,28 @@ class _RenderLifecycle:
                 ),
             )
 
-        for index, render_product in enumerate(
-            reversed(self._render_products), start=1
-        ):
-            attempt(
-                f"render_product.destroy[{index}]",
-                render_product.destroy,
-            )
-
         if self._stage_opened:
             assert self._context is not None
+            stage_close_requested = False
 
             def close_stage() -> None:
+                nonlocal stage_close_requested
                 result = self._context.close_stage()
                 if result is not True:
                     raise RuntimeError(
                         "omni.usd context.close_stage() did not return True"
                     )
+                stage_close_requested = True
 
             attempt("usd_context.close_stage", close_stage)
+            if stage_close_requested:
+                attempt(
+                    "usd_context.await_stage_closed",
+                    lambda: _wait_for_stage_to_close(
+                        self._context,
+                        _get_kit_app(),
+                    ),
+                )
 
         if failures:
             error = _RenderCleanupError(failures)
@@ -1411,7 +1439,6 @@ def _render_part_views_once(
         render_product = rep.create.render_product(
             camera, (resolution, resolution), name=f"Qwen_{name}"
         )
-        _lifecycle.register_render_product(render_product)
         rgb = rep.AnnotatorRegistry.get_annotator("rgb")
         _lifecycle.attach_annotator(rgb, render_product)
         segmentation = rep.AnnotatorRegistry.get_annotator(
