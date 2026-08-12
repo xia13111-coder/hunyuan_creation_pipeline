@@ -299,7 +299,7 @@ def test_supervisor_rotates_budget_sessions_and_retries_true_failures(
                     "output_dir": str(args.output_dir.resolve()),
                     "checkpoint": str(checkpoint.resolve()),
                     "checkpoint_sha256": camera_calibration._sha256_file(checkpoint),
-                    "max_new_render_batches": 4,
+                    "max_new_render_batches": 2,
                 },
             )
             return SimpleNamespace(returncode=0)
@@ -321,7 +321,7 @@ def test_supervisor_rotates_budget_sessions_and_retries_true_failures(
     assert all(command == commands[0] for command in commands)
     assert commands[0][0] == str(isaac_python.resolve())
     assert commands[0][commands[0].index("--render-backend") + 1] == "inprocess"
-    assert commands[0][commands[0].index("--max-new-render-batches") + 1] == "4"
+    assert commands[0][commands[0].index("--max-new-render-batches") + 1] == "2"
     assert sleeps == [
         camera_calibration.RENDER_RETRY_DELAY_SECONDS,
         camera_calibration.RENDER_RETRY_DELAY_SECONDS,
