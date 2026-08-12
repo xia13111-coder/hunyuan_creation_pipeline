@@ -598,8 +598,12 @@ def build_component_candidate_plan(
             )
         semantic_gate = {
             "policy": "all_component_members_physical_semantics_compatible/v1",
+            "member_material_semantics": copy.deepcopy(normalized_members),
             "member_material_semantics_sha256": _canonical_sha256(
                 normalized_members
+            ),
+            "catalog_material_record": copy.deepcopy(
+                dict(catalog_materials_by_id[material_id])
             ),
             "catalog_material_record_sha256": _canonical_sha256(
                 catalog_materials_by_id[material_id]
@@ -737,7 +741,11 @@ def build_component_color_candidate_plan(
         "material_id": material_id,
         "same_material_id_as_h0": True,
         "source_plan_sha256": _canonical_sha256(source_plan),
+        "member_material_semantics": copy.deepcopy(normalized_members),
         "member_material_semantics_sha256": semantic_hash,
+        "catalog_material_record": copy.deepcopy(
+            dict(catalog_materials_by_id[material_id])
+        ),
         "catalog_material_record_sha256": catalog_hash,
         "target_family": target_family,
         "tuning_profile_id": profile.profile_id,
@@ -1145,6 +1153,176 @@ def _validate_color_parameters(
     return normalized
 
 
+def _unit_tournament_threshold(value: Any, label: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not 0.0 <= float(value) <= 1.0
+    ):
+        raise ComponentMdlTournamentError(f"{label} must be a finite unit number")
+    return float(value)
+
+
+def _identity_component_record(
+    *,
+    tournament_audit: Mapping[str, Any],
+    component_id: str,
+) -> Mapping[str, Any]:
+    raw_components = tournament_audit.get("components")
+    if not isinstance(raw_components, list):
+        raise ComponentMdlTournamentError("component tournament audit has no components")
+    matches = [
+        row
+        for row in raw_components
+        if isinstance(row, Mapping) and row.get("component_id") == component_id
+    ]
+    if len(matches) != 1:
+        raise ComponentMdlTournamentError(
+            "component color record lacks one exact identity component contract"
+        )
+    return matches[0]
+
+
+def _trusted_component_semantic_payload(
+    *,
+    assignments: Mapping[str, Mapping[str, Any]],
+    tournament_audit: Mapping[str, Any],
+    component_id: str,
+    members: Sequence[str],
+    material_id: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any], str]:
+    """Replay the catalog/member semantic gate from sealed identity payloads."""
+
+    normalized_members_list = _member_ids(members)
+    first_gate: dict[str, Any] | None = None
+    for part_id in normalized_members_list:
+        assignment = assignments.get(part_id)
+        provenance = (
+            assignment.get("provenance")
+            if isinstance(assignment, Mapping)
+            else None
+        )
+        identity_binding = (
+            provenance.get("appearance_component_actual_mdl_candidate")
+            if isinstance(provenance, Mapping)
+            else None
+        )
+        semantic_gate = (
+            identity_binding.get("semantic_compatibility_gate")
+            if isinstance(identity_binding, Mapping)
+            else None
+        )
+        if (
+            not isinstance(identity_binding, Mapping)
+            or identity_binding.get("component_id") != component_id
+            or identity_binding.get("member_part_ids") != normalized_members_list
+            or identity_binding.get("material_id") != material_id
+            or identity_binding.get("mdl_parameter_mutation_allowed") is not False
+            or not isinstance(semantic_gate, Mapping)
+            or semantic_gate.get("policy")
+            != "all_component_members_physical_semantics_compatible/v1"
+        ):
+            raise ComponentMdlTournamentError(
+                "final component assignment lacks its strict identity semantic binding"
+            )
+        gate = copy.deepcopy(dict(semantic_gate))
+        if first_gate is None:
+            first_gate = gate
+        elif gate != first_gate:
+            raise ComponentMdlTournamentError(
+                "component members carry different semantic catalog payloads"
+            )
+    assert first_gate is not None
+
+    raw_member_semantics = first_gate.get("member_material_semantics")
+    raw_catalog_record = first_gate.get("catalog_material_record")
+    if not isinstance(raw_member_semantics, Mapping) or not isinstance(
+        raw_catalog_record, Mapping
+    ):
+        raise ComponentMdlTournamentError(
+            "component identity semantic binding lacks replayable payloads"
+        )
+    normalized_members, target_family, _target_finish = _strict_member_semantics(
+        raw_member_semantics,
+        expected_member_part_ids=normalized_members_list,
+    )
+    catalog_record = copy.deepcopy(dict(raw_catalog_record))
+    if (
+        first_gate.get("member_material_semantics_sha256")
+        != _canonical_sha256(normalized_members)
+        or first_gate.get("catalog_material_record_sha256")
+        != _canonical_sha256(catalog_record)
+        or first_gate.get("target_family") != target_family
+        or catalog_record.get("material_id") != material_id
+        or _catalog_candidate_semantics(
+            material_id=material_id,
+            catalog_materials_by_id={material_id: catalog_record},
+            member_material_semantics=normalized_members,
+            target_family=target_family,
+        )
+        is None
+    ):
+        raise ComponentMdlTournamentError(
+            "component identity semantic/catalog payload failed deterministic replay"
+        )
+
+    identity_record = _identity_component_record(
+        tournament_audit=tournament_audit,
+        component_id=component_id,
+    )
+    semantic_contract = identity_record.get("semantic_contract")
+    if (
+        identity_record.get("member_part_ids") != normalized_members_list
+        or identity_record.get("selected_material_id") != material_id
+        or not isinstance(semantic_contract, Mapping)
+        or semantic_contract.get("component_id") != component_id
+        or semantic_contract.get("member_part_ids") != normalized_members_list
+        or semantic_contract.get("member_material_semantics") != normalized_members
+        or semantic_contract.get("member_material_semantics_sha256")
+        != _canonical_sha256(normalized_members)
+    ):
+        raise ComponentMdlTournamentError(
+            "component identity audit and assignment semantics disagree"
+        )
+    return normalized_members, catalog_record, target_family
+
+
+def _identity_plan_from_color_final(
+    *,
+    final_plan: Mapping[str, Any],
+    color_components: Sequence[tuple[Mapping[str, Any], str, list[str], str, str]],
+    expected_sha256: str,
+) -> dict[str, Any]:
+    """Reverse only authorized H1 deltas and recover the exact identity plan."""
+
+    identity_plan = copy.deepcopy(dict(final_plan))
+    assignments = _assignments(identity_plan, allow_parameter_overrides=True)
+    for _record, _component_id, members, _material_id, selected_id in color_components:
+        if selected_id != "H1":
+            continue
+        for part_id in members:
+            assignment = assignments.get(part_id)
+            if not isinstance(assignment, dict):
+                raise ComponentMdlTournamentError(
+                    "component color record references an unknown Part-ID"
+                )
+            assignment.pop("parameters", None)
+            provenance = assignment.get("provenance")
+            if not isinstance(provenance, dict) or not isinstance(
+                provenance.pop("appearance_component_color_candidate", None),
+                Mapping,
+            ):
+                raise ComponentMdlTournamentError(
+                    "final component H1 cannot be reversed to its identity plan"
+                )
+    if _canonical_sha256(identity_plan) != expected_sha256:
+        raise ComponentMdlTournamentError(
+            "component color source identity plan cannot be reconstructed"
+        )
+    return identity_plan
+
+
 def _component_color_authorizations(
     *,
     final_plan: Mapping[str, Any],
@@ -1182,9 +1360,27 @@ def _component_color_authorizations(
             "component color tournament has no component records"
         )
 
-    authorized_by_part: dict[str, Mapping[str, Any]] = {}
+    minimum_score_improvement = _unit_tournament_threshold(
+        raw_color.get("minimum_score_improvement"),
+        "component color minimum score improvement",
+    )
+    maximum_member_regression = _unit_tournament_threshold(
+        raw_color.get("maximum_member_regression"),
+        "component color maximum member regression",
+    )
+    if (
+        tournament_audit.get("identity_final_plan_sha256")
+        != source_identity_plan_sha256
+    ):
+        raise ComponentMdlTournamentError(
+            "outer component tournament identity hash disagrees with its color contract"
+        )
+
+    color_components: list[
+        tuple[Mapping[str, Any], str, list[str], str, str]
+    ] = []
     component_ids: set[str] = set()
-    h1_component_count = 0
+    preliminary_part_ids: set[str] = set()
     for index, raw_component in enumerate(raw_components):
         if not isinstance(raw_component, Mapping):
             raise ComponentMdlTournamentError(
@@ -1204,50 +1400,98 @@ def _component_color_authorizations(
             raise ComponentMdlTournamentError(
                 "component color tournament record has invalid identity fields"
             )
-        component_ids.add(component_id)
         members = _member_ids(raw_component.get("member_part_ids", []))
+        if preliminary_part_ids & set(members):
+            raise ComponentMdlTournamentError(
+                "component color authorizations overlap Part-IDs"
+            )
+        component_ids.add(component_id)
+        preliminary_part_ids.update(members)
+        color_components.append(
+            (
+                raw_component,
+                component_id,
+                members,
+                material_id,
+                selected_candidate_id,
+            )
+        )
+    if (
+        raw_color.get("candidate_count") != len(color_components)
+        or raw_color.get("h1_winner_count")
+        != sum(selected_id == "H1" for *_, selected_id in color_components)
+    ):
+        raise ComponentMdlTournamentError(
+            "component color tournament summary does not match its records"
+        )
+    identity_plan = _identity_plan_from_color_final(
+        final_plan=final_plan,
+        color_components=color_components,
+        expected_sha256=source_identity_plan_sha256,
+    )
+
+    authorized_by_part: dict[str, Mapping[str, Any]] = {}
+    h1_component_count = 0
+    for raw_component, component_id, members, material_id, selected_candidate_id in (
+        color_components
+    ):
         if raw_component.get("source_plan_sha256") != source_identity_plan_sha256:
             raise ComponentMdlTournamentError(
                 "component color record is not bound to the identity plan"
             )
-        _sha256_text(
+        candidate_plan_sha256 = _sha256_text(
             raw_component.get("color_candidate_plan_sha256"),
             "component color candidate plan hash",
         )
+        h0_score = raw_component.get("h0_score")
+        h1_score = raw_component.get("h1_score")
+        if not isinstance(h0_score, Mapping) or not isinstance(h1_score, Mapping):
+            raise ComponentMdlTournamentError(
+                "component color record lacks replayable H0/H1 scores"
+            )
         selection = raw_component.get("selection")
-        if (
-            not isinstance(selection, Mapping)
-            or selection.get("schema_version") != COLOR_SCHEMA_VERSION
-            or selection.get("component_id") != component_id
-            or selection.get("member_part_ids") != members
-            or selection.get("selected_candidate_id") != selected_candidate_id
-            or not isinstance(selection.get("h0_score_sha256"), str)
-            or not isinstance(selection.get("h1_score_sha256"), str)
-        ):
+        if not isinstance(selection, Mapping):
             raise ComponentMdlTournamentError(
                 "component color selection does not match its authorization record"
             )
-        _sha256_text(selection["h0_score_sha256"], "component color H0 score hash")
-        _sha256_text(selection["h1_score_sha256"], "component color H1 score hash")
+        replayed_selection = select_component_color_winner(
+            component_id=component_id,
+            h0_score=h0_score,
+            h1_score=h1_score,
+            minimum_score_improvement=minimum_score_improvement,
+            maximum_member_regression=maximum_member_regression,
+        )
+        if dict(selection) != replayed_selection or (
+            replayed_selection["selected_candidate_id"] != selected_candidate_id
+        ):
+            raise ComponentMdlTournamentError(
+                "component color selection failed deterministic score replay"
+            )
+        if (
+            selection.get("h0_score_sha256") != _canonical_sha256(h0_score)
+            or selection.get("h1_score_sha256") != _canonical_sha256(h1_score)
+        ):
+            raise ComponentMdlTournamentError(
+                "component color score hashes do not match their payloads"
+            )
+
+        normalized_members, catalog_record, target_family = (
+            _trusted_component_semantic_payload(
+                assignments=assignments,
+                tournament_audit=tournament_audit,
+                component_id=component_id,
+                members=members,
+                material_id=material_id,
+            )
+        )
         raw_parameters = raw_component.get("parameters")
         if selected_candidate_id == "H0":
             if raw_parameters not in ({}, None):
                 raise ComponentMdlTournamentError(
                     "native component H0 cannot authorize parameters"
                 )
-            if selection.get("selection_status") != "NATIVE_H0_RETAINED":
-                raise ComponentMdlTournamentError(
-                    "component color H0 has an inconsistent selection status"
-                )
             normalized_parameters: dict[str, list[float]] = {}
         else:
-            if (
-                selection.get("selection_status") != "COLOR_RENDER_WINNER"
-                or selection.get("reason_codes") != []
-            ):
-                raise ComponentMdlTournamentError(
-                    "component color H1 lacks a passing render selection"
-                )
             first_assignment = assignments.get(members[0])
             binding = (
                 first_assignment.get("provenance", {}).get(
@@ -1257,14 +1501,67 @@ def _component_color_authorizations(
                 and isinstance(first_assignment.get("provenance"), Mapping)
                 else None
             )
-            target_family = (
-                binding.get("target_family") if isinstance(binding, Mapping) else None
-            )
             normalized_parameters = _validate_color_parameters(
                 material_id=material_id,
-                target_family=str(target_family),
+                target_family=target_family,
                 parameters=raw_parameters,
             )
+            if not isinstance(binding, Mapping):
+                raise ComponentMdlTournamentError(
+                    "final component H1 lacks a replayable color binding"
+                )
+            target_srgb = binding.get("target_color_srgb")
+            profile = tuning_profile_for_material(material_id)
+            assert profile is not None
+            try:
+                replayed_parameters, authored = color_parameters_for_target_srgb(
+                    profile,
+                    target_srgb,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ComponentMdlTournamentError(
+                    f"component H1 target color cannot be replayed: {exc}"
+                ) from exc
+            if (
+                normalized_parameters != replayed_parameters
+                or binding.get("target_color_srgb")
+                != authored["base_color_srgb"]
+                or binding.get("member_material_semantics") != normalized_members
+                or binding.get("member_material_semantics_sha256")
+                != _canonical_sha256(normalized_members)
+                or binding.get("catalog_material_record") != catalog_record
+                or binding.get("catalog_material_record_sha256")
+                != _canonical_sha256(catalog_record)
+                or binding.get("target_family") != target_family
+            ):
+                raise ComponentMdlTournamentError(
+                    "component H1 target, parameters, or semantic payload failed replay"
+                )
+            rebuilt_candidate = build_component_color_candidate_plan(
+                source_plan=identity_plan,
+                component_id=component_id,
+                member_part_ids=members,
+                material_id=material_id,
+                target_srgb=target_srgb,
+                member_material_semantics=normalized_members,
+                catalog_materials_by_id={material_id: catalog_record},
+            )
+            if _canonical_sha256(rebuilt_candidate) != candidate_plan_sha256:
+                raise ComponentMdlTournamentError(
+                    "component H1 candidate plan hash failed deterministic rebuild"
+                )
+            rebuilt_assignments = _assignments(
+                rebuilt_candidate,
+                allow_parameter_overrides=True,
+            )
+            if any(
+                assignments[part_id] != rebuilt_assignments[part_id]
+                for part_id in members
+            ):
+                raise ComponentMdlTournamentError(
+                    "final component H1 lacks its exact color candidate binding; "
+                    "assignments differ from the rebuilt candidate"
+                )
             h1_component_count += 1
 
         for part_id in members:
@@ -1324,14 +1621,6 @@ def _component_color_authorizations(
                     raise ComponentMdlTournamentError(
                         "final component H1 tuning profile binding is invalid"
                     )
-                _sha256_text(
-                    binding.get("member_material_semantics_sha256"),
-                    "component H1 member semantics hash",
-                )
-                _sha256_text(
-                    binding.get("catalog_material_record_sha256"),
-                    "component H1 catalog record hash",
-                )
             authorized_by_part[part_id] = raw_component
 
     parameterized_part_ids = {
