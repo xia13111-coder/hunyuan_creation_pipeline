@@ -2,15 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+import tempfile
 import unittest
+from dataclasses import replace
+from pathlib import Path
 from unittest import mock
 
 from qwen_material_pipeline.materials import component_mdl_tournament as component_module
 from qwen_material_pipeline.materials.component_mdl_tournament import (
+    ComponentColorRenderArtifactPaths,
     ComponentColorScoreEvidence,
     ComponentMdlTournamentError,
     build_component_candidate_plan,
     build_component_color_candidate_plan,
+    build_component_color_render_artifact_binding,
     component_candidate_material_ids,
     rebind_part_id_material_audit_for_component_mdl_tournament,
     select_component_color_winner,
@@ -19,6 +26,11 @@ from qwen_material_pipeline.materials.component_mdl_tournament import (
 
 
 class ComponentMdlTournamentTests(unittest.TestCase):
+    def _temporary_directory(self) -> Path:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        return root
+
     @staticmethod
     def _sha256(value: object) -> str:
         return hashlib.sha256(
@@ -740,13 +752,82 @@ class ComponentMdlTournamentTests(unittest.TestCase):
                 ],
             },
         }
+        artifact_root = self._temporary_directory()
+
+        def write_artifact(
+            directory: Path,
+            plan: dict,
+            score: dict,
+        ) -> ComponentColorRenderArtifactPaths:
+            directory.mkdir(parents=True)
+            plan_path = directory / "plan.json"
+            apply_plan_path = directory / "apply_plan.json"
+            apply_report_path = directory / "apply_report.json"
+            look_path = directory / "look.usda"
+            registry_path = directory / "part_registry.rendered.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            apply_plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            look_path.write_bytes(b"#usda 1.0\n")
+            apply_report_path.write_text(
+                json.dumps(
+                    {
+                        "plan_sha256": self._sha256(plan),
+                        "output_usd": str(look_path.resolve()),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "asset_usd": str(look_path.resolve()),
+                        "asset_sha256": hashlib.sha256(
+                            look_path.read_bytes()
+                        ).hexdigest(),
+                        "fixture_score": score,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return ComponentColorRenderArtifactPaths(
+                plan=plan_path,
+                apply_plan=apply_plan_path,
+                apply_report=apply_report_path,
+                look_usd=look_path,
+                rendered_registry=registry_path,
+            )
+
+        h0_artifact = write_artifact(
+            artifact_root / "identity_final",
+            identity_plan,
+            h0_score,
+        )
+        h1_artifact = write_artifact(
+            artifact_root / "AC_paint" / "H1_color",
+            color_candidate_plan,
+            h1_score,
+        )
+        candidate_record = tournament_audit["component_color_tournament"][
+            "components"
+        ][0]
+        candidate_record["candidate_artifacts"] = {
+            "h0": build_component_color_render_artifact_binding(
+                artifact_root=artifact_root,
+                artifact=h0_artifact,
+                expected_plan_sha256=self._sha256(identity_plan),
+            ),
+            "h1": build_component_color_render_artifact_binding(
+                artifact_root=artifact_root,
+                artifact=h1_artifact,
+                expected_plan_sha256=self._sha256(color_candidate_plan),
+            ),
+        }
         trusted_score_evidence = ComponentColorScoreEvidence(
             evidence={"fixture": "reference-evidence"},
             spatial_mapping_report={"fixture": "spatial-mapping"},
-            h0_rendered_registry={"fixture_score": h0_score},
-            h1_rendered_registries_by_component={
-                "AC_paint": {"fixture_score": h1_score}
-            },
+            artifact_root=artifact_root,
+            h0_artifact=h0_artifact,
+            h1_artifacts_by_component={"AC_paint": h1_artifact},
         )
         return (
             source_audit,
@@ -906,18 +987,19 @@ class ComponentMdlTournamentTests(unittest.TestCase):
 
         for bad_cover in (
             {},
-            {"AC_other": trusted.h1_rendered_registries_by_component["AC_paint"]},
+            {"AC_other": trusted.h1_artifacts_by_component["AC_paint"]},
             {
-                "AC_paint": trusted.h1_rendered_registries_by_component["AC_paint"],
-                "AC_other": trusted.h1_rendered_registries_by_component["AC_paint"],
+                "AC_paint": trusted.h1_artifacts_by_component["AC_paint"],
+                "AC_other": trusted.h1_artifacts_by_component["AC_paint"],
             },
         ):
             with self.subTest(component_ids=sorted(bad_cover)):
                 malformed = ComponentColorScoreEvidence(
                     evidence=trusted.evidence,
                     spatial_mapping_report=trusted.spatial_mapping_report,
-                    h0_rendered_registry=trusted.h0_rendered_registry,
-                    h1_rendered_registries_by_component=bad_cover,
+                    artifact_root=trusted.artifact_root,
+                    h0_artifact=trusted.h0_artifact,
+                    h1_artifacts_by_component=bad_cover,
                 )
                 with self.assertRaisesRegex(
                     ComponentMdlTournamentError,
@@ -928,6 +1010,167 @@ class ComponentMdlTournamentTests(unittest.TestCase):
                         final_plan=color_plan,
                         tournament_audit=audit,
                         trusted_color_score_evidence=malformed,
+                    )
+
+    def test_rebind_rejects_any_audit_artifact_path_or_hash_change(self) -> None:
+        for mutation in ("path", "sha256"):
+            with self.subTest(mutation=mutation):
+                source_audit, _identity, color_plan, audit, trusted = (
+                    self._component_color_rebind_fixture()
+                )
+                binding = audit["component_color_tournament"]["components"][0][
+                    "candidate_artifacts"
+                ]["h1"]
+                if mutation == "path":
+                    binding["files"]["look_usd"]["path"] = binding["files"][
+                        "plan"
+                    ]["path"]
+                else:
+                    binding["files"]["look_usd"]["sha256"] = "0" * 64
+                with self.assertRaisesRegex(
+                    ComponentMdlTournamentError,
+                    "audit artifacts do not match trusted files",
+                ):
+                    self._rebind_with_trusted_scores(
+                        source_audit=source_audit,
+                        final_plan=color_plan,
+                        tournament_audit=audit,
+                        trusted_color_score_evidence=trusted,
+                    )
+
+    def test_rebind_rejects_swapped_coherent_h1_even_with_synced_score(self) -> None:
+        source_audit, _identity, color_plan, audit, trusted = (
+            self._component_color_rebind_fixture()
+        )
+        original = trusted.h1_artifacts_by_component["AC_paint"]
+        alternate_dir = Path(trusted.artifact_root) / "AC_paint" / "H1_alternate"
+        alternate_dir.mkdir()
+        alternate_plan = alternate_dir / "plan.json"
+        alternate_apply_plan = alternate_dir / "apply_plan.json"
+        alternate_apply = alternate_dir / "apply_report.json"
+        alternate_look = alternate_dir / "look.usda"
+        alternate_registry = alternate_dir / "part_registry.rendered.json"
+        shutil.copy2(Path(original.plan), alternate_plan)
+        shutil.copy2(Path(original.apply_plan), alternate_apply_plan)
+        alternate_look.write_bytes(b"#usda 1.0\n# coherent alternate render\n")
+        apply_document = json.loads(Path(original.apply_report).read_text("utf-8"))
+        apply_document["output_usd"] = str(alternate_look.resolve())
+        alternate_apply.write_text(json.dumps(apply_document), encoding="utf-8")
+        registry = json.loads(Path(original.rendered_registry).read_text("utf-8"))
+        registry["asset_usd"] = str(alternate_look.resolve())
+        registry["asset_sha256"] = hashlib.sha256(
+            alternate_look.read_bytes()
+        ).hexdigest()
+        # The attack keeps the score/selection internally coherent; only the
+        # immutable audit binding distinguishes this substituted render.
+        record = audit["component_color_tournament"]["components"][0]
+        registry["fixture_score"] = record["h1_score"]
+        record["selection"] = select_component_color_winner(
+            component_id="AC_paint",
+            h0_score=record["h0_score"],
+            h1_score=record["h1_score"],
+        )
+        alternate_registry.write_text(json.dumps(registry), encoding="utf-8")
+        alternate = ComponentColorRenderArtifactPaths(
+            plan=alternate_plan,
+            apply_plan=alternate_apply_plan,
+            apply_report=alternate_apply,
+            look_usd=alternate_look,
+            rendered_registry=alternate_registry,
+        )
+        substituted = replace(
+            trusted,
+            h1_artifacts_by_component={"AC_paint": alternate},
+        )
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "audit artifacts do not match trusted files",
+        ):
+            self._rebind_with_trusted_scores(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
+                trusted_color_score_evidence=substituted,
+            )
+
+    def test_rebind_rejects_resealed_apply_plan_assignment_change(self) -> None:
+        source_audit, _identity, color_plan, audit, trusted = (
+            self._component_color_rebind_fixture()
+        )
+        artifact = trusted.h1_artifacts_by_component["AC_paint"]
+        apply_plan_path = Path(artifact.apply_plan)
+        apply_plan = json.loads(apply_plan_path.read_text("utf-8"))
+        apply_plan["assignments"][0]["material_id"] = (
+            "mdl:Miscellaneous/Paint_Gloss.mdl#Paint_Gloss"
+        )
+        apply_plan_path.write_text(json.dumps(apply_plan), encoding="utf-8")
+        apply_report_path = Path(artifact.apply_report)
+        apply_report = json.loads(apply_report_path.read_text("utf-8"))
+        apply_report["plan_sha256"] = self._sha256(apply_plan)
+        apply_report_path.write_text(json.dumps(apply_report), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "apply-plan assignments differ",
+        ):
+            self._rebind_with_trusted_scores(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
+                trusted_color_score_evidence=trusted,
+            )
+
+    def test_rebind_rejects_resealed_registry_asset_substitution(self) -> None:
+        source_audit, _identity, color_plan, audit, trusted = (
+            self._component_color_rebind_fixture()
+        )
+        artifact = trusted.h1_artifacts_by_component["AC_paint"]
+        other_look = Path(artifact.look_usd).with_name("other.usda")
+        other_look.write_bytes(b"#usda 1.0\n# other asset\n")
+        registry_path = Path(artifact.rendered_registry)
+        registry = json.loads(registry_path.read_text("utf-8"))
+        registry["asset_usd"] = str(other_look.resolve())
+        registry["asset_sha256"] = hashlib.sha256(other_look.read_bytes()).hexdigest()
+        registry_path.write_text(json.dumps(registry), encoding="utf-8")
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "does not identify the exact component color Look",
+        ):
+            self._rebind_with_trusted_scores(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
+                trusted_color_score_evidence=trusted,
+            )
+
+    def test_rebind_rejects_symlink_and_hardlink_artifact_capabilities(self) -> None:
+        for link_kind in ("symlink", "hardlink"):
+            with self.subTest(link_kind=link_kind):
+                source_audit, _identity, color_plan, audit, trusted = (
+                    self._component_color_rebind_fixture()
+                )
+                original = trusted.h1_artifacts_by_component["AC_paint"]
+                registry = Path(original.rendered_registry)
+                linked = registry.with_name(f"{link_kind}.json")
+                if link_kind == "symlink":
+                    linked.symlink_to(registry)
+                else:
+                    os.link(registry, linked)
+                substituted_artifact = replace(original, rendered_registry=linked)
+                substituted = replace(
+                    trusted,
+                    h1_artifacts_by_component={
+                        "AC_paint": substituted_artifact,
+                    },
+                )
+                with self.assertRaisesRegex(
+                    ComponentMdlTournamentError,
+                    "symlink|single-link regular file",
+                ):
+                    self._rebind_with_trusted_scores(
+                        source_audit=source_audit,
+                        final_plan=color_plan,
+                        tournament_audit=audit,
+                        trusted_color_score_evidence=substituted,
                     )
 
     def test_rebind_rejects_coherently_resealed_weaker_improvement_threshold(
@@ -1080,7 +1323,7 @@ class ComponentMdlTournamentTests(unittest.TestCase):
         self._reseal_final_plan_hashes(color_plan, audit)
         with self.assertRaisesRegex(
             ComponentMdlTournamentError,
-            "identity audit and assignment semantics disagree",
+            "artifact plan hash|identity audit and assignment semantics disagree",
         ):
             self._rebind_with_trusted_scores(
                 source_audit=source_audit,
@@ -1098,7 +1341,7 @@ class ComponentMdlTournamentTests(unittest.TestCase):
         ] = "0" * 64
         with self.assertRaisesRegex(
             ComponentMdlTournamentError,
-            "candidate plan hash failed deterministic rebuild",
+            "artifact plan hash|candidate plan hash failed deterministic rebuild",
         ):
             self._rebind_with_trusted_scores(
                 source_audit=source_audit,
