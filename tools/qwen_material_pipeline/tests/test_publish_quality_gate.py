@@ -11,6 +11,7 @@ from qwen_material_pipeline.materials.publish_quality_gate import (
     PublishQualityGateError,
     build_publish_quality_gate,
     require_publish_quality_gate_passed,
+    _verified_part_id_policy_replacements,
 )
 
 
@@ -132,6 +133,89 @@ def _policy() -> dict:
             "source_preserve_unavailable_neutral_fallback_count": 1,
         },
     }
+
+
+def test_hidden_p0181_cannot_be_resealed_as_independently_selected() -> None:
+    evidence_unsigned = {
+        "schema_version": "qwen-part-id-reference-evidence/v1",
+        "assignment_unit": "part_id",
+        "parts": [
+            {
+                "part_id": "P0181",
+                "status": "unobserved",
+                "observations": [],
+            }
+        ],
+    }
+    evidence_digest = _sha256(evidence_unsigned)
+    evidence = {
+        **evidence_unsigned,
+        "integrity": {"document_sha256": evidence_digest},
+    }
+    baseline_assignment = {
+        "part_id": "P0181",
+        "material_id": "mdl:Base/Metals/Steel_Stainless.mdl#Steel_Stainless",
+        "status": "policy_fallback",
+        "confidence": 0.0,
+        "evidence_views": [],
+        "provenance": {"tier": "neutral_default"},
+    }
+    policy_plan = {
+        "schema_version": "1.0",
+        "assignments": [baseline_assignment],
+        "provenance": {},
+    }
+    policy_audit = {"output_plan_sha256": _sha256(policy_plan)}
+    final_plan = {
+        "schema_version": "1.0",
+        "assignment_unit": "part_id",
+        "palette_fusion_used": False,
+        "part_material_groups_used": False,
+        "assignments": [copy.deepcopy(baseline_assignment)],
+        "provenance": {"part_id_evidence_sha256": evidence_digest},
+    }
+    final_plan["assignments"][0].update(
+        {
+            "material_id": "mdl:Base/Metals/Aluminum_Anodized_Blue.mdl#Blue",
+            "status": "review",
+            "provenance": {"assignment_unit": "part_id"},
+        }
+    )
+    audit_unsigned = {
+        "schema_version": "qwen-part-id-material-plan-audit/v1",
+        "assignment_unit": "part_id",
+        "palette_fusion_used": False,
+        "base_plan_sha256": _sha256(policy_plan),
+        "part_id_evidence_sha256": evidence_digest,
+        "output_plan_sha256": _sha256(final_plan),
+        "parts": [
+            {
+                "part_id": "P0181",
+                "status": "independently_selected",
+                "material_id": final_plan["assignments"][0]["material_id"],
+            }
+        ],
+        "summary": {
+            "part_count": 1,
+            "independently_selected_count": 1,
+            "unobserved_preserved_count": 0,
+            "exact_cover": True,
+        },
+    }
+    part_id_audit = {
+        **audit_unsigned,
+        "integrity": {"document_sha256": _sha256(audit_unsigned)},
+    }
+
+    with pytest.raises(PublishQualityGateError, match="contradicts final evidence"):
+        _verified_part_id_policy_replacements(
+            final_plan=final_plan,
+            final_assignments={"P0181": final_plan["assignments"][0]},
+            policy_plan=policy_plan,
+            policy_audit=policy_audit,
+            part_id_material_audit=part_id_audit,
+            part_id_evidence=evidence,
+        )
 
 
 def _queue() -> dict:

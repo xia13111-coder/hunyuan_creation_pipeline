@@ -947,6 +947,7 @@ def _verified_part_id_policy_replacements(
     policy_plan: Mapping[str, Any],
     policy_audit: Mapping[str, Any],
     part_id_material_audit: Mapping[str, Any],
+    part_id_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Verify that photographed Part IDs replaced an exact-cover baseline.
 
@@ -995,6 +996,62 @@ def _verified_part_id_policy_replacements(
             "Part-ID publication audit is not hash-bound to its policy and final plans"
         )
 
+    evidence_status_by_part: dict[str, str] | None = None
+    if part_id_evidence is not None:
+        evidence = _object(part_id_evidence, "part_id_evidence")
+        if (
+            evidence.get("schema_version")
+            != "qwen-part-id-reference-evidence/v1"
+            or evidence.get("assignment_unit") != "part_id"
+        ):
+            raise PublishQualityGateError("Part-ID publication evidence is invalid")
+        evidence_integrity = _object(
+            evidence.get("integrity"), "part_id_evidence.integrity"
+        )
+        unsigned_evidence = {
+            key: value for key, value in evidence.items() if key != "integrity"
+        }
+        evidence_document_sha256 = _canonical_sha256(unsigned_evidence)
+        if (
+            evidence_integrity.get("document_sha256")
+            != evidence_document_sha256
+            or audit.get("part_id_evidence_sha256")
+            != evidence_document_sha256
+            or final_plan.get("provenance", {}).get("part_id_evidence_sha256")
+            != evidence_document_sha256
+        ):
+            raise PublishQualityGateError(
+                "Part-ID publication evidence integrity or lineage is invalid"
+            )
+        raw_evidence_parts = _array(
+            evidence.get("parts"), "part_id_evidence.parts"
+        )
+        evidence_status_by_part = {}
+        for index, raw_evidence_part in enumerate(raw_evidence_parts):
+            evidence_part = _object(
+                raw_evidence_part, f"part_id_evidence.parts[{index}]"
+            )
+            part_id = evidence_part.get("part_id")
+            status = evidence_part.get("status")
+            observations = evidence_part.get("observations")
+            if (
+                not isinstance(part_id, str)
+                or not part_id
+                or part_id in evidence_status_by_part
+                or status not in {"observed", "unobserved"}
+                or not isinstance(observations, list)
+                or (status == "observed" and not observations)
+                or (status == "unobserved" and observations)
+            ):
+                raise PublishQualityGateError(
+                    f"Part-ID publication evidence row {index} is malformed"
+                )
+            evidence_status_by_part[part_id] = str(status)
+        if set(evidence_status_by_part) != set(final_assignments):
+            raise PublishQualityGateError(
+                "Part-ID publication evidence does not exactly cover the final plan"
+            )
+
     raw_rows = _array(audit.get("parts"), "part_id_material_audit.parts")
     rows: dict[str, Mapping[str, Any]] = {}
     for index, raw_row in enumerate(raw_rows):
@@ -1026,6 +1083,18 @@ def _verified_part_id_policy_replacements(
         base_assignment = base_assignments[part_id]
         final_assignment = final_assignments[part_id]
         row_status = row.get("status")
+        evidence_status = (
+            evidence_status_by_part.get(part_id)
+            if evidence_status_by_part is not None
+            else None
+        )
+        if (
+            (evidence_status == "observed" and row_status != "independently_selected")
+            or (evidence_status == "unobserved" and row_status != "unobserved_preserved")
+        ):
+            raise PublishQualityGateError(
+                f"Part-ID audit status contradicts final evidence for {part_id}"
+            )
         if row_status == "independently_selected":
             if (
                 base_assignment.get("status") != "policy_fallback"
@@ -1091,6 +1160,8 @@ def build_publish_quality_gate(
     policy_audit: Mapping[str, Any] | None = None,
     policy_plan: Mapping[str, Any] | None = None,
     part_id_material_audit: Mapping[str, Any] | None = None,
+    source_policy: Mapping[str, Any] | None = None,
+    part_id_evidence: Mapping[str, Any] | None = None,
     queue_audit: Mapping[str, Any] | None = None,
     tournament_audit: Mapping[str, Any] | None = None,
     rendered_registry: Mapping[str, Any] | None = None,
@@ -1129,6 +1200,14 @@ def build_publish_quality_gate(
     policy_output_count = part_count
     neutral_fallback_count = 0
     part_id_lineage: dict[str, Any] | None = None
+    if part_id_evidence is not None and (
+        policy_audit is None
+        or policy_plan is None
+        or part_id_material_audit is None
+    ):
+        raise PublishQualityGateError(
+            "Part-ID evidence publication requires policy and material audits"
+        )
     if policy_audit is not None:
         policy_document = _object(policy_audit, "policy_audit")
         if policy_document.get("schema_version") != POLICY_AUDIT_SCHEMA_VERSION:
@@ -1198,6 +1277,7 @@ def build_publish_quality_gate(
                 policy_plan=policy_plan,
                 policy_audit=policy_document,
                 part_id_material_audit=part_id_material_audit,
+                part_id_evidence=part_id_evidence,
             )
             expected_final_fallback_count = policy_fallback_count - len(
                 part_id_lineage["independently_selected_part_ids"]
@@ -1686,6 +1766,16 @@ def build_publish_quality_gate(
             "part_id_material_audit_sha256": (
                 _canonical_sha256(part_id_material_audit)
                 if part_id_material_audit is not None
+                else None
+            ),
+            "source_policy_sha256": (
+                _canonical_sha256(source_policy)
+                if source_policy is not None
+                else None
+            ),
+            "part_id_evidence_sha256": (
+                _canonical_sha256(part_id_evidence)
+                if part_id_evidence is not None
                 else None
             ),
             "queue_audit_sha256": (

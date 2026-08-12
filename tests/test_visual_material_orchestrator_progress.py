@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ast
 import copy
+import inspect
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +13,43 @@ from asset_pipeline.visual_materials import orchestrator
 from asset_pipeline.visual_materials.stages import runner as stage_runner
 from asset_pipeline.visual_materials.workspace import VisualMaterialWorkspace
 from qwen_material_pipeline.materials import component_mdl_tournament
+
+
+def test_finalize_stage_reuses_prepublish_confidence_and_plan_snapshots() -> None:
+    tree = ast.parse(
+        textwrap.dedent(inspect.getsource(orchestrator._run_finalize_assignment_stage))
+    )
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+
+    def named_calls(name: str) -> list[ast.Call]:
+        return [
+            call
+            for call in calls
+            if isinstance(call.func, ast.Name) and call.func.id == name
+        ]
+
+    publish_call, = named_calls("build_publish_quality_gate")
+    lock_call, = named_calls("build_material_selection_lock")
+    publish_keywords = {keyword.arg: keyword.value for keyword in publish_call.keywords}
+    lock_keywords = {keyword.arg: keyword.value for keyword in lock_call.keywords}
+
+    assert ast.unparse(publish_keywords["confidence_gate"]) == (
+        "prepublish_confidence_gate_document"
+    )
+    assert ast.unparse(publish_keywords["final_plan"]) == (
+        "prepublish_final_plan_document"
+    )
+    assert ast.unparse(lock_keywords["plan"]) == "prepublish_final_plan_document"
+
+    prepublish_reads = [
+        ast.unparse(call.args[0])
+        for call in named_calls("read_object")
+        if call.args
+        and ast.unparse(call.args[0]) in {"confidence_gate", "effective_material_plan"}
+        and call.lineno < publish_call.lineno
+    ]
+    assert prepublish_reads.count("confidence_gate") == 1
+    assert prepublish_reads.count("effective_material_plan") == 1
 
 
 def _progress_messages(messages: list[str]) -> list[str]:

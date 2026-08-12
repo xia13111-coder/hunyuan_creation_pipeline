@@ -4,6 +4,9 @@ import copy
 import unittest
 
 from asset_pipeline.visual_materials.config import canonical_sha256
+from qwen_material_pipeline.materials.policy_exact_cover import (
+    build_policy_exact_cover,
+)
 from asset_pipeline.visual_materials.orchestrator import (
     CORROBORATED_SOURCE_MDL_TIER,
     GENERIC_STEEL_PAINTED,
@@ -100,8 +103,160 @@ class PolicyMaterialFallbackTests(unittest.TestCase):
         bundle["audit"]["input_hashes"] = copy.deepcopy(provenance)
         bundle["audit"]["output_plan_sha256"] = canonical_sha256(bundle["plan"])
 
+    @staticmethod
+    def _part_id_evidence(bundle: dict[str, dict]) -> dict:
+        unsigned = {
+            "schema_version": "qwen-part-id-reference-evidence/v1",
+            "assignment_unit": "part_id",
+            "inputs": [
+                {
+                    "label": "rendered_registry",
+                    "path": None,
+                    "document_sha256": canonical_sha256(bundle["registry"]),
+                }
+            ],
+            "parts": [
+                {
+                    "part_id": "P0001",
+                    "status": "observed",
+                    "observations": [{"view_id": "front"}],
+                },
+                {
+                    "part_id": "P0002",
+                    "status": "unobserved",
+                    "observations": [],
+                },
+            ],
+            "summary": {
+                "registry_part_count": 2,
+                "observed_part_count": 1,
+                "unobserved_part_count": 1,
+            },
+        }
+        return {
+            **unsigned,
+            "integrity": {"document_sha256": canonical_sha256(unsigned)},
+        }
+
+    def _evidence_replay_bundle(self) -> tuple[dict[str, dict], dict, dict]:
+        bundle = self._bundle()
+        for index, part in enumerate(bundle["registry"]["parts"]):
+            part["parent_path"] = f"/Asset/Assembly_{index}"
+        bundle["staged_result"] = {
+            "schema_version": "qwen-staged-material-result/v1",
+            "material_plan": {"schema_version": "1.0", "assignments": []},
+        }
+        bundle["confidence_gate"] = {
+            "schema_version": "qwen-material-confidence-gate/v1",
+            "decisions": [
+                {"part_id": part_id, "decision": "preserve"}
+                for part_id in ("P0001", "P0002")
+            ],
+        }
+        bundle["group_materials"] = {
+            "schema_version": "qwen-palette-material/v1",
+            "selections": [],
+        }
+        policy = {
+            "schema_version": "qwen-policy-exact-cover/v1",
+            "source_visual_strategy": "neutralize_unverified",
+            "default_material_id": "mdl:test#material",
+            "semantic_rules": [],
+            "ground_contact": {
+                "enabled": False,
+                "material_id": "mdl:test#material",
+                "elevation_tolerance_ratio": 0.02,
+                "minimum_lateral_span_ratio": 0.12,
+                "maximum_up_span_ratio": 0.18,
+            },
+        }
+        evidence = self._part_id_evidence(bundle)
+        bundle["plan"], bundle["audit"] = build_policy_exact_cover(
+            registry=bundle["registry"],
+            staged_result=bundle["staged_result"],
+            confidence_gate=bundle["confidence_gate"],
+            whitelist=bundle["whitelist"],
+            policy=policy,
+            base_plan=bundle["base_plan"],
+            group_materials=bundle["group_materials"],
+            mvinverse_pbr_evidence=bundle["mvinverse_pbr_evidence"],
+            part_id_evidence=evidence,
+            acknowledge_policy_fallback=True,
+        )
+        return bundle, evidence, policy
+
     def test_valid_hash_bound_exact_cover_is_accepted(self) -> None:
         self.assertEqual(_validate_policy_exact_cover_bundle(**self._bundle()), 2)
+
+    def test_evidence_converged_policy_requires_hidden_independent_fallback(
+        self,
+    ) -> None:
+        bundle, evidence, source_policy = self._evidence_replay_bundle()
+
+        self.assertEqual(
+            _validate_policy_exact_cover_bundle(
+                **bundle,
+                part_id_evidence=evidence,
+                expected_policy_overrides=source_policy,
+            ),
+            2,
+        )
+
+        bundle["plan"]["assignments"][1]["provenance"] = {
+            "tier": "neutral_default",
+            "reason_codes": ["coherently-resealed-but-not-builder-authored"],
+            "output_confidence_basis": "policy fallback; not evidence confidence",
+            "sources": [],
+        }
+        self._reseal_bundle(bundle)
+        with self.assertRaisesRegex(RuntimeError, "exact trusted replay"):
+            _validate_policy_exact_cover_bundle(
+                **bundle,
+                part_id_evidence=evidence,
+                expected_policy_overrides=source_policy,
+            )
+
+    def test_evidence_convergence_rejects_coherently_rebuilt_source_policy(
+        self,
+    ) -> None:
+        bundle, evidence, source_policy = self._evidence_replay_bundle()
+        attacker_policy = copy.deepcopy(source_policy)
+        attacker_policy["default_material_id"] = "mdl:test#attacker-blue"
+        bundle["whitelist"]["material_ids"].append("mdl:test#attacker-blue")
+        evidence = self._part_id_evidence(bundle)
+        bundle["plan"], bundle["audit"] = build_policy_exact_cover(
+            registry=bundle["registry"],
+            staged_result=bundle["staged_result"],
+            confidence_gate=bundle["confidence_gate"],
+            whitelist=bundle["whitelist"],
+            policy=attacker_policy,
+            base_plan=bundle["base_plan"],
+            group_materials=bundle["group_materials"],
+            mvinverse_pbr_evidence=bundle["mvinverse_pbr_evidence"],
+            part_id_evidence=evidence,
+            acknowledge_policy_fallback=True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "source_policy_sha256"):
+            _validate_policy_exact_cover_bundle(
+                **bundle,
+                part_id_evidence=evidence,
+                expected_policy_overrides=source_policy,
+            )
+
+    def test_evidence_convergence_rejects_same_part_ids_from_other_registry(
+        self,
+    ) -> None:
+        bundle, evidence, source_policy = self._evidence_replay_bundle()
+        bundle["registry"]["asset_sha256"] = "b" * 64
+        bundle["registry"]["parts"][0]["prim_path"] = "/Other/A/Mesh"
+
+        with self.assertRaisesRegex(RuntimeError, "another registry"):
+            _validate_policy_exact_cover_bundle(
+                **bundle,
+                part_id_evidence=evidence,
+                expected_policy_overrides=source_policy,
+            )
 
     def test_source_material_bind_subsets_are_covered_before_apply(self) -> None:
         bundle = self._bundle()
