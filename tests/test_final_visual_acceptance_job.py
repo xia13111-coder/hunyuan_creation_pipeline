@@ -132,11 +132,112 @@ def _fixture(tmp_path: Path) -> dict:
     }
 
 
+def _hybrid_part_id_fixture(tmp_path: Path) -> dict:
+    fixture = _fixture(tmp_path)
+    reference_ids = ("front", "side", "top", "iso")
+    source_views: list[dict[str, str]] = []
+    for reference_id in reference_ids:
+        image = tmp_path / f"reference-{reference_id}.png"
+        image.write_bytes(f"reference-{reference_id}".encode())
+        source_views.append(
+            {"id": reference_id, "image": str(image.resolve())}
+        )
+    _write(
+        fixture["manifest"],
+        {
+            "schema_version": "qwen-reference-manifest/v1",
+            "source_views": source_views,
+        },
+    )
+
+    baseline_registry = Path(
+        fixture["result"]["visual_quality_rendered_registry"]
+    )
+    registry = json.loads(baseline_registry.read_text(encoding="utf-8"))
+    registry["render_set"]["requested_view_tokens"] = list(reference_ids)
+    _write(baseline_registry, registry)
+
+    mapping = {reference_id: reference_id for reference_id in reference_ids}
+    view_scope = {
+        "schema_version": "asset-pipeline-part-id-quality-view-scope/v1",
+        "mode": "camera_anchor_views",
+        "source_camera_policy": "two_layer_box_first_part_id_alignment/v2",
+        "enforced_reference_view_ids": ["front", "iso"],
+        "local_evidence_only_reference_view_ids": ["side", "top"],
+        "rejected_reference_view_ids": [],
+    }
+    baseline_quality = Path(fixture["result"]["visual_quality_report"])
+    _write(
+        baseline_quality,
+        {
+            "schema_version": "qwen-reference-render-comparison/v1",
+            "inputs": {
+                "reference_manifest": str(fixture["manifest"].resolve()),
+                "reference_manifest_sha256": _sha256(fixture["manifest"]),
+                "rendered_registry": str(baseline_registry.resolve()),
+                "rendered_registry_sha256": _sha256(baseline_registry),
+                "selected_view_mapping": mapping,
+            },
+            "thresholds": {"minimum_comparable_views": 2},
+            "aggregate": {
+                "status": "FAIL",
+                "comparable_view_count": 4,
+                "material_appearance_score": 0.67,
+            },
+            "views": [
+                {
+                    "reference_view_id": reference_id,
+                    "render_view_id": reference_id,
+                    "status": (
+                        "PASS" if reference_id in {"front", "iso"} else "FAIL"
+                    ),
+                    "material_appearance_score": (
+                        0.72 if reference_id in {"front", "iso"} else 0.60
+                    ),
+                    "reasons": (
+                        []
+                        if reference_id in {"front", "iso"}
+                        else ["trusted_dominant_family_mass_deficit"]
+                    ),
+                }
+                for reference_id in reference_ids
+            ],
+            "part_id_quality_scope": view_scope,
+        },
+    )
+    part_id_gate = Path(fixture["locked"]).parent / "analysis" / (
+        "part_id_quality_gate.json"
+    )
+    _write(
+        part_id_gate,
+        {
+            "schema_version": "asset-pipeline-part-id-quality-gate/v1",
+            "status": "PASS",
+            "acceptance_allowed": True,
+            "view_scope": view_scope,
+            "bindings": {
+                "quality_report": str(baseline_quality.resolve()),
+                "quality_report_sha256": _sha256(baseline_quality),
+            },
+        },
+    )
+    fixture["result"].update(
+        {
+            "material_assignment_unit": "part_id",
+            "material_selection_pipeline_mode": "semantic_hybrid",
+            "part_id_quality_gate": str(part_id_gate.resolve()),
+            "visual_quality_gate_status": "PASS",
+        }
+    )
+    return fixture
+
+
 def _fake_runner(
     commands: list[list[str]],
     *,
     reject_collected_gate: bool = False,
     quality_status: str = "PASS",
+    quality_status_by_view: dict[str, str] | None = None,
     first_render_resolution: int | None = None,
     first_compare_mapping: dict[str, str] | None = None,
 ):
@@ -243,6 +344,12 @@ def _fake_runner(
         if "compare" in command:
             compare_count += 1
             output = Path(command[command.index("--output") + 1])
+            rendered_registry = Path(
+                command[command.index("--rendered-registry") + 1]
+            ).resolve()
+            reference_manifest = Path(
+                command[command.index("--reference-manifest") + 1]
+            ).resolve()
             if "--view-map" in command:
                 view_map = Path(command[command.index("--view-map") + 1])
                 mapping = json.loads(view_map.read_text())["mapping"]
@@ -250,14 +357,47 @@ def _fake_runner(
                 mapping = {"front_ref": "right", "side_ref": "front"}
             if compare_count == 1 and first_compare_mapping is not None:
                 mapping = first_compare_mapping
+            view_statuses = {
+                reference_id: (
+                    quality_status_by_view.get(reference_id, quality_status)
+                    if quality_status_by_view is not None
+                    else quality_status
+                )
+                for reference_id in mapping
+            }
+            aggregate_status = (
+                "PASS"
+                if view_statuses
+                and all(status == "PASS" for status in view_statuses.values())
+                else quality_status
+                if quality_status_by_view is None
+                else "FAIL"
+            )
+            comparable_statuses = {
+                "PASS",
+                "REVIEW",
+                "FAIL",
+            }
+            appearance_scores = {
+                reference_id: (
+                    0.72 if reference_id in {"front", "iso"} else 0.60
+                )
+                for reference_id in mapping
+            }
+            comparable_ids = [
+                reference_id
+                for reference_id, status in view_statuses.items()
+                if status in comparable_statuses
+            ]
             _write(
                 output,
                 {
                     "schema_version": ("qwen-reference-render-comparison/v1"),
                     "inputs": {
-                        "reference_manifest": command[
-                            command.index("--reference-manifest") + 1
-                        ],
+                        "reference_manifest": str(reference_manifest),
+                        "reference_manifest_sha256": _sha256(reference_manifest),
+                        "rendered_registry": str(rendered_registry),
+                        "rendered_registry_sha256": _sha256(rendered_registry),
                         "selected_view_mapping": mapping,
                     },
                     "thresholds": {
@@ -265,12 +405,29 @@ def _fake_runner(
                             command[command.index("--minimum-comparable-views") + 1]
                         )
                     },
-                    "aggregate": {"status": quality_status},
+                    "aggregate": {
+                        "status": aggregate_status,
+                        "comparable_view_count": len(comparable_ids),
+                        "material_appearance_score": (
+                            sum(appearance_scores[view_id] for view_id in comparable_ids)
+                            / len(comparable_ids)
+                            if comparable_ids
+                            else None
+                        ),
+                    },
                     "views": [
                         {
                             "reference_view_id": reference_id,
                             "render_view_id": render_id,
-                            "status": quality_status,
+                            "status": view_statuses[reference_id],
+                            "material_appearance_score": appearance_scores[
+                                reference_id
+                            ],
+                            "reasons": (
+                                []
+                                if view_statuses[reference_id] != "FAIL"
+                                else ["trusted_dominant_family_mass_deficit"]
+                            ),
                         }
                         for reference_id, render_id in mapping.items()
                     ],
@@ -498,6 +655,8 @@ def test_runs_locked_and_collected_independent_visual_rounds(
 
     assert result["state"] == "COMPLETED"
     assert result["completion_allowed"] is True
+    assert result["material_selection_pipeline_mode"] == "current"
+    assert result["all_reference_views_absolute_pass_required"] is False
     assert result["locked_visual_gate_status"] == "PASS"
     assert result["collected_visual_gate_status"] == "PASS"
     assert [
@@ -541,6 +700,167 @@ def test_runs_locked_and_collected_independent_visual_rounds(
         assert any(
             f"visual_materials/{stage}" in message for message in progress_starts
         )
+
+
+def test_semantic_hybrid_requires_every_registered_view_to_pass(
+    tmp_path: Path,
+) -> None:
+    fixture = _hybrid_part_id_fixture(tmp_path)
+    config = _config(fixture["qwen"])
+    config.material_selection_pipeline_mode = "semantic_hybrid"
+    commands: list[list[str]] = []
+
+    with pytest.raises(RuntimeError, match="did not PASS every view"):
+        run_final_visual_acceptance_job(
+            collected_usd=str(fixture["collected"]),
+            visual_material_result=fixture["result"],
+            _command_runner=_fake_runner(
+                commands,
+                quality_status_by_view={
+                    "front": "PASS",
+                    "side": "FAIL",
+                    "top": "FAIL",
+                    "iso": "PASS",
+                },
+            ),
+            _isaac_python_resolver=lambda: fixture["isaac"],
+            _config_loader=lambda _path: config,
+        )
+
+    assert [
+        "registry"
+        if "registry" in command
+        else "render"
+        if "render" in command
+        else "compare"
+        for command in commands
+    ] == ["registry", "render", "compare"]
+    assert not any("final-visual-gate" in command for command in commands)
+
+
+def test_current_part_id_mode_keeps_camera_scoped_nonregression(
+    tmp_path: Path,
+) -> None:
+    fixture = _hybrid_part_id_fixture(tmp_path)
+    fixture["result"]["material_selection_pipeline_mode"] = "current"
+    commands: list[list[str]] = []
+
+    result = run_final_visual_acceptance_job(
+        collected_usd=str(fixture["collected"]),
+        visual_material_result=fixture["result"],
+        _command_runner=_fake_runner(
+            commands,
+            quality_status_by_view={
+                "front": "PASS",
+                "side": "FAIL",
+                "top": "FAIL",
+                "iso": "PASS",
+            },
+        ),
+        _isaac_python_resolver=lambda: fixture["isaac"],
+        _config_loader=lambda _path: _config(fixture["qwen"]),
+    )
+
+    assert result["state"] == "COMPLETED"
+    assert result["acceptance_mode"] == "PART_ID_VISUAL_NONREGRESSION"
+    assert result["material_selection_pipeline_mode"] == "current"
+    assert result["all_reference_views_absolute_pass_required"] is False
+    assert not any("final-visual-gate" in command for command in commands)
+
+
+def test_semantic_hybrid_rejects_an_unscorable_registered_view(
+    tmp_path: Path,
+) -> None:
+    fixture = _hybrid_part_id_fixture(tmp_path)
+    config = _config(fixture["qwen"])
+    config.material_selection_pipeline_mode = "semantic_hybrid"
+    commands: list[list[str]] = []
+
+    with pytest.raises(RuntimeError, match="did not PASS every view"):
+        run_final_visual_acceptance_job(
+            collected_usd=str(fixture["collected"]),
+            visual_material_result=fixture["result"],
+            _command_runner=_fake_runner(
+                commands,
+                quality_status_by_view={
+                    "front": "PASS",
+                    "side": "PASS",
+                    "top": "UNSCORABLE",
+                    "iso": "PASS",
+                },
+            ),
+            _isaac_python_resolver=lambda: fixture["isaac"],
+            _config_loader=lambda _path: config,
+        )
+
+    assert not any("final-visual-gate" in command for command in commands)
+
+
+def test_semantic_hybrid_uses_absolute_generic_gates_for_all_views(
+    tmp_path: Path,
+) -> None:
+    fixture = _hybrid_part_id_fixture(tmp_path)
+    config = _config(fixture["qwen"])
+    config.material_selection_pipeline_mode = "semantic_hybrid"
+    commands: list[list[str]] = []
+
+    result = run_final_visual_acceptance_job(
+        collected_usd=str(fixture["collected"]),
+        visual_material_result=fixture["result"],
+        _command_runner=_fake_runner(commands, quality_status="PASS"),
+        _isaac_python_resolver=lambda: fixture["isaac"],
+        _config_loader=lambda _path: config,
+    )
+
+    assert result["state"] == "COMPLETED"
+    assert result["acceptance_mode"] == "ABSOLUTE_PASS"
+    assert result["material_selection_pipeline_mode"] == "semantic_hybrid"
+    assert result["all_reference_views_absolute_pass_required"] is True
+    gate_commands = [
+        command for command in commands if "final-visual-gate" in command
+    ]
+    assert len(gate_commands) == 2
+    compare_commands = [command for command in commands if "compare" in command]
+    assert len(compare_commands) == 2
+    for command in compare_commands:
+        view_map = Path(command[command.index("--view-map") + 1])
+        assert set(json.loads(view_map.read_text())["mapping"]) == {
+            "front",
+            "side",
+            "top",
+            "iso",
+        }
+
+
+@pytest.mark.parametrize(
+    ("result_mode", "config_mode"),
+    [
+        (None, "semantic_hybrid"),
+        ("semantic_hybrid", "current"),
+    ],
+)
+def test_selection_pipeline_mode_mismatch_is_rejected_before_render(
+    tmp_path: Path,
+    result_mode: str | None,
+    config_mode: str,
+) -> None:
+    fixture = _fixture(tmp_path)
+    if result_mode is not None:
+        fixture["result"]["material_selection_pipeline_mode"] = result_mode
+    config = _config(fixture["qwen"])
+    config.material_selection_pipeline_mode = config_mode
+    commands: list[list[str]] = []
+
+    with pytest.raises(RuntimeError, match="different selection pipeline modes"):
+        run_final_visual_acceptance_job(
+            collected_usd=str(fixture["collected"]),
+            visual_material_result=fixture["result"],
+            _command_runner=_fake_runner(commands),
+            _isaac_python_resolver=lambda: fixture["isaac"],
+            _config_loader=lambda _path: config,
+        )
+
+    assert commands == []
 
 
 def test_replays_continuous_camera_specs_in_both_final_rounds(

@@ -1533,6 +1533,38 @@ def run_final_visual_acceptance_job(
     ):
         raise RuntimeError("Visual material result config path is malformed")
     config = _config_loader(configured_path)
+    configured_selection_pipeline_mode = getattr(
+        config,
+        "material_selection_pipeline_mode",
+        "current",
+    )
+    if (
+        not isinstance(configured_selection_pipeline_mode, str)
+        or not configured_selection_pipeline_mode
+    ):
+        raise RuntimeError(
+            "Visual material config has an invalid selection pipeline mode"
+        )
+    result_selection_pipeline_mode = visual_material_result.get(
+        "material_selection_pipeline_mode"
+    )
+    if result_selection_pipeline_mode is None:
+        # Results written before selection-pipeline modes existed belong to
+        # the historical current lane.  They must never be upgraded into the
+        # stricter hybrid lane merely by supplying a different config later.
+        result_selection_pipeline_mode = "current"
+    if (
+        not isinstance(result_selection_pipeline_mode, str)
+        or not result_selection_pipeline_mode
+        or result_selection_pipeline_mode != configured_selection_pipeline_mode
+    ):
+        raise RuntimeError(
+            "Visual material result and config use different selection "
+            "pipeline modes"
+        )
+    require_all_reference_views_absolute_pass = (
+        result_selection_pipeline_mode == "semantic_hybrid"
+    )
     isaac = _isaac_python_resolver().expanduser().resolve()
     if not isaac.is_file() or not os.access(isaac, os.X_OK):
         raise FileNotFoundError(f"Isaac Sim Python is unavailable: {isaac}")
@@ -1543,6 +1575,9 @@ def run_final_visual_acceptance_job(
     material_output = Path(material_output_value).expanduser().resolve()
     allow_part_id_quality = (
         visual_material_result.get("material_assignment_unit") == "part_id"
+    )
+    allow_scoped_part_id_quality = bool(
+        allow_part_id_quality and not require_all_reference_views_absolute_pass
     )
     part_id_quality_scope: Mapping[str, Any] | None = None
     if allow_part_id_quality:
@@ -1614,6 +1649,10 @@ def run_final_visual_acceptance_job(
             material_output=material_output,
         )
     )
+    if require_all_reference_views_absolute_pass:
+        # A semantic-hybrid delivery may not inherit the immutable-library
+        # REVIEW exception even if a stale or forged result advertises it.
+        allow_immutable_library_optimum_review = False
     sealed_baseline_evidence = _validated_sealed_historical_baseline_evidence(
         visual_material_result=visual_material_result,
         material_output=material_output,
@@ -1717,10 +1756,12 @@ def run_final_visual_acceptance_job(
         allow_immutable_library_optimum_review=(
             allow_immutable_library_optimum_review
         ),
-        allow_part_id_quality=allow_part_id_quality,
+        allow_part_id_quality=allow_scoped_part_id_quality,
         log_cb=log_cb,
         command_runner=_command_runner,
-        part_id_quality_scope=part_id_quality_scope,
+        part_id_quality_scope=(
+            part_id_quality_scope if allow_scoped_part_id_quality else None
+        ),
     )
     locked_gate_path = destination / "locked_visual_gate.json"
     locked_gate: dict[str, Any] | None = None
@@ -1739,7 +1780,7 @@ def run_final_visual_acceptance_job(
                 )
             except (OSError, RuntimeError):
                 same_selection_asset = False
-        if allow_part_id_quality:
+        if allow_scoped_part_id_quality:
             locked_gate = _run_part_id_final_visual_gate_stage(
                 name="final_locked_visual_gate",
                 final_usd=locked_usd,
@@ -1777,7 +1818,7 @@ def run_final_visual_acceptance_job(
     locked_mapping, locked_minimum_views, locked_reference_manifest = (
         _final_visual_mapping(
             locked_quality_document,
-            allow_unscorable_unmapped_views=allow_part_id_quality,
+            allow_unscorable_unmapped_views=allow_scoped_part_id_quality,
         )
     )
     locked_registry_document = read_object(
@@ -1827,13 +1868,15 @@ def run_final_visual_acceptance_job(
         allow_immutable_library_optimum_review=(
             allow_immutable_library_optimum_review
         ),
-        allow_part_id_quality=allow_part_id_quality,
+        allow_part_id_quality=allow_scoped_part_id_quality,
         log_cb=log_cb,
         command_runner=_command_runner,
-        part_id_quality_scope=part_id_quality_scope,
+        part_id_quality_scope=(
+            part_id_quality_scope if allow_scoped_part_id_quality else None
+        ),
     )
     collected_gate_path = destination / "collected_visual_gate.json"
-    if allow_part_id_quality:
+    if allow_scoped_part_id_quality:
         collected_gate = _run_part_id_final_visual_gate_stage(
             name="final_collected_visual_gate",
             final_usd=collected,
@@ -1879,10 +1922,14 @@ def run_final_visual_acceptance_job(
                 if allow_immutable_library_optimum_review
                 else (
                     "PART_ID_VISUAL_NONREGRESSION"
-                    if allow_part_id_quality
+                    if allow_scoped_part_id_quality
                     else "ABSOLUTE_PASS"
                 )
             )
+        ),
+        "material_selection_pipeline_mode": result_selection_pipeline_mode,
+        "all_reference_views_absolute_pass_required": (
+            require_all_reference_views_absolute_pass
         ),
         "sealed_baseline_evidence": (
             str(sealed_baseline_evidence)
