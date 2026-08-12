@@ -9,6 +9,7 @@ import pytest
 from asset_pipeline.visual_materials import orchestrator
 from asset_pipeline.visual_materials.stages import runner as stage_runner
 from asset_pipeline.visual_materials.workspace import VisualMaterialWorkspace
+from qwen_material_pipeline.materials import component_mdl_tournament
 
 
 def _progress_messages(messages: list[str]) -> list[str]:
@@ -554,6 +555,55 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
         "score_component_render",
         fake_score_component_render,
     )
+    monkeypatch.setattr(
+        component_mdl_tournament,
+        "score_component_render",
+        fake_score_component_render,
+    )
+    real_rebind = (
+        orchestrator.rebind_part_id_material_audit_for_component_mdl_tournament
+    )
+    trusted_score_evidence_calls: list[
+        orchestrator.ComponentColorScoreEvidence
+    ] = []
+
+    def rebind_spy(
+        *,
+        source_audit: dict[str, object],
+        final_plan: dict[str, object],
+        tournament_audit: dict[str, object],
+        trusted_color_score_evidence: (
+            orchestrator.ComponentColorScoreEvidence | None
+        ) = None,
+    ) -> dict[str, object]:
+        assert isinstance(
+            trusted_color_score_evidence,
+            orchestrator.ComponentColorScoreEvidence,
+        )
+        color_contract = tournament_audit["component_color_tournament"]
+        assert isinstance(color_contract, dict)
+        color_components = color_contract["components"]
+        assert isinstance(color_components, list)
+        component_ids = {
+            component["component_id"] for component in color_components
+        }
+        assert (
+            set(trusted_color_score_evidence.h1_rendered_registries_by_component)
+            == component_ids
+        )
+        trusted_score_evidence_calls.append(trusted_color_score_evidence)
+        return real_rebind(
+            source_audit=source_audit,
+            final_plan=final_plan,
+            tournament_audit=tournament_audit,
+            trusted_color_score_evidence=trusted_color_score_evidence,
+        )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "rebind_part_id_material_audit_for_component_mdl_tournament",
+        rebind_spy,
+    )
     config = SimpleNamespace(
         material_root=tmp_path / "materials",
         exact_mdl_tournament_max_candidates=3,
@@ -600,6 +650,16 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
     )
 
     assert unsafe_baseline_score_calls == []
+    assert len(trusted_score_evidence_calls) == 1
+    trusted_score_evidence = trusted_score_evidence_calls[0]
+    assert trusted_score_evidence.evidence == orchestrator.read_object(
+        workspace.part_id.evidence,
+        "trusted test evidence",
+    )
+    assert trusted_score_evidence.spatial_mapping_report == {"test": "registered"}
+    assert trusted_score_evidence.h0_rendered_registry == {
+        "score_marker": "semantic_component_identity_final_render"
+    }
     audit = result.tournament_document
     assert audit["candidate_count"] == 6
     assert audit["actual_candidate_render_count"] == 6
@@ -653,6 +713,27 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
             source_audit=source_audit,
             final_plan=tampered_plan,
             tournament_audit=tampered_audit,
+            trusted_color_score_evidence=trusted_score_evidence,
+        )
+
+    forged_score_audit = copy.deepcopy(audit)
+    forged_color_record = forged_score_audit["component_color_tournament"][
+        "components"
+    ][0]
+    forged_color_record["h0_score"] = _component_score(
+        forged_color_record["component_id"],
+        forged_color_record["member_part_ids"],
+        0.01,
+    )
+    with pytest.raises(
+        orchestrator.ComponentMdlTournamentError,
+        match="scores do not match trusted render evidence",
+    ):
+        orchestrator.rebind_part_id_material_audit_for_component_mdl_tournament(
+            source_audit=source_audit,
+            final_plan=result.plan,
+            tournament_audit=forged_score_audit,
+            trusted_color_score_evidence=trusted_score_evidence,
         )
 
 
