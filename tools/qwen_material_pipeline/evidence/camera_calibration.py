@@ -38,7 +38,8 @@ FINALIST_COUNT = 5
 RENDER_RETRY_ATTEMPTS = 3
 RENDER_RETRY_DELAY_SECONDS = 3.0
 SUPERVISOR_RENDER_BATCH_LIMIT = 8
-SUPERVISOR_RESTART_EXIT_CODE = 75
+SUPERVISOR_ROTATION_SCHEMA_VERSION = "qwen-camera-session-rotation/v1"
+SUPERVISOR_ROTATION_MARKER = ".camera_session_rotation.json"
 MAX_FOCAL_LENGTH_MM = 2000.0
 CAMERA_OBJECTIVE_VERSION = "hierarchical_visible_part_alignment/v8"
 COMPLETE_ALIGNMENT_MINIMUM_IOU = 0.97
@@ -67,6 +68,10 @@ RenderRunner = Callable[..., Path]
 
 class _RenderBatchBudgetReached(RuntimeError):
     """Request a fresh Isaac process after a sealed camera-search phase."""
+
+    def __init__(self, message: str, *, checkpoint: Path) -> None:
+        super().__init__(message)
+        self.checkpoint = checkpoint
 
 
 def _read_object(path: Path) -> dict[str, Any]:
@@ -1504,6 +1509,12 @@ def _completed_phase(
         return None
     if stored_specs != dict(expected_specs):
         return None
+    recorded_specs_sha256 = stored_scores.get("view_specs_sha256")
+    if (
+        recorded_specs_sha256 is not None
+        and recorded_specs_sha256 != _sha256_file(specs_path)
+    ):
+        return None
     if (
         stored_scores.get("schema_version") != SCHEMA_VERSION
         or stored_scores.get("reference_view_id") != reference_id
@@ -1928,7 +1939,11 @@ def calibrate(
         raise ValueError(
             "Unknown camera calibration search phases: " + ", ".join(invalid_phases)
         )
-    if max_new_render_batches is not None and max_new_render_batches <= 0:
+    if max_new_render_batches is not None and (
+        isinstance(max_new_render_batches, bool)
+        or not isinstance(max_new_render_batches, int)
+        or max_new_render_batches <= 0
+    ):
         raise ValueError("max_new_render_batches must be a positive integer")
     isaac_python = isaac_python.expanduser().resolve(strict=True)
     destination = output_dir.expanduser().resolve()
@@ -2006,6 +2021,12 @@ def calibrate(
                     flush=True,
                 )
             else:
+                # Once a candidate specification changes, its previous score
+                # can no longer be a completion checkpoint.  Remove it before
+                # publishing the replacement specs so an interruption cannot
+                # pair new specs with stale scores that happen to reuse the
+                # same deterministic view IDs.
+                scores_path.unlink(missing_ok=True)
                 specs_path = _write_object(view_specs_path, specs)
                 rendered = _run_render(
                     isaac_python=isaac_python,
@@ -2030,6 +2051,7 @@ def calibrate(
                         "schema_version": SCHEMA_VERSION,
                         "reference_view_id": reference_id,
                         "phase": phase,
+                        "view_specs_sha256": _sha256_file(specs_path),
                         "winner": winner,
                         "candidates": candidates,
                     },
@@ -2069,7 +2091,8 @@ def calibrate(
                 # Never recycle between rendering and scoring a phase.
                 raise _RenderBatchBudgetReached(
                     "Camera render-batch budget reached after sealed phase "
-                    f"{reference_id}/{phase}"
+                    f"{reference_id}/{phase}",
+                    checkpoint=scores_path,
                 )
         finalists[reference_id] = _global_finalists(
             phase_candidate_pool,
@@ -2417,8 +2440,29 @@ def _run_inprocess_backend(
         try:
             return 0, _calibrate_from_args(args, render_runner=runner)
         except _RenderBatchBudgetReached as exc:
+            checkpoint = exc.checkpoint.expanduser().resolve(strict=True)
+            output_dir = args.output_dir.expanduser().resolve()
+            if not checkpoint.is_relative_to(output_dir):
+                raise RuntimeError(
+                    "Camera session rotation checkpoint escaped its output root: "
+                    f"{checkpoint}"
+                ) from exc
+            _write_object(
+                output_dir / SUPERVISOR_ROTATION_MARKER,
+                {
+                    "schema_version": SUPERVISOR_ROTATION_SCHEMA_VERSION,
+                    "output_dir": str(output_dir),
+                    "checkpoint": str(checkpoint),
+                    "checkpoint_sha256": _sha256_file(checkpoint),
+                    "max_new_render_batches": args.max_new_render_batches,
+                },
+            )
             print(f"[CAMERA] {exc}; requesting a fresh Isaac session", flush=True)
-            return SUPERVISOR_RESTART_EXIT_CODE, None
+            # Isaac's python.sh normalizes every non-zero Python exit to 1.
+            # A zero exit plus the hash-bound marker is therefore the only
+            # portable way to distinguish an intentional rotation from a
+            # failed Kit process.  The supervisor verifies and consumes it.
+            return 0, None
     finally:
         app.close()
 
@@ -2479,7 +2523,11 @@ def _run_supervisor_backend(args: argparse.Namespace) -> int:
         if args.max_new_render_batches is not None
         else SUPERVISOR_RENDER_BATCH_LIMIT
     )
-    if batch_limit <= 0:
+    if (
+        isinstance(batch_limit, bool)
+        or not isinstance(batch_limit, int)
+        or batch_limit <= 0
+    ):
         raise ValueError("max_new_render_batches must be a positive integer")
     command = [
         str(args.isaac_python.expanduser().resolve(strict=True)),
@@ -2507,19 +2555,78 @@ def _run_supervisor_backend(args: argparse.Namespace) -> int:
     environment["PYTHONPATH"] = os.pathsep.join(
         (str(tools_root), *pythonpath_entries)
     )
+    output_dir = args.output_dir.expanduser().resolve()
+    rotation_marker = output_dir / SUPERVISOR_ROTATION_MARKER
+    final_report = output_dir / "camera_calibration_report.json"
+    last_rotation: tuple[str, str] | None = None
     failures = 0
     while True:
+        if rotation_marker.is_symlink():
+            raise RuntimeError(
+                "Camera session rotation marker must not be a symlink: "
+                f"{rotation_marker}"
+            )
+        rotation_marker.unlink(missing_ok=True)
         print("[CAMERA] supervisor starting bounded Isaac session", flush=True)
         try:
             completed = subprocess.run(command, check=False, env=environment)
             return_code = int(completed.returncode)
         except FileNotFoundError:
             return_code = 127
-        if return_code == 0:
+        if return_code == 0 and final_report.is_file():
+            if rotation_marker.exists() or rotation_marker.is_symlink():
+                raise RuntimeError(
+                    "Camera child published both a final report and a session "
+                    "rotation marker"
+                )
             return 0
-        if return_code == SUPERVISOR_RESTART_EXIT_CODE:
+        if return_code == 0 and rotation_marker.is_file():
+            marker = _read_object(rotation_marker)
+            expected_keys = {
+                "schema_version",
+                "output_dir",
+                "checkpoint",
+                "checkpoint_sha256",
+                "max_new_render_batches",
+            }
+            if set(marker) != expected_keys:
+                raise RuntimeError("Camera session rotation marker has invalid fields")
+            raw_checkpoint = marker.get("checkpoint")
+            if (
+                marker.get("schema_version")
+                != SUPERVISOR_ROTATION_SCHEMA_VERSION
+                or marker.get("output_dir") != str(output_dir)
+                or marker.get("max_new_render_batches") != batch_limit
+                or not isinstance(raw_checkpoint, str)
+            ):
+                raise RuntimeError("Camera session rotation marker is invalid")
+            checkpoint = Path(raw_checkpoint).expanduser().resolve(strict=True)
+            if (
+                not checkpoint.is_relative_to(output_dir)
+                or not checkpoint.name.endswith("_scores.json")
+            ):
+                raise RuntimeError(
+                    "Camera session rotation checkpoint is outside its output root"
+                )
+            checkpoint_sha256 = _sha256_file(checkpoint)
+            if marker.get("checkpoint_sha256") != checkpoint_sha256:
+                raise RuntimeError(
+                    "Camera session rotation checkpoint hash does not match"
+                )
+            rotation = (str(checkpoint), checkpoint_sha256)
+            if rotation == last_rotation:
+                raise RuntimeError(
+                    "Camera supervisor made no checkpoint progress between sessions"
+                )
+            last_rotation = rotation
+            rotation_marker.unlink()
             failures = 0
             continue
+        if return_code == 0:
+            raise RuntimeError(
+                "Camera child exited successfully without a final report or a "
+                "validated session rotation marker"
+            )
         failures += 1
         if failures >= RENDER_RETRY_ATTEMPTS:
             raise RuntimeError(
@@ -2561,7 +2668,8 @@ def main() -> int:
         exit_code, report = _run_inprocess_backend(args)
         if exit_code != 0:
             return exit_code
-        assert report is not None
+        if report is None:
+            return 0
     else:
         if args.max_new_render_batches is not None:
             raise ValueError(

@@ -8,6 +8,7 @@ import math
 import pytest
 
 from qwen_material_pipeline.core.progress import emit_progress_event, parse_progress_line
+from qwen_material_pipeline.usd import render as render_module
 from qwen_material_pipeline.usd.render import (
     EVIDENCE_LIGHTING_PROFILES,
     RENDER_CAPTURE_PROGRESS_STAGE,
@@ -24,11 +25,87 @@ from qwen_material_pipeline.usd.render import (
     _isolated_target_crop,
     _load_custom_view_specs,
     _normalize,
+    _RenderCleanupError,
+    _RenderLifecycle,
     _resolve_view_directions,
     _showcase_scene_spec,
     _simulation_app_launch_config,
     render_part_views,
 )
+
+
+class _FakeContext:
+    def __init__(
+        self,
+        events: list[str],
+        name: str,
+        *,
+        close_result: object = True,
+    ) -> None:
+        self.events = events
+        self.name = name
+        self.close_result = close_result
+
+    def close_stage(self) -> object:
+        self.events.append(f"{self.name}.close")
+        return self.close_result
+
+
+class _FakeRenderProduct:
+    def __init__(self, events: list[str], name: str) -> None:
+        self.events = events
+        self.name = name
+
+    def destroy(self) -> None:
+        self.events.append(f"{self.name}.destroy")
+
+
+class _FakeAnnotator:
+    def __init__(
+        self,
+        events: list[str],
+        name: str,
+        *,
+        attach_error: BaseException | None = None,
+    ) -> None:
+        self.events = events
+        self.name = name
+        self.attach_error = attach_error
+
+    def attach(self, render_product: _FakeRenderProduct) -> None:
+        self.events.append(f"{self.name}.attach:{render_product.name}")
+        if self.attach_error is not None:
+            raise self.attach_error
+
+    def detach(self, render_product: _FakeRenderProduct) -> None:
+        self.events.append(f"{self.name}.detach:{render_product.name}")
+
+
+class _FakeOrchestrator:
+    def __init__(
+        self,
+        events: list[str],
+        *,
+        wait_error: BaseException | None = None,
+    ) -> None:
+        self.events = events
+        self.wait_error = wait_error
+        self.state = "STOPPED"
+
+    def step(self, **kwargs: object) -> None:
+        assert self.state == "STOPPED"
+        self.events.append(f"orchestrator.step:{kwargs['batch']}")
+        self.state = "STARTED"
+
+    def stop(self) -> None:
+        self.events.append("orchestrator.stop")
+        self.state = "STOPPING"
+
+    def wait_until_complete(self) -> None:
+        self.events.append("orchestrator.wait")
+        if self.wait_error is not None:
+            raise self.wait_error
+        self.state = "STOPPED"
 
 
 def _assert_vector_close(
@@ -293,6 +370,171 @@ def test_renderer_startup_does_not_create_an_unused_usd_stage() -> None:
         "headless": True,
         "create_new_stage": False,
     }
+
+
+def test_render_lifecycle_is_fully_stopped_before_sequential_invocations(
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    orchestrator = _FakeOrchestrator(events)
+    invocation = 0
+
+    def fake_render_once(**kwargs: object) -> dict[str, object]:
+        nonlocal invocation
+        invocation += 1
+        lifecycle = kwargs["_lifecycle"]
+        assert isinstance(lifecycle, _RenderLifecycle)
+        context = _FakeContext(events, f"context{invocation}")
+        product = _FakeRenderProduct(events, f"product{invocation}")
+        annotator = _FakeAnnotator(events, f"annotator{invocation}")
+        lifecycle.register_open_stage(context)
+        lifecycle.register_render_product(product)
+        lifecycle.attach_annotator(annotator, product)
+        lifecycle.step(orchestrator, batch=invocation)
+        return {"invocation": invocation}
+
+    monkeypatch.setattr(render_module, "_render_part_views_once", fake_render_once)
+
+    first = render_module.render_part_views(
+        registry_path="unused.json", output_dir="unused"
+    )
+    second = render_module.render_part_views(
+        registry_path="unused.json", output_dir="unused"
+    )
+
+    assert first == {"invocation": 1}
+    assert second == {"invocation": 2}
+    assert orchestrator.state == "STOPPED"
+    assert events == [
+        "annotator1.attach:product1",
+        "orchestrator.step:1",
+        "orchestrator.stop",
+        "orchestrator.wait",
+        "annotator1.detach:product1",
+        "product1.destroy",
+        "context1.close",
+        "annotator2.attach:product2",
+        "orchestrator.step:2",
+        "orchestrator.stop",
+        "orchestrator.wait",
+        "annotator2.detach:product2",
+        "product2.destroy",
+        "context2.close",
+    ]
+
+
+def test_render_body_exception_still_releases_every_resource(monkeypatch) -> None:
+    events: list[str] = []
+    orchestrator = _FakeOrchestrator(events)
+
+    def failing_render_once(**kwargs: object) -> dict[str, object]:
+        lifecycle = kwargs["_lifecycle"]
+        assert isinstance(lifecycle, _RenderLifecycle)
+        context = _FakeContext(events, "context")
+        product = _FakeRenderProduct(events, "product")
+        annotator = _FakeAnnotator(events, "annotator")
+        lifecycle.register_open_stage(context)
+        lifecycle.register_render_product(product)
+        lifecycle.attach_annotator(annotator, product)
+        lifecycle.step(orchestrator, batch="failure")
+        raise ValueError("synthetic render body failure")
+
+    monkeypatch.setattr(render_module, "_render_part_views_once", failing_render_once)
+
+    with pytest.raises(ValueError, match="synthetic render body failure"):
+        render_module.render_part_views(
+            registry_path="unused.json", output_dir="unused"
+        )
+
+    assert events[-5:] == [
+        "orchestrator.stop",
+        "orchestrator.wait",
+        "annotator.detach:product",
+        "product.destroy",
+        "context.close",
+    ]
+
+
+def test_partial_annotator_attach_is_registered_before_failure(monkeypatch) -> None:
+    events: list[str] = []
+
+    def failing_attach_once(**kwargs: object) -> dict[str, object]:
+        lifecycle = kwargs["_lifecycle"]
+        assert isinstance(lifecycle, _RenderLifecycle)
+        context = _FakeContext(events, "context")
+        product = _FakeRenderProduct(events, "product")
+        annotator = _FakeAnnotator(
+            events,
+            "annotator",
+            attach_error=RuntimeError("synthetic attach failure"),
+        )
+        lifecycle.register_open_stage(context)
+        lifecycle.register_render_product(product)
+        lifecycle.attach_annotator(annotator, product)
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(render_module, "_render_part_views_once", failing_attach_once)
+
+    with pytest.raises(RuntimeError, match="synthetic attach failure"):
+        render_module.render_part_views(
+            registry_path="unused.json", output_dir="unused"
+        )
+
+    assert events == [
+        "annotator.attach:product",
+        "annotator.detach:product",
+        "product.destroy",
+        "context.close",
+    ]
+
+
+def test_wait_failure_still_detaches_destroys_and_closes_stage(monkeypatch) -> None:
+    events: list[str] = []
+    orchestrator = _FakeOrchestrator(
+        events,
+        wait_error=RuntimeError("synthetic wait failure"),
+    )
+
+    def successful_render_once(**kwargs: object) -> dict[str, object]:
+        lifecycle = kwargs["_lifecycle"]
+        assert isinstance(lifecycle, _RenderLifecycle)
+        context = _FakeContext(events, "context")
+        product = _FakeRenderProduct(events, "product")
+        annotator = _FakeAnnotator(events, "annotator")
+        lifecycle.register_open_stage(context)
+        lifecycle.register_render_product(product)
+        lifecycle.attach_annotator(annotator, product)
+        lifecycle.step(orchestrator, batch="wait-failure")
+        return {"rendered": True}
+
+    monkeypatch.setattr(
+        render_module, "_render_part_views_once", successful_render_once
+    )
+
+    with pytest.raises(_RenderCleanupError, match="synthetic wait failure") as raised:
+        render_module.render_part_views(
+            registry_path="unused.json", output_dir="unused"
+        )
+
+    assert [operation for operation, _ in raised.value.failures] == [
+        "orchestrator.wait_until_complete"
+    ]
+    assert events[-3:] == [
+        "annotator.detach:product",
+        "product.destroy",
+        "context.close",
+    ]
+
+
+def test_close_stage_must_return_literal_true() -> None:
+    events: list[str] = []
+    lifecycle = _RenderLifecycle()
+    lifecycle.register_open_stage(_FakeContext(events, "context", close_result=None))
+
+    with pytest.raises(_RenderCleanupError, match="did not return True"):
+        lifecycle.cleanup()
+
+    assert events == ["context.close"]
 
 
 def test_pose_bank_expands_to_deterministic_upper_hemisphere_views() -> None:

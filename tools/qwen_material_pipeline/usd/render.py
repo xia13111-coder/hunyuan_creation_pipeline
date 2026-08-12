@@ -147,6 +147,125 @@ RENDER_VIEWS_PROGRESS_STAGE = "render_views"
 _ProgressItem = TypeVar("_ProgressItem")
 
 
+class _RenderCleanupError(RuntimeError):
+    """Report one or more failures while releasing a render invocation."""
+
+    def __init__(self, failures: Sequence[tuple[str, BaseException]]) -> None:
+        self.failures = tuple(failures)
+        details = "; ".join(
+            f"{operation}: {type(error).__name__}: {error}"
+            for operation, error in self.failures
+        )
+        super().__init__(f"Render resource cleanup failed ({details})")
+
+
+class _RenderLifecycle:
+    """Own every Kit/Replicator resource created by one render invocation.
+
+    Camera calibration can call :func:`render_part_views` repeatedly inside a
+    single SimulationApp.  Replicator shutdown is asynchronous, so merely
+    calling ``stop`` leaves the next invocation racing an orchestrator in the
+    STOPPING state.  This owner records resources before operations that can
+    partially fail and releases every resource even when an earlier release
+    operation raises.
+    """
+
+    def __init__(self) -> None:
+        self._context: Any | None = None
+        self._stage_opened = False
+        self._render_products: list[Any] = []
+        self._annotators: list[tuple[Any, Any]] = []
+        self._orchestrator: Any | None = None
+        self._orchestrator_step_attempted = False
+        self._cleaned = False
+
+    def register_open_stage(self, context: Any) -> None:
+        """Record a successfully opened stage for unconditional closing."""
+
+        if self._stage_opened:
+            raise RuntimeError("Render lifecycle already owns an open USD stage")
+        self._context = context
+        self._stage_opened = True
+
+    def register_render_product(self, render_product: Any) -> None:
+        """Record a render product immediately after creation succeeds."""
+
+        self._render_products.append(render_product)
+
+    def attach_annotator(self, annotator: Any, render_product: Any) -> None:
+        """Record an annotator before attach so partial attaches are releasable."""
+
+        self._annotators.append((annotator, render_product))
+        annotator.attach(render_product)
+
+    def step(self, orchestrator: Any, **kwargs: Any) -> Any:
+        """Mark a Replicator step as attempted before entering Replicator."""
+
+        if self._orchestrator is not None and self._orchestrator is not orchestrator:
+            raise RuntimeError("Render lifecycle cannot own multiple orchestrators")
+        self._orchestrator = orchestrator
+        self._orchestrator_step_attempted = True
+        return orchestrator.step(**kwargs)
+
+    def cleanup(self) -> None:
+        """Synchronously release all owned resources, collecting every failure."""
+
+        if self._cleaned:
+            return
+        self._cleaned = True
+        failures: list[tuple[str, BaseException]] = []
+
+        def attempt(operation: str, callback: Callable[[], Any]) -> None:
+            try:
+                callback()
+            except BaseException as error:
+                failures.append((operation, error))
+
+        if self._orchestrator_step_attempted:
+            assert self._orchestrator is not None
+            attempt("orchestrator.stop", self._orchestrator.stop)
+            # stop() is non-blocking in supported Replicator releases.  Waiting
+            # is mandatory before a later render_part_views call may step.
+            attempt(
+                "orchestrator.wait_until_complete",
+                self._orchestrator.wait_until_complete,
+            )
+
+        for index, (annotator, render_product) in enumerate(
+            reversed(self._annotators), start=1
+        ):
+            attempt(
+                f"annotator.detach[{index}]",
+                lambda annotator=annotator, render_product=render_product: (
+                    annotator.detach(render_product)
+                ),
+            )
+
+        for index, render_product in enumerate(
+            reversed(self._render_products), start=1
+        ):
+            attempt(
+                f"render_product.destroy[{index}]",
+                render_product.destroy,
+            )
+
+        if self._stage_opened:
+            assert self._context is not None
+
+            def close_stage() -> None:
+                result = self._context.close_stage()
+                if result is not True:
+                    raise RuntimeError(
+                        "omni.usd context.close_stage() did not return True"
+                    )
+
+            attempt("usd_context.close_stage", close_stage)
+
+        if failures:
+            error = _RenderCleanupError(failures)
+            raise error from failures[0][1]
+
+
 def _counted_progress_items(
     items: Sequence[_ProgressItem],
     *,
@@ -1006,7 +1125,7 @@ def _make_contact_sheets(crops_by_part, output_dir: Path, cell_size: int = 220):
     return sheet_paths
 
 
-def render_part_views(
+def _render_part_views_once(
     *,
     registry_path: str | Path,
     output_dir: str | Path,
@@ -1020,6 +1139,7 @@ def render_part_views(
     generate_part_evidence: bool = True,
     custom_view_specs_path: str | Path | None = None,
     progress_callback: ProgressCallback | None = None,
+    _lifecycle: _RenderLifecycle,
 ) -> dict[str, Any]:
     if (
         isinstance(rt_subframes, bool)
@@ -1098,6 +1218,7 @@ def render_part_views(
     context = omni.usd.get_context()
     if not context.open_stage(str(asset_path)):
         raise RuntimeError(f"Unable to open USD stage in Kit: {asset_path}")
+    _lifecycle.register_open_stage(context)
     stage = context.get_stage()
     if stage is None:
         raise RuntimeError("Kit did not return an open stage")
@@ -1290,13 +1411,14 @@ def render_part_views(
         render_product = rep.create.render_product(
             camera, (resolution, resolution), name=f"Qwen_{name}"
         )
+        _lifecycle.register_render_product(render_product)
         rgb = rep.AnnotatorRegistry.get_annotator("rgb")
-        rgb.attach(render_product)
+        _lifecycle.attach_annotator(rgb, render_product)
         segmentation = rep.AnnotatorRegistry.get_annotator(
             "semantic_segmentation",
             init_params={"semanticTypes": ["part"], "colorize": False},
         )
-        segmentation.attach(render_product)
+        _lifecycle.attach_annotator(segmentation, render_product)
         captures.append(
             (
                 name,
@@ -1328,7 +1450,11 @@ def render_part_views(
         unit="steps",
         detail=lambda step: f"Replicator capture step {step}/2",
     ):
-        rep.orchestrator.step(rt_subframes=rt_subframes, delta_time=0.0)
+        _lifecycle.step(
+            rep.orchestrator,
+            rt_subframes=rt_subframes,
+            delta_time=0.0,
+        )
 
     crop_candidates: dict[str, tuple[int, str]] = {}
     highlight_candidates: dict[str, tuple[int, str]] = {}
@@ -1597,6 +1723,44 @@ def render_part_views(
         report["source_usd_unchanged"] = True
         report["runtime_scene"] = showcase_runtime
     return report
+
+
+def render_part_views(
+    *,
+    registry_path: str | Path,
+    output_dir: str | Path,
+    resolution: int = 768,
+    view_names: list[str] | None = None,
+    rt_subframes: int = 8,
+    analysis_up_axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
+    analysis_front_axis: tuple[float, float, float] = (0.0, -1.0, 0.0),
+    lighting_profile: str = "geometry",
+    showcase: bool = False,
+    generate_part_evidence: bool = True,
+    custom_view_specs_path: str | Path | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> dict[str, Any]:
+    """Render one evidence set and synchronously release all Kit resources."""
+
+    lifecycle = _RenderLifecycle()
+    try:
+        return _render_part_views_once(
+            registry_path=registry_path,
+            output_dir=output_dir,
+            resolution=resolution,
+            view_names=view_names,
+            rt_subframes=rt_subframes,
+            analysis_up_axis=analysis_up_axis,
+            analysis_front_axis=analysis_front_axis,
+            lighting_profile=lighting_profile,
+            showcase=showcase,
+            generate_part_evidence=generate_part_evidence,
+            custom_view_specs_path=custom_view_specs_path,
+            progress_callback=progress_callback,
+            _lifecycle=lifecycle,
+        )
+    finally:
+        lifecycle.cleanup()
 
 
 def parse_args() -> argparse.Namespace:

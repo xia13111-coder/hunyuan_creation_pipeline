@@ -211,7 +211,8 @@ def test_inprocess_backend_starts_and_closes_one_app_for_multiple_batches(
     assert events == ["start", "import-render", "close"]
 
 
-def test_inprocess_budget_exit_still_closes_the_only_app(
+def test_inprocess_budget_rotation_writes_checkpoint_marker_and_closes_app(
+    tmp_path: Path,
     monkeypatch,
 ) -> None:
     events: list[str] = []
@@ -222,11 +223,17 @@ def test_inprocess_budget_exit_still_closes_the_only_app(
 
     def fake_calibrate(_args, *, render_runner):
         assert callable(render_runner)
-        raise camera_calibration._RenderBatchBudgetReached("sealed front/nano")
+        checkpoint = tmp_path / "camera" / "front" / "nano_scores.json"
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.write_text("{}", encoding="utf-8")
+        raise camera_calibration._RenderBatchBudgetReached(
+            "sealed front/nano",
+            checkpoint=checkpoint,
+        )
 
     monkeypatch.setattr(camera_calibration, "_calibrate_from_args", fake_calibrate)
     exit_code, report = camera_calibration._run_inprocess_backend(
-        SimpleNamespace(),
+        SimpleNamespace(output_dir=tmp_path / "camera", max_new_render_batches=8),
         simulation_app_factory=lambda _config: FakeApp(),
         render_module_loader=lambda: SimpleNamespace(
             render_part_views=lambda **_kwargs: {},
@@ -234,9 +241,16 @@ def test_inprocess_budget_exit_still_closes_the_only_app(
         ),
     )
 
-    assert exit_code == camera_calibration.SUPERVISOR_RESTART_EXIT_CODE
+    assert exit_code == 0
     assert report is None
     assert events == ["close"]
+    marker = camera_calibration._read_object(
+        tmp_path / "camera" / camera_calibration.SUPERVISOR_ROTATION_MARKER
+    )
+    assert marker["schema_version"] == (
+        camera_calibration.SUPERVISOR_ROTATION_SCHEMA_VERSION
+    )
+    assert marker["checkpoint"].endswith("front/nano_scores.json")
 
 
 def test_supervisor_rotates_budget_sessions_and_retries_true_failures(
@@ -261,15 +275,7 @@ def test_supervisor_rotates_budget_sessions_and_retries_true_failures(
         analysis_front_axis="-y",
         max_new_render_batches=None,
     )
-    return_codes = iter(
-        [
-            1,
-            camera_calibration.SUPERVISOR_RESTART_EXIT_CODE,
-            1,
-            1,
-            0,
-        ]
-    )
+    outcomes = iter(("failure", "rotation", "failure", "failure", "complete"))
     commands: list[list[str]] = []
     sleeps: list[float] = []
 
@@ -279,7 +285,31 @@ def test_supervisor_rotates_budget_sessions_and_retries_true_failures(
             Path(camera_calibration.__file__).resolve().parents[2]
         )
         commands.append(list(command))
-        return SimpleNamespace(returncode=next(return_codes))
+        outcome = next(outcomes)
+        if outcome == "rotation":
+            checkpoint = args.output_dir / "front" / "nano_scores.json"
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint.write_text("{}", encoding="utf-8")
+            camera_calibration._write_object(
+                args.output_dir / camera_calibration.SUPERVISOR_ROTATION_MARKER,
+                {
+                    "schema_version": (
+                        camera_calibration.SUPERVISOR_ROTATION_SCHEMA_VERSION
+                    ),
+                    "output_dir": str(args.output_dir.resolve()),
+                    "checkpoint": str(checkpoint.resolve()),
+                    "checkpoint_sha256": camera_calibration._sha256_file(checkpoint),
+                    "max_new_render_batches": 8,
+                },
+            )
+            return SimpleNamespace(returncode=0)
+        if outcome == "complete":
+            args.output_dir.mkdir(parents=True, exist_ok=True)
+            (args.output_dir / "camera_calibration_report.json").write_text(
+                "{}", encoding="utf-8"
+            )
+            return SimpleNamespace(returncode=0)
+        return SimpleNamespace(returncode=1)
 
     monkeypatch.setattr(camera_calibration.subprocess, "run", fake_run)
     monkeypatch.setattr(
@@ -331,6 +361,25 @@ def test_camera_phase_checkpoint_reuse_requires_exact_candidate_specs(
     )
     assert reused is not None
     assert reused[0]["view_id"] == "cal_front_micro_000"
+
+    score_document = json.loads(scores_path.read_text(encoding="utf-8"))
+    score_document["view_specs_sha256"] = "0" * 64
+    scores_path.write_text(json.dumps(score_document), encoding="utf-8")
+    assert (
+        camera_calibration._completed_phase(
+            specs_path=specs_path,
+            scores_path=scores_path,
+            expected_specs=specs,
+            reference_id="front",
+            phase="micro",
+        )
+        is None
+    )
+
+    # Legacy checkpoints created before the hash field remain reusable only
+    # while their complete specs and candidate IDs still match exactly.
+    score_document.pop("view_specs_sha256")
+    scores_path.write_text(json.dumps(score_document), encoding="utf-8")
 
     changed = {**specs, "views": [{"view_id": "cal_front_micro_001"}]}
     assert (
