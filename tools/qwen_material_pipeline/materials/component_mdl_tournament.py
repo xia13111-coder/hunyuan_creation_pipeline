@@ -5,7 +5,9 @@ they cannot predict how a translucent or reflective MDL will look on the
 actual CAD geometry under the registered camera and lighting.  This module
 keeps the final decision evidence-bounded: it creates a candidate plan that
 changes one appearance component's *MDL identity only*, and scores its member
-Part-ID cores after a real CAD render.  It never writes MDL parameters.
+Part-ID cores after a real CAD render.  A separate helper may build one
+same-identity color-only H1 after identity selection, but only through a
+reviewed Paint/Metal tuning interface.
 """
 
 from __future__ import annotations
@@ -29,9 +31,15 @@ from .semantics import (
     normalize_catalog_surface_semantics,
     normalize_part_material_semantics,
 )
+from .tuning import (
+    color_parameters_for_target_srgb,
+    parameter_policy_for_material,
+    tuning_profile_for_material,
+)
 
 
 SCHEMA_VERSION = "qwen-appearance-component-actual-mdl-tournament/v1"
+COLOR_SCHEMA_VERSION = "qwen-appearance-component-color-tournament/v1"
 
 
 class ComponentMdlTournamentError(ValueError):
@@ -50,7 +58,11 @@ def _canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
-def _assignments(plan: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+def _assignments(
+    plan: Mapping[str, Any],
+    *,
+    allow_parameter_overrides: bool = False,
+) -> dict[str, dict[str, Any]]:
     if plan.get("schema_version") != "1.0":
         raise ComponentMdlTournamentError("material plan has an invalid schema")
     raw = plan.get("assignments")
@@ -75,9 +87,11 @@ def _assignments(plan: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
             or part_id in output
             or not isinstance(material_id, str)
             or not material_id.startswith("mdl:")
+            or (parameters is not None and not isinstance(parameters, Mapping))
             or (
-                parameters is not None
-                and (not isinstance(parameters, Mapping) or bool(parameters))
+                not allow_parameter_overrides
+                and isinstance(parameters, Mapping)
+                and bool(parameters)
             )
         ):
             raise ComponentMdlTournamentError(
@@ -634,6 +648,122 @@ def build_component_candidate_plan(
     return output
 
 
+def build_component_color_candidate_plan(
+    *,
+    source_plan: Mapping[str, Any],
+    component_id: str,
+    member_part_ids: Sequence[str],
+    material_id: str,
+    target_srgb: Sequence[float],
+    member_material_semantics: Mapping[str, Mapping[str, Any]],
+    catalog_materials_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build one same-MDL, color-only H1 for every member of a component.
+
+    The source component must still be native H0. Parameters already selected
+    for other components are preserved, which lets callers combine independently
+    render-approved component winners without rebuilding earlier assignments.
+    """
+
+    if not isinstance(component_id, str) or not component_id:
+        raise ComponentMdlTournamentError("component_id must be non-empty")
+    if not isinstance(material_id, str) or not material_id.startswith("mdl:"):
+        raise ComponentMdlTournamentError("color candidate material_id must be an MDL ID")
+    members = _member_ids(member_part_ids)
+    normalized_members, target_family, _target_finish = _strict_member_semantics(
+        member_material_semantics,
+        expected_member_part_ids=members,
+    )
+    catalog_metadata = _catalog_candidate_semantics(
+        material_id=material_id,
+        catalog_materials_by_id=catalog_materials_by_id,
+        member_material_semantics=normalized_members,
+        target_family=target_family,
+    )
+    if catalog_metadata is None:
+        raise ComponentMdlTournamentError(
+            "component color H1 material is not compatible with every member"
+        )
+    profile = tuning_profile_for_material(material_id)
+    expected_surface_class = "dielectric" if target_family == "paint" else "metal"
+    if profile is None or profile.surface_class != expected_surface_class:
+        raise ComponentMdlTournamentError(
+            "component color H1 lacks a reviewed Paint/Metal tuning profile"
+        )
+    try:
+        parameters, authored = color_parameters_for_target_srgb(
+            profile,
+            target_srgb,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ComponentMdlTournamentError(
+            f"component color H1 target is invalid: {exc}"
+        ) from exc
+    policy = parameter_policy_for_material(material_id)
+    if set(parameters) != set(profile.color_parameters) or any(
+        policy.get(name, (None, None, None))[0] != "color3f_linear"
+        for name in parameters
+    ):
+        raise ComponentMdlTournamentError(
+            "component color H1 attempted an unreviewed shader parameter"
+        )
+
+    output = copy.deepcopy(dict(source_plan))
+    assignments = _assignments(output, allow_parameter_overrides=True)
+    missing = sorted(set(members) - set(assignments))
+    if missing:
+        raise ComponentMdlTournamentError(
+            f"component {component_id} has unknown Part-IDs: {missing}"
+        )
+    for part_id in members:
+        assignment = assignments[part_id]
+        if assignment.get("material_id") != material_id:
+            raise ComponentMdlTournamentError(
+                f"component color H1 would change the selected MDL for {part_id}"
+            )
+        existing_parameters = assignment.get("parameters")
+        if isinstance(existing_parameters, Mapping) and existing_parameters:
+            raise ComponentMdlTournamentError(
+                f"component color H1 source is not native H0 for {part_id}"
+            )
+
+    semantic_hash = _canonical_sha256(normalized_members)
+    catalog_hash = _canonical_sha256(catalog_materials_by_id[material_id])
+    candidate_binding = {
+        "schema_version": COLOR_SCHEMA_VERSION,
+        "component_id": component_id,
+        "member_part_ids": members,
+        "candidate_id": "H1",
+        "material_id": material_id,
+        "same_material_id_as_h0": True,
+        "source_plan_sha256": _canonical_sha256(source_plan),
+        "member_material_semantics_sha256": semantic_hash,
+        "catalog_material_record_sha256": catalog_hash,
+        "target_family": target_family,
+        "tuning_profile_id": profile.profile_id,
+        "target_color_srgb": list(authored["base_color_srgb"]),
+        "authored_parameter_names": sorted(parameters),
+        "parameter_mutation_scope": "reviewed_color3f_linear_only",
+    }
+    for part_id in members:
+        assignment = assignments[part_id]
+        assignment["parameters"] = copy.deepcopy(parameters)
+        provenance = assignment.get("provenance")
+        updated_provenance = dict(provenance) if isinstance(provenance, Mapping) else {}
+        updated_provenance["appearance_component_color_candidate"] = copy.deepcopy(
+            candidate_binding
+        )
+        assignment["provenance"] = updated_provenance
+
+    provenance = output.get("provenance")
+    output_provenance = dict(provenance) if isinstance(provenance, Mapping) else {}
+    output_provenance["appearance_component_color_candidate"] = copy.deepcopy(
+        candidate_binding
+    )
+    output["provenance"] = output_provenance
+    return output
+
+
 def score_component_render(
     *,
     component_id: str,
@@ -683,6 +813,163 @@ def score_component_render(
         "luma_score": round(weighted("luma_score"), 8),
         "lab_delta_e": round(weighted("lab_delta_e"), 8),
         "member_scores": scores,
+    }
+
+
+def _validated_component_render_score(
+    value: Mapping[str, Any],
+    *,
+    component_id: str,
+    label: str,
+) -> tuple[float, list[str], dict[str, float]]:
+    if not isinstance(value, Mapping) or value.get("schema_version") != SCHEMA_VERSION:
+        raise ComponentMdlTournamentError(
+            f"{label} component render score has an invalid schema"
+        )
+    if value.get("component_id") != component_id:
+        raise ComponentMdlTournamentError(
+            f"{label} component render score belongs to a different component"
+        )
+    raw_members = value.get("member_part_ids")
+    if not isinstance(raw_members, Sequence) or isinstance(raw_members, (str, bytes)):
+        raise ComponentMdlTournamentError(
+            f"{label} component render score has invalid members"
+        )
+    members = _member_ids(raw_members)
+    raw_scores = value.get("member_scores")
+    if not isinstance(raw_scores, Sequence) or isinstance(raw_scores, (str, bytes)):
+        raise ComponentMdlTournamentError(
+            f"{label} component render score has invalid member scores"
+        )
+    by_part: dict[str, float] = {}
+    weighted_total = 0.0
+    pixel_total = 0
+    for raw_score in raw_scores:
+        if not isinstance(raw_score, Mapping):
+            raise ComponentMdlTournamentError(
+                f"{label} component render score has a malformed member row"
+            )
+        part_id = raw_score.get("part_id")
+        appearance = raw_score.get("appearance_score")
+        pixels = raw_score.get("comparison_pixel_count")
+        if (
+            not isinstance(part_id, str)
+            or not part_id
+            or part_id in by_part
+            or isinstance(appearance, bool)
+            or not isinstance(appearance, (int, float))
+            or not math.isfinite(float(appearance))
+            or not 0.0 <= float(appearance) <= 1.0
+            or isinstance(pixels, bool)
+            or not isinstance(pixels, int)
+            or pixels <= 0
+        ):
+            raise ComponentMdlTournamentError(
+                f"{label} component render score has an invalid member row"
+            )
+        by_part[part_id] = float(appearance)
+        weighted_total += float(appearance) * pixels
+        pixel_total += pixels
+    aggregate = value.get("appearance_score")
+    if (
+        set(by_part) != set(members)
+        or value.get("member_score_count") != len(members)
+        or value.get("comparison_pixel_count") != pixel_total
+        or isinstance(aggregate, bool)
+        or not isinstance(aggregate, (int, float))
+        or not math.isfinite(float(aggregate))
+        or not 0.0 <= float(aggregate) <= 1.0
+        or abs(float(aggregate) - weighted_total / pixel_total) > 1e-7
+    ):
+        raise ComponentMdlTournamentError(
+            f"{label} component render score is not internally consistent"
+        )
+    return float(aggregate), members, by_part
+
+
+def select_component_color_winner(
+    *,
+    component_id: str,
+    h0_score: Mapping[str, Any],
+    h1_score: Mapping[str, Any],
+    minimum_score_improvement: float = 0.015,
+    maximum_member_regression: float = 0.03,
+) -> dict[str, Any]:
+    """Select H1 only after aggregate improvement and every-member safety pass."""
+
+    if not isinstance(component_id, str) or not component_id:
+        raise ComponentMdlTournamentError("component_id must be non-empty")
+    for value, label in (
+        (minimum_score_improvement, "minimum_score_improvement"),
+        (maximum_member_regression, "maximum_member_regression"),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not 0.0 <= float(value) <= 1.0
+        ):
+            raise ComponentMdlTournamentError(
+                f"{label} must be a finite unit number"
+            )
+    h0_aggregate, h0_members, h0_by_part = _validated_component_render_score(
+        h0_score,
+        component_id=component_id,
+        label="H0",
+    )
+    h1_aggregate, h1_members, h1_by_part = _validated_component_render_score(
+        h1_score,
+        component_id=component_id,
+        label="H1",
+    )
+    if h0_members != h1_members:
+        raise ComponentMdlTournamentError(
+            "component color H0/H1 scores cover different members"
+        )
+
+    member_comparisons: list[dict[str, Any]] = []
+    maximum_observed_regression = 0.0
+    for part_id in h0_members:
+        regression = h0_by_part[part_id] - h1_by_part[part_id]
+        maximum_observed_regression = max(maximum_observed_regression, regression)
+        member_comparisons.append(
+            {
+                "part_id": part_id,
+                "h0_appearance_score": round(h0_by_part[part_id], 8),
+                "h1_appearance_score": round(h1_by_part[part_id], 8),
+                "h1_score_change": round(
+                    h1_by_part[part_id] - h0_by_part[part_id], 8
+                ),
+            }
+        )
+    maximum_observed_regression = max(0.0, maximum_observed_regression)
+    aggregate_improvement = h1_aggregate - h0_aggregate
+    reason_codes: list[str] = []
+    if aggregate_improvement < float(minimum_score_improvement):
+        reason_codes.append("INSUFFICIENT_AGGREGATE_IMPROVEMENT")
+    if maximum_observed_regression > float(maximum_member_regression):
+        reason_codes.append("MEMBER_REGRESSION_ABOVE_MAXIMUM")
+    h1_selected = not reason_codes
+    return {
+        "schema_version": COLOR_SCHEMA_VERSION,
+        "component_id": component_id,
+        "member_part_ids": h0_members,
+        "selected_candidate_id": "H1" if h1_selected else "H0",
+        "selection_status": (
+            "COLOR_RENDER_WINNER" if h1_selected else "NATIVE_H0_RETAINED"
+        ),
+        "h0_appearance_score": round(h0_aggregate, 8),
+        "h1_appearance_score": round(h1_aggregate, 8),
+        "aggregate_score_improvement": round(aggregate_improvement, 8),
+        "minimum_score_improvement": float(minimum_score_improvement),
+        "maximum_observed_member_regression": round(
+            maximum_observed_regression, 8
+        ),
+        "maximum_member_regression": float(maximum_member_regression),
+        "reason_codes": reason_codes,
+        "member_comparisons": member_comparisons,
+        "h0_score_sha256": _canonical_sha256(h0_score),
+        "h1_score_sha256": _canonical_sha256(h1_score),
     }
 
 
@@ -801,6 +1088,270 @@ def select_component_mdl_winner(
     }
 
 
+def _sha256_text(value: Any, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ComponentMdlTournamentError(f"{label} must be a lowercase SHA-256")
+    return value
+
+
+def _validate_color_parameters(
+    *,
+    material_id: str,
+    target_family: str,
+    parameters: Any,
+) -> dict[str, list[float]]:
+    profile = tuning_profile_for_material(material_id)
+    required_profile = {
+        "paint": "nvidia_base_paint_omnipbr",
+        "metal": "nvidia_base_metal_omnipbr",
+    }.get(target_family)
+    if profile is None or profile.profile_id != required_profile:
+        raise ComponentMdlTournamentError(
+            "component color authorization lacks a reviewed Paint/Metal profile"
+        )
+    if not isinstance(parameters, Mapping) or set(parameters) != set(
+        profile.color_parameters
+    ):
+        raise ComponentMdlTournamentError(
+            "component color authorization has an invalid parameter set"
+        )
+    policy = parameter_policy_for_material(material_id)
+    normalized: dict[str, list[float]] = {}
+    for name, raw_value in parameters.items():
+        if policy.get(name, (None, None, None))[0] != "color3f_linear":
+            raise ComponentMdlTournamentError(
+                "component color authorization includes a non-color parameter"
+            )
+        if (
+            not isinstance(raw_value, Sequence)
+            or isinstance(raw_value, (str, bytes))
+            or len(raw_value) != 3
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+                for value in raw_value
+            )
+        ):
+            raise ComponentMdlTournamentError(
+                "component color authorization has an invalid color3f value"
+            )
+        normalized[str(name)] = [float(value) for value in raw_value]
+    return normalized
+
+
+def _component_color_authorizations(
+    *,
+    final_plan: Mapping[str, Any],
+    assignments: Mapping[str, Mapping[str, Any]],
+    tournament_audit: Mapping[str, Any],
+) -> tuple[dict[str, Mapping[str, Any]], int]:
+    """Validate the only contract that may authorize final color parameters."""
+
+    raw_color = tournament_audit.get("component_color_tournament")
+    if not isinstance(raw_color, Mapping):
+        if any(
+            isinstance(assignment.get("parameters"), Mapping)
+            and bool(assignment.get("parameters"))
+            for assignment in assignments.values()
+        ):
+            raise ComponentMdlTournamentError(
+                "final plan has parameters without a component color authorization"
+            )
+        return {}, 0
+    if raw_color.get("schema_version") != COLOR_SCHEMA_VERSION:
+        raise ComponentMdlTournamentError(
+            "component color tournament has an unsupported schema"
+        )
+    source_identity_plan_sha256 = _sha256_text(
+        raw_color.get("source_identity_plan_sha256"),
+        "component color source identity plan hash",
+    )
+    if raw_color.get("final_plan_sha256") != _canonical_sha256(final_plan):
+        raise ComponentMdlTournamentError(
+            "component color tournament is not hash-bound to the final plan"
+        )
+    raw_components = raw_color.get("components")
+    if not isinstance(raw_components, list):
+        raise ComponentMdlTournamentError(
+            "component color tournament has no component records"
+        )
+
+    authorized_by_part: dict[str, Mapping[str, Any]] = {}
+    component_ids: set[str] = set()
+    h1_component_count = 0
+    for index, raw_component in enumerate(raw_components):
+        if not isinstance(raw_component, Mapping):
+            raise ComponentMdlTournamentError(
+                f"component color tournament record {index} is invalid"
+            )
+        component_id = raw_component.get("component_id")
+        material_id = raw_component.get("material_id")
+        selected_candidate_id = raw_component.get("selected_candidate_id")
+        if (
+            not isinstance(component_id, str)
+            or not component_id
+            or component_id in component_ids
+            or not isinstance(material_id, str)
+            or not material_id.startswith("mdl:")
+            or selected_candidate_id not in {"H0", "H1"}
+        ):
+            raise ComponentMdlTournamentError(
+                "component color tournament record has invalid identity fields"
+            )
+        component_ids.add(component_id)
+        members = _member_ids(raw_component.get("member_part_ids", []))
+        if raw_component.get("source_plan_sha256") != source_identity_plan_sha256:
+            raise ComponentMdlTournamentError(
+                "component color record is not bound to the identity plan"
+            )
+        _sha256_text(
+            raw_component.get("color_candidate_plan_sha256"),
+            "component color candidate plan hash",
+        )
+        selection = raw_component.get("selection")
+        if (
+            not isinstance(selection, Mapping)
+            or selection.get("schema_version") != COLOR_SCHEMA_VERSION
+            or selection.get("component_id") != component_id
+            or selection.get("member_part_ids") != members
+            or selection.get("selected_candidate_id") != selected_candidate_id
+            or not isinstance(selection.get("h0_score_sha256"), str)
+            or not isinstance(selection.get("h1_score_sha256"), str)
+        ):
+            raise ComponentMdlTournamentError(
+                "component color selection does not match its authorization record"
+            )
+        _sha256_text(selection["h0_score_sha256"], "component color H0 score hash")
+        _sha256_text(selection["h1_score_sha256"], "component color H1 score hash")
+        raw_parameters = raw_component.get("parameters")
+        if selected_candidate_id == "H0":
+            if raw_parameters not in ({}, None):
+                raise ComponentMdlTournamentError(
+                    "native component H0 cannot authorize parameters"
+                )
+            if selection.get("selection_status") != "NATIVE_H0_RETAINED":
+                raise ComponentMdlTournamentError(
+                    "component color H0 has an inconsistent selection status"
+                )
+            normalized_parameters: dict[str, list[float]] = {}
+        else:
+            if (
+                selection.get("selection_status") != "COLOR_RENDER_WINNER"
+                or selection.get("reason_codes") != []
+            ):
+                raise ComponentMdlTournamentError(
+                    "component color H1 lacks a passing render selection"
+                )
+            first_assignment = assignments.get(members[0])
+            binding = (
+                first_assignment.get("provenance", {}).get(
+                    "appearance_component_color_candidate"
+                )
+                if isinstance(first_assignment, Mapping)
+                and isinstance(first_assignment.get("provenance"), Mapping)
+                else None
+            )
+            target_family = (
+                binding.get("target_family") if isinstance(binding, Mapping) else None
+            )
+            normalized_parameters = _validate_color_parameters(
+                material_id=material_id,
+                target_family=str(target_family),
+                parameters=raw_parameters,
+            )
+            h1_component_count += 1
+
+        for part_id in members:
+            if part_id in authorized_by_part:
+                raise ComponentMdlTournamentError(
+                    "component color authorizations overlap Part-IDs"
+                )
+            assignment = assignments.get(part_id)
+            if not isinstance(assignment, Mapping):
+                raise ComponentMdlTournamentError(
+                    "component color authorization references an unknown Part-ID"
+                )
+            assignment_parameters = assignment.get("parameters")
+            actual_parameters = (
+                dict(assignment_parameters)
+                if isinstance(assignment_parameters, Mapping)
+                else {}
+            )
+            if assignment.get("material_id") != material_id:
+                raise ComponentMdlTournamentError(
+                    "component color authorization would change MDL identity"
+                )
+            if actual_parameters != normalized_parameters:
+                raise ComponentMdlTournamentError(
+                    "final component parameters differ from their color authorization"
+                )
+            if selected_candidate_id == "H1":
+                provenance = assignment.get("provenance")
+                binding = (
+                    provenance.get("appearance_component_color_candidate")
+                    if isinstance(provenance, Mapping)
+                    else None
+                )
+                if (
+                    not isinstance(binding, Mapping)
+                    or binding.get("schema_version") != COLOR_SCHEMA_VERSION
+                    or binding.get("component_id") != component_id
+                    or binding.get("member_part_ids") != members
+                    or binding.get("candidate_id") != "H1"
+                    or binding.get("material_id") != material_id
+                    or binding.get("same_material_id_as_h0") is not True
+                    or binding.get("source_plan_sha256")
+                    != source_identity_plan_sha256
+                    or binding.get("parameter_mutation_scope")
+                    != "reviewed_color3f_linear_only"
+                    or binding.get("authored_parameter_names")
+                    != sorted(normalized_parameters)
+                ):
+                    raise ComponentMdlTournamentError(
+                        "final component H1 lacks its exact color candidate binding"
+                    )
+                profile = tuning_profile_for_material(material_id)
+                if (
+                    profile is None
+                    or binding.get("tuning_profile_id") != profile.profile_id
+                ):
+                    raise ComponentMdlTournamentError(
+                        "final component H1 tuning profile binding is invalid"
+                    )
+                _sha256_text(
+                    binding.get("member_material_semantics_sha256"),
+                    "component H1 member semantics hash",
+                )
+                _sha256_text(
+                    binding.get("catalog_material_record_sha256"),
+                    "component H1 catalog record hash",
+                )
+            authorized_by_part[part_id] = raw_component
+
+    parameterized_part_ids = {
+        part_id
+        for part_id, assignment in assignments.items()
+        if isinstance(assignment.get("parameters"), Mapping)
+        and bool(assignment.get("parameters"))
+    }
+    authorized_h1_part_ids = {
+        part_id
+        for part_id, authorization in authorized_by_part.items()
+        if authorization.get("selected_candidate_id") == "H1"
+    }
+    if parameterized_part_ids != authorized_h1_part_ids:
+        raise ComponentMdlTournamentError(
+            "final parameterized Part-IDs do not exactly match H1 authorizations"
+        )
+    return authorized_by_part, h1_component_count
+
+
 def rebind_part_id_material_audit_for_component_mdl_tournament(
     *,
     source_audit: Mapping[str, Any],
@@ -818,7 +1369,20 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
     raw_rows = output.get("parts")
     if not isinstance(raw_rows, list):
         raise ComponentMdlTournamentError("Part-ID material audit has no parts")
-    assignments = _assignments(final_plan)
+    color_contract_present = isinstance(
+        tournament_audit.get("component_color_tournament"), Mapping
+    )
+    assignments = _assignments(
+        final_plan,
+        allow_parameter_overrides=color_contract_present,
+    )
+    color_authorization_by_part, color_h1_component_count = (
+        _component_color_authorizations(
+            final_plan=final_plan,
+            assignments=assignments,
+            tournament_audit=tournament_audit,
+        )
+    )
     rows_by_part: dict[str, dict[str, Any]] = {}
     for index, raw_row in enumerate(raw_rows):
         if not isinstance(raw_row, dict):
@@ -886,6 +1450,27 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
                 f"final immutable MDL binding is invalid for {part_id}"
             )
         row["material_id"] = material_id
+        color_authorization = color_authorization_by_part.get(part_id)
+        if color_authorization is not None:
+            parameters = assignment.get("parameters")
+            selected_candidate_id = color_authorization.get("selected_candidate_id")
+            row["parameters"] = (
+                copy.deepcopy(dict(parameters))
+                if isinstance(parameters, Mapping) and parameters
+                else {}
+            )
+            row["appearance_component_color_tournament"] = {
+                "schema_version": COLOR_SCHEMA_VERSION,
+                "component_id": color_authorization.get("component_id"),
+                "material_id": material_id,
+                "selected_candidate_id": selected_candidate_id,
+                "parameter_mutation_allowed": selected_candidate_id == "H1",
+                "parameter_mutation_scope": (
+                    "reviewed_color3f_linear_only"
+                    if selected_candidate_id == "H1"
+                    else "none"
+                ),
+            }
         winner = winner_by_part.get(part_id)
         if winner is not None:
             row["appearance_component_actual_mdl_tournament"] = {
@@ -921,7 +1506,17 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
             {str(component.get("component_id")) for component in winner_by_part.values()}
         ),
         "winner_part_count": len(winner_by_part),
-        "mdl_parameter_mutation_allowed": False,
+        "mdl_parameter_mutation_allowed": bool(color_h1_component_count),
+        "mdl_parameter_mutation_scope": (
+            "reviewed_component_color3f_linear_only"
+            if color_h1_component_count
+            else "none"
+        ),
+        "color_h1_component_count": color_h1_component_count,
+        "color_h1_part_count": sum(
+            authorization.get("selected_candidate_id") == "H1"
+            for authorization in color_authorization_by_part.values()
+        ),
     }
     output.pop("integrity", None)
     output["integrity"] = {"document_sha256": _canonical_sha256(output)}
@@ -929,9 +1524,12 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
 
 
 __all__ = [
+    "COLOR_SCHEMA_VERSION",
     "SCHEMA_VERSION",
     "ComponentMdlTournamentError",
     "build_component_candidate_plan",
+    "build_component_color_candidate_plan",
     "score_component_render",
+    "select_component_color_winner",
     "select_component_mdl_winner",
 ]
