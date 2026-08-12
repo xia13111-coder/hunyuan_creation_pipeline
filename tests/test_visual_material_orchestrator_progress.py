@@ -428,6 +428,7 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
         "provenance": {"test": "native_qwen_h0"},
     }
     source_audit = {
+        "output_plan_sha256": orchestrator.canonical_sha256(source_plan),
         "parts": [
             {
                 "part_id": assignment["part_id"],
@@ -650,6 +651,7 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
     def rebind_spy(
         *,
         source_audit: dict[str, object],
+        source_plan: dict[str, object] | None = None,
         final_plan: dict[str, object],
         tournament_audit: dict[str, object],
         trusted_color_score_evidence: (
@@ -696,6 +698,7 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
         trusted_score_evidence_calls.append(trusted_color_score_evidence)
         return real_rebind(
             source_audit=source_audit,
+            source_plan=source_plan,
             final_plan=final_plan,
             tournament_audit=tournament_audit,
             trusted_color_score_evidence=trusted_color_score_evidence,

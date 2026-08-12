@@ -49,6 +49,9 @@ COLOR_ARTIFACT_BINDING_SCHEMA_VERSION = (
 )
 COLOR_MINIMUM_SCORE_IMPROVEMENT = 0.015
 COLOR_MAXIMUM_MEMBER_REGRESSION = 0.03
+# Kept equal to the Part-ID projection authoring floor.  Rebinding must verify
+# the production contract, not trust a floor copied into an input plan.
+MINIMUM_APPLYABLE_REVIEW_CONFIDENCE = 0.60
 
 
 class ComponentMdlTournamentError(ValueError):
@@ -2070,6 +2073,7 @@ def _component_color_authorizations(
 def rebind_part_id_material_audit_for_component_mdl_tournament(
     *,
     source_audit: Mapping[str, Any],
+    source_plan: Mapping[str, Any] | None = None,
     final_plan: Mapping[str, Any],
     tournament_audit: Mapping[str, Any],
     trusted_color_score_evidence: ComponentColorScoreEvidence | None = None,
@@ -2096,6 +2100,26 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
         final_plan,
         allow_parameter_overrides=color_contract_present,
     )
+    source_assignments: dict[str, dict[str, Any]] | None = None
+    if source_plan is not None:
+        source_assignments = _assignments(
+            source_plan,
+            allow_parameter_overrides=True,
+        )
+        if (
+            set(source_assignments) != set(assignments)
+            or source_audit.get("output_plan_sha256")
+            != _canonical_sha256(source_plan)
+            or (
+                tournament_audit.get("identity_source_plan_sha256") is not None
+                and tournament_audit.get("identity_source_plan_sha256")
+                != _canonical_sha256(source_plan)
+            )
+        ):
+            raise ComponentMdlTournamentError(
+                "Part-ID material audit is not hash-bound to the component "
+                "tournament source plan"
+            )
     color_authorization_by_part, color_h1_component_count = (
         _component_color_authorizations(
             final_plan=final_plan,
@@ -2161,6 +2185,114 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
                     f"unobserved Part-ID {part_id} changed in component tournament"
                 )
             continue
+        if row_status == "observed_low_confidence_baseline_retained":
+            source_assignment = (
+                source_assignments.get(part_id)
+                if source_assignments is not None
+                else None
+            )
+            provenance = assignment.get("provenance")
+            rejected_material_id = row.get("rejected_qwen_material_id")
+            rejected_confidence = row.get("rejected_qwen_confidence")
+            confidence_floor = (
+                provenance.get("applyable_review_confidence_floor")
+                if isinstance(provenance, Mapping)
+                else None
+            )
+            evidence_view_ids = row.get("evidence_view_ids")
+            selected_view_id = (
+                provenance.get("selected_reference_view_id_for_rejected_qwen")
+                if isinstance(provenance, Mapping)
+                else None
+            )
+            candidate_material_ids = (
+                provenance.get("candidate_material_ids")
+                if isinstance(provenance, Mapping)
+                else None
+            )
+            parameter_candidates = (
+                provenance.get("mdl_parameter_candidates")
+                if isinstance(provenance, Mapping)
+                else None
+            )
+            color_parameterization = (
+                provenance.get("mdl_color_parameterization")
+                if isinstance(provenance, Mapping)
+                else None
+            )
+            raw_candidates = (
+                parameter_candidates.get("candidates")
+                if isinstance(parameter_candidates, Mapping)
+                else None
+            )
+            if source_assignment is None:
+                raise ComponentMdlTournamentError(
+                    "observed low-confidence retained Part-ID requires its exact "
+                    "component tournament source plan"
+                )
+            if (
+                assignment != source_assignment
+                or part_id in winner_by_part
+                or part_id in color_authorization_by_part
+                or assignment.get("status") != "policy_fallback"
+                or assignment.get("material_id") != row.get("material_id")
+                or bool(assignment.get("parameters"))
+                or not isinstance(provenance, Mapping)
+                or provenance.get("observed_part_id_qwen_selection_rejected")
+                is not True
+                or provenance.get("observed_part_id_qwen_rejection_reason")
+                != "qwen_confidence_below_applyable_review_floor"
+                or not isinstance(rejected_material_id, str)
+                or not rejected_material_id.startswith("mdl:")
+                or provenance.get("rejected_qwen_material_id")
+                != rejected_material_id
+                or isinstance(rejected_confidence, bool)
+                or not isinstance(rejected_confidence, (int, float))
+                or not math.isfinite(float(rejected_confidence))
+                or provenance.get("rejected_qwen_confidence")
+                != rejected_confidence
+                or isinstance(confidence_floor, bool)
+                or not isinstance(confidence_floor, (int, float))
+                or not math.isfinite(float(confidence_floor))
+                or float(confidence_floor)
+                != MINIMUM_APPLYABLE_REVIEW_CONFIDENCE
+                or not 0.0
+                <= float(rejected_confidence)
+                < MINIMUM_APPLYABLE_REVIEW_CONFIDENCE
+                or not isinstance(evidence_view_ids, list)
+                or len(evidence_view_ids) != 1
+                or not isinstance(selected_view_id, str)
+                or not selected_view_id
+                or not isinstance(evidence_view_ids[0], str)
+                or not evidence_view_ids[0]
+                or evidence_view_ids != [selected_view_id]
+                or not isinstance(candidate_material_ids, list)
+                or rejected_material_id not in candidate_material_ids
+                or not isinstance(parameter_candidates, Mapping)
+                or parameter_candidates.get("part_id") != part_id
+                or parameter_candidates.get("material_id")
+                != assignment.get("material_id")
+                or parameter_candidates.get("selected_candidate_id") != "H0"
+                or parameter_candidates.get("parameters_applied_to_plan") is not False
+                or not isinstance(raw_candidates, list)
+                or len(raw_candidates) != 1
+                or not isinstance(raw_candidates[0], Mapping)
+                or raw_candidates[0].get("candidate_id") != "H0"
+                or raw_candidates[0].get("material_id")
+                != assignment.get("material_id")
+                or raw_candidates[0].get("parameters") != {}
+                or row.get("mdl_parameter_candidates") != parameter_candidates
+                or not isinstance(color_parameterization, Mapping)
+                or color_parameterization.get("selected_candidate_id") != "H0"
+                or color_parameterization.get("parameters_applied") is not False
+                or row.get("mdl_color_parameterization")
+                != color_parameterization
+            ):
+                raise ComponentMdlTournamentError(
+                    f"observed low-confidence Part-ID {part_id} did not retain "
+                    "its exact audited policy baseline"
+                )
+            continue
         if row_status != "independently_selected":
             raise ComponentMdlTournamentError(
                 f"Part-ID material audit has unsupported status for {part_id}"
@@ -2210,10 +2342,25 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
     unobserved_preserved_count = sum(
         row.get("status") == "unobserved_preserved" for row in rows_by_part.values()
     )
+    low_confidence_retained_count = sum(
+        row.get("status") == "observed_low_confidence_baseline_retained"
+        for row in rows_by_part.values()
+    )
     if (
         summary.get("part_count") != len(rows_by_part)
         or summary.get("independently_selected_count") != independently_selected_count
         or summary.get("unobserved_preserved_count") != unobserved_preserved_count
+        or summary.get(
+            "observed_low_confidence_baseline_retained_count",
+            0,
+        )
+        != low_confidence_retained_count
+        or (
+            independently_selected_count
+            + unobserved_preserved_count
+            + low_confidence_retained_count
+            != len(rows_by_part)
+        )
         or summary.get("exact_cover") is not True
     ):
         raise ComponentMdlTournamentError(

@@ -39,6 +39,7 @@ REPEATED_SUBSET_CANDIDATE_KINDS = {
     "direct_multiview_subset_owner",
     "exact_repeated_geometry_subset_layout",
 }
+MINIMUM_APPLYABLE_REVIEW_CONFIDENCE = 0.60
 COHORT_SIGNATURE_KIND_BY_CANDIDATE_KIND = {
     "dominant_assembly": "source_appearance_plus_subset_layout",
     "rare_source_appearance_pair": "geometry_plus_appearance_plus_subset_layout",
@@ -997,6 +998,7 @@ def _verified_part_id_policy_replacements(
         )
 
     evidence_status_by_part: dict[str, str] | None = None
+    evidence_selected_view_by_part: dict[str, str] = {}
     if part_id_evidence is not None:
         evidence = _object(part_id_evidence, "part_id_evidence")
         if (
@@ -1047,6 +1049,21 @@ def _verified_part_id_policy_replacements(
                     f"Part-ID publication evidence row {index} is malformed"
                 )
             evidence_status_by_part[part_id] = str(status)
+            if status == "observed":
+                selected_observations = [
+                    observation
+                    for observation in observations
+                    if isinstance(observation, Mapping)
+                    and observation.get("selected_for_material_inference") is True
+                ]
+                if (
+                    len(selected_observations) == 1
+                    and isinstance(selected_observations[0].get("view_id"), str)
+                    and selected_observations[0].get("view_id")
+                ):
+                    evidence_selected_view_by_part[part_id] = str(
+                        selected_observations[0]["view_id"]
+                    )
         if set(evidence_status_by_part) != set(final_assignments):
             raise PublishQualityGateError(
                 "Part-ID publication evidence does not exactly cover the final plan"
@@ -1072,12 +1089,14 @@ def _verified_part_id_policy_replacements(
         )
 
     independently_selected_part_ids: list[str] = []
+    observed_low_confidence_retained_part_ids: list[str] = []
     unobserved_preserved_part_ids: list[str] = []
     neutral_tiers = {
         "neutral_default",
         "source_preserve_unavailable_neutral_fallback",
     }
     independently_replaced_neutral_count = 0
+    observed_low_confidence_retained_neutral_count = 0
     for part_id in sorted(rows):
         row = rows[part_id]
         base_assignment = base_assignments[part_id]
@@ -1089,7 +1108,14 @@ def _verified_part_id_policy_replacements(
             else None
         )
         if (
-            (evidence_status == "observed" and row_status != "independently_selected")
+            (
+                evidence_status == "observed"
+                and row_status
+                not in {
+                    "independently_selected",
+                    "observed_low_confidence_baseline_retained",
+                }
+            )
             or (evidence_status == "unobserved" and row_status != "unobserved_preserved")
         ):
             raise PublishQualityGateError(
@@ -1119,6 +1145,127 @@ def _verified_part_id_policy_replacements(
                     f"unobserved Part ID {part_id} changed from its policy baseline"
                 )
             unobserved_preserved_part_ids.append(part_id)
+        elif row_status == "observed_low_confidence_baseline_retained":
+            provenance = final_assignment.get("provenance")
+            base_provenance = base_assignment.get("provenance")
+            rejected_material_id = row.get("rejected_qwen_material_id")
+            rejected_confidence = row.get("rejected_qwen_confidence")
+            confidence_floor = (
+                provenance.get("applyable_review_confidence_floor")
+                if isinstance(provenance, Mapping)
+                else None
+            )
+            evidence_view_ids = row.get("evidence_view_ids")
+            selected_view_id = (
+                provenance.get("selected_reference_view_id_for_rejected_qwen")
+                if isinstance(provenance, Mapping)
+                else None
+            )
+            candidate_material_ids = (
+                provenance.get("candidate_material_ids")
+                if isinstance(provenance, Mapping)
+                else None
+            )
+            parameter_candidates = (
+                provenance.get("mdl_parameter_candidates")
+                if isinstance(provenance, Mapping)
+                else None
+            )
+            color_parameterization = (
+                provenance.get("mdl_color_parameterization")
+                if isinstance(provenance, Mapping)
+                else None
+            )
+            raw_candidates = (
+                parameter_candidates.get("candidates")
+                if isinstance(parameter_candidates, Mapping)
+                else None
+            )
+            if (
+                evidence_status != "observed"
+                or evidence_selected_view_by_part.get(part_id) != selected_view_id
+                or base_assignment.get("status") != "policy_fallback"
+                or final_assignment.get("status") != "policy_fallback"
+                or final_assignment.get("material_id")
+                != base_assignment.get("material_id")
+                or any(
+                    final_assignment.get(key) != base_assignment.get(key)
+                    for key in (
+                        "semantic",
+                        "confidence",
+                        "evidence_views",
+                    )
+                )
+                or row.get("material_id") != final_assignment.get("material_id")
+                or bool(final_assignment.get("parameters"))
+                or not isinstance(provenance, Mapping)
+                or not isinstance(base_provenance, Mapping)
+                or any(
+                    provenance.get(key) != value
+                    for key, value in base_provenance.items()
+                )
+                or provenance.get("observed_part_id_qwen_selection_rejected")
+                is not True
+                or provenance.get("observed_part_id_qwen_rejection_reason")
+                != "qwen_confidence_below_applyable_review_floor"
+                or not isinstance(rejected_material_id, str)
+                or not rejected_material_id.startswith("mdl:")
+                or provenance.get("rejected_qwen_material_id")
+                != rejected_material_id
+                or isinstance(rejected_confidence, bool)
+                or not isinstance(rejected_confidence, (int, float))
+                or provenance.get("rejected_qwen_confidence")
+                != rejected_confidence
+                or isinstance(confidence_floor, bool)
+                or not isinstance(confidence_floor, (int, float))
+                or float(confidence_floor)
+                != MINIMUM_APPLYABLE_REVIEW_CONFIDENCE
+                or not 0.0
+                <= float(rejected_confidence)
+                < MINIMUM_APPLYABLE_REVIEW_CONFIDENCE
+                or not isinstance(evidence_view_ids, list)
+                or len(evidence_view_ids) != 1
+                or not isinstance(selected_view_id, str)
+                or not selected_view_id
+                or not isinstance(evidence_view_ids[0], str)
+                or not evidence_view_ids[0]
+                or evidence_view_ids != [selected_view_id]
+                or not isinstance(candidate_material_ids, list)
+                or rejected_material_id not in candidate_material_ids
+                or not isinstance(parameter_candidates, Mapping)
+                or parameter_candidates.get("part_id") != part_id
+                or parameter_candidates.get("material_id")
+                != final_assignment.get("material_id")
+                or parameter_candidates.get("selected_candidate_id") != "H0"
+                or parameter_candidates.get("parameters_applied_to_plan") is not False
+                or not isinstance(raw_candidates, list)
+                or len(raw_candidates) != 1
+                or not isinstance(raw_candidates[0], Mapping)
+                or raw_candidates[0].get("candidate_id") != "H0"
+                or raw_candidates[0].get("material_id")
+                != final_assignment.get("material_id")
+                or raw_candidates[0].get("parameters") != {}
+                or row.get("mdl_parameter_candidates") != parameter_candidates
+                or not isinstance(color_parameterization, Mapping)
+                or color_parameterization.get("selected_candidate_id") != "H0"
+                or color_parameterization.get("parameters_applied") is not False
+                or row.get("mdl_color_parameterization")
+                != color_parameterization
+                or any(
+                    key in provenance
+                    for key in (
+                        "appearance_component_actual_mdl_candidate",
+                        "appearance_component_color_candidate",
+                    )
+                )
+            ):
+                raise PublishQualityGateError(
+                    f"observed low-confidence Part ID {part_id} did not retain "
+                    "its audited policy baseline"
+                )
+            observed_low_confidence_retained_part_ids.append(part_id)
+            if base_provenance.get("tier") in neutral_tiers:
+                observed_low_confidence_retained_neutral_count += 1
         else:
             raise PublishQualityGateError(
                 f"part_id_material_audit has unsupported status for {part_id}"
@@ -1137,17 +1284,37 @@ def _verified_part_id_policy_replacements(
             "Part-ID unobserved_preserved_count",
         )
         != len(unobserved_preserved_part_ids)
+        or _count(
+            summary.get("observed_low_confidence_baseline_retained_count", 0),
+            "Part-ID observed_low_confidence_baseline_retained_count",
+        )
+        != len(observed_low_confidence_retained_part_ids)
+        or (
+            len(independently_selected_part_ids)
+            + len(observed_low_confidence_retained_part_ids)
+            + len(unobserved_preserved_part_ids)
+            != len(rows)
+        )
         or summary.get("exact_cover") is not True
-        or not independently_selected_part_ids
+        or not (
+            independently_selected_part_ids
+            or observed_low_confidence_retained_part_ids
+        )
     ):
         raise PublishQualityGateError(
             "part_id_material_audit summary does not match its records"
         )
     return {
         "independently_selected_part_ids": independently_selected_part_ids,
+        "observed_low_confidence_retained_part_ids": (
+            observed_low_confidence_retained_part_ids
+        ),
         "unobserved_preserved_part_ids": unobserved_preserved_part_ids,
         "independently_replaced_neutral_count": (
             independently_replaced_neutral_count
+        ),
+        "observed_low_confidence_retained_neutral_count": (
+            observed_low_confidence_retained_neutral_count
         ),
     }
 
@@ -1475,20 +1642,36 @@ def build_publish_quality_gate(
         else "all_plan_assignments"
     )
     coverage_denominator = (
-        len(part_id_lineage["independently_selected_part_ids"])
+        (
+            len(part_id_lineage["independently_selected_part_ids"])
+            + len(
+                part_id_lineage[
+                    "observed_low_confidence_retained_part_ids"
+                ]
+            )
+        )
         if part_id_lineage is not None
         else policy_output_count
     )
     scoped_policy_fallback_count = (
         sum(
             assignments[part_id].get("status") == "policy_fallback"
-            for part_id in part_id_lineage["independently_selected_part_ids"]
+            for part_id in (
+                part_id_lineage["independently_selected_part_ids"]
+                + part_id_lineage[
+                    "observed_low_confidence_retained_part_ids"
+                ]
+            )
         )
         if part_id_lineage is not None
         else effective_policy_fallback_count
     )
     scoped_neutral_fallback_count = (
-        0
+        int(
+            part_id_lineage[
+                "observed_low_confidence_retained_neutral_count"
+            ]
+        )
         if part_id_lineage is not None
         else effective_neutral_fallback_count
     )

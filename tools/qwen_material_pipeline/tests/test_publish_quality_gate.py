@@ -218,6 +218,283 @@ def test_hidden_p0181_cannot_be_resealed_as_independently_selected() -> None:
         )
 
 
+def _low_confidence_part_id_lineage() -> tuple[dict, dict, dict, dict, dict]:
+    baseline_material = "mdl:Base/Metals/Steel_Stainless.mdl#Steel_Stainless"
+    selected_material = "mdl:Base/Metals/Steel_Cast.mdl#Steel_Cast"
+    rejected_material = (
+        "mdl:Base/Metals/Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
+    )
+    base_assignments = [
+        {
+            "part_id": "P0001",
+            "material_id": baseline_material,
+            "semantic": "neutral policy fallback",
+            "confidence": 0.0,
+            "evidence_views": [],
+            "status": "policy_fallback",
+            "provenance": {
+                "tier": "source_preserve_unavailable_neutral_fallback",
+                "reason_codes": ["POLICY_DECLARED_NEUTRAL_DEFAULT"],
+            },
+        },
+        {
+            "part_id": "P0002",
+            "material_id": baseline_material,
+            "semantic": "neutral policy fallback",
+            "confidence": 0.0,
+            "evidence_views": [],
+            "status": "policy_fallback",
+            "provenance": {"tier": "neutral_default"},
+        },
+    ]
+    policy_plan = {
+        "schema_version": "1.0",
+        "assignments": copy.deepcopy(base_assignments),
+        "provenance": {},
+    }
+    evidence_unsigned = {
+        "schema_version": "qwen-part-id-reference-evidence/v1",
+        "assignment_unit": "part_id",
+        "parts": [
+            {
+                "part_id": part_id,
+                "status": "observed",
+                "observations": [
+                    {
+                        "view_id": "iso",
+                        "selected_for_material_inference": True,
+                    }
+                ],
+            }
+            for part_id in ("P0001", "P0002")
+        ],
+    }
+    evidence_digest = _sha256(evidence_unsigned)
+    evidence = {
+        **evidence_unsigned,
+        "integrity": {"document_sha256": evidence_digest},
+    }
+    candidate_set = {
+        "schema_version": "qwen-part-id-parameter-candidates/v1",
+        "part_id": "P0001",
+        "material_id": baseline_material,
+        "selection_status": "PENDING_RENDER_COMPARISON",
+        "selected_candidate_id": "H0",
+        "native_h0_is_default": True,
+        "parameters_applied_to_plan": False,
+        "h1_status": "disabled_by_caller",
+        "candidates": [
+            {
+                "candidate_id": "H0",
+                "kind": "native_mdl",
+                "material_id": baseline_material,
+                "parameters": {},
+            }
+        ],
+    }
+    color_audit = {
+        "status": "native_h0_selected",
+        "material_id": baseline_material,
+        "selected_candidate_id": "H0",
+        "parameters_applied": False,
+    }
+    final_assignments = copy.deepcopy(base_assignments)
+    final_assignments[0]["provenance"].update(
+        {
+            "observed_part_id_qwen_selection_rejected": True,
+            "observed_part_id_qwen_rejection_reason": (
+                "qwen_confidence_below_applyable_review_floor"
+            ),
+            "rejected_qwen_material_id": rejected_material,
+            "rejected_qwen_confidence": 0.06,
+            "applyable_review_confidence_floor": 0.60,
+            "selected_reference_view_id_for_rejected_qwen": "iso",
+            "candidate_material_ids": [rejected_material],
+            "mdl_parameter_candidates": candidate_set,
+            "mdl_color_parameterization": color_audit,
+        }
+    )
+    final_assignments[1].update(
+        {
+            "material_id": selected_material,
+            "semantic": "independent observed selection",
+            "confidence": 0.8,
+            "evidence_views": ["iso"],
+            "status": "review",
+            "provenance": {"assignment_unit": "part_id"},
+        }
+    )
+    final_plan = {
+        "schema_version": "1.0",
+        "assignment_unit": "part_id",
+        "palette_fusion_used": False,
+        "part_material_groups_used": False,
+        "assignments": final_assignments,
+        "provenance": {"part_id_evidence_sha256": evidence_digest},
+    }
+    audit_unsigned = {
+        "schema_version": "qwen-part-id-material-plan-audit/v1",
+        "assignment_unit": "part_id",
+        "palette_fusion_used": False,
+        "base_plan_sha256": _sha256(policy_plan),
+        "part_id_evidence_sha256": evidence_digest,
+        "output_plan_sha256": _sha256(final_plan),
+        "parts": [
+            {
+                "part_id": "P0001",
+                "status": "observed_low_confidence_baseline_retained",
+                "material_id": baseline_material,
+                "rejected_qwen_material_id": rejected_material,
+                "rejected_qwen_confidence": 0.06,
+                "evidence_view_ids": ["iso"],
+                "mdl_parameter_candidates": candidate_set,
+                "mdl_color_parameterization": color_audit,
+            },
+            {
+                "part_id": "P0002",
+                "status": "independently_selected",
+                "material_id": selected_material,
+                "evidence_view_ids": ["iso"],
+            },
+        ],
+        "summary": {
+            "part_count": 2,
+            "independently_selected_count": 1,
+            "unobserved_preserved_count": 0,
+            "observed_low_confidence_baseline_retained_count": 1,
+            "exact_cover": True,
+        },
+    }
+    audit = {
+        **audit_unsigned,
+        "integrity": {"document_sha256": _sha256(audit_unsigned)},
+    }
+    policy_audit = {
+        "schema_version": "qwen-policy-exact-cover-report/v1",
+        "output_plan_sha256": _sha256(policy_plan),
+        "summary": {
+            "registry_part_count": 2,
+            "output_assignment_count": 2,
+            "policy_fallback_count": 2,
+            "confidence_gate_auto_count": 0,
+            "neutral_default_count": 1,
+            "source_preserve_unavailable_neutral_fallback_count": 1,
+        },
+    }
+    return policy_plan, policy_audit, final_plan, audit, evidence
+
+
+def _reseal_part_id_audit(audit: dict, final_plan: dict) -> None:
+    audit["output_plan_sha256"] = _sha256(final_plan)
+    unsigned = {key: value for key, value in audit.items() if key != "integrity"}
+    audit["integrity"] = {"document_sha256": _sha256(unsigned)}
+
+
+def test_observed_low_confidence_policy_baseline_is_audited_and_counted() -> None:
+    policy_plan, policy_audit, final_plan, audit, evidence = (
+        _low_confidence_part_id_lineage()
+    )
+    lineage = _verified_part_id_policy_replacements(
+        final_plan=final_plan,
+        final_assignments={
+            row["part_id"]: row for row in final_plan["assignments"]
+        },
+        policy_plan=policy_plan,
+        policy_audit=policy_audit,
+        part_id_material_audit=audit,
+        part_id_evidence=evidence,
+    )
+    assert lineage["independently_selected_part_ids"] == ["P0002"]
+    assert lineage["observed_low_confidence_retained_part_ids"] == ["P0001"]
+    assert lineage["observed_low_confidence_retained_neutral_count"] == 1
+
+    report = build_publish_quality_gate(
+        confidence_gate=_confidence(part_count=2, auto_count=0),
+        final_plan=final_plan,
+        policy_audit=policy_audit,
+        policy_plan=policy_plan,
+        part_id_material_audit=audit,
+        part_id_evidence=evidence,
+    )
+    fallback = report["metrics"]["policy_fallback"]
+    assert fallback["coverage_scope"] == "photo_observed_part_ids"
+    assert fallback["coverage_denominator"] == 2
+    assert fallback["scoped_policy_fallback_count"] == 1
+    assert fallback["scoped_neutral_fallback_count"] == 1
+    assert fallback["policy_fallback_fraction"] == 0.5
+    assert fallback["neutral_fallback_fraction"] == 0.5
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_message"),
+    [
+        ("material", "did not retain its audited policy baseline"),
+        ("status", "did not retain its audited policy baseline"),
+        ("parameters", "did not retain its audited policy baseline"),
+        ("tier", "did not retain its audited policy baseline"),
+        ("floor", "did not retain its audited policy baseline"),
+        ("component_binding", "did not retain its audited policy baseline"),
+        ("wrong_evidence_view", "did not retain its audited policy baseline"),
+        ("wrong_summary", "summary does not match its records"),
+        ("unobserved", "contradicts final evidence"),
+    ],
+)
+def test_observed_low_confidence_lineage_rejects_forgery(
+    mutation: str,
+    expected_message: str,
+) -> None:
+    policy_plan, policy_audit, final_plan, audit, evidence = (
+        _low_confidence_part_id_lineage()
+    )
+    assignment = final_plan["assignments"][0]
+    if mutation == "material":
+        assignment["material_id"] = "mdl:Base/Metals/Steel_Cast.mdl#Steel_Cast"
+    elif mutation == "status":
+        assignment["status"] = "review"
+    elif mutation == "parameters":
+        assignment["parameters"] = {"tint": [0.1, 0.2, 0.3]}
+    elif mutation == "tier":
+        assignment["provenance"]["tier"] = "semantic_rule"
+    elif mutation == "floor":
+        assignment["provenance"]["applyable_review_confidence_floor"] = 0.99
+        assignment["provenance"]["rejected_qwen_confidence"] = 0.95
+        audit["parts"][0]["rejected_qwen_confidence"] = 0.95
+    elif mutation == "component_binding":
+        assignment["provenance"]["appearance_component_color_candidate"] = {
+            "candidate_id": "H1"
+        }
+    elif mutation == "wrong_evidence_view":
+        assignment["provenance"]["selected_reference_view_id_for_rejected_qwen"] = (
+            "front"
+        )
+        audit["parts"][0]["evidence_view_ids"] = ["front"]
+    elif mutation == "wrong_summary":
+        audit["summary"][
+            "observed_low_confidence_baseline_retained_count"
+        ] = 0
+    elif mutation == "unobserved":
+        evidence["parts"][0].update({"status": "unobserved", "observations": []})
+        evidence_unsigned = {
+            key: value for key, value in evidence.items() if key != "integrity"
+        }
+        evidence["integrity"] = {"document_sha256": _sha256(evidence_unsigned)}
+        new_evidence_digest = evidence["integrity"]["document_sha256"]
+        final_plan["provenance"]["part_id_evidence_sha256"] = new_evidence_digest
+        audit["part_id_evidence_sha256"] = new_evidence_digest
+    _reseal_part_id_audit(audit, final_plan)
+    with pytest.raises(PublishQualityGateError, match=expected_message):
+        _verified_part_id_policy_replacements(
+            final_plan=final_plan,
+            final_assignments={
+                row["part_id"]: row for row in final_plan["assignments"]
+            },
+            policy_plan=policy_plan,
+            policy_audit=policy_audit,
+            part_id_material_audit=audit,
+            part_id_evidence=evidence,
+        )
+
+
 def _queue() -> dict:
     return {
         "schema_version": "qwen-multigroup-exact-mdl-queue/v1",
