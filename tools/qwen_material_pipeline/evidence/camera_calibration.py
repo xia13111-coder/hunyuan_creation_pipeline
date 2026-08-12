@@ -2522,28 +2522,17 @@ def _forwarded_calibration_arguments(
 
 
 def _run_supervisor_backend(args: argparse.Namespace) -> int:
-    batch_limit = (
+    configured_batch_limit = (
         args.max_new_render_batches
         if args.max_new_render_batches is not None
         else SUPERVISOR_RENDER_BATCH_LIMIT
     )
     if (
-        isinstance(batch_limit, bool)
-        or not isinstance(batch_limit, int)
-        or batch_limit <= 0
+        isinstance(configured_batch_limit, bool)
+        or not isinstance(configured_batch_limit, int)
+        or configured_batch_limit <= 0
     ):
         raise ValueError("max_new_render_batches must be a positive integer")
-    command = [
-        str(args.isaac_python.expanduser().resolve(strict=True)),
-        "-m",
-        "qwen_material_pipeline",
-        "calibrate-cameras",
-        *_forwarded_calibration_arguments(
-            args,
-            render_backend="inprocess",
-            max_new_render_batches=batch_limit,
-        ),
-    ]
     environment = os.environ.copy()
     tools_root = Path(__file__).resolve().parents[2]
     inherited_pythonpath = environment.get("PYTHONPATH")
@@ -2564,6 +2553,8 @@ def _run_supervisor_backend(args: argparse.Namespace) -> int:
     final_report = output_dir / "camera_calibration_report.json"
     last_rotation: tuple[str, str] | None = None
     failures = 0
+    current_batch_limit = configured_batch_limit
+    degradation_logged = False
     while True:
         if rotation_marker.is_symlink():
             raise RuntimeError(
@@ -2571,6 +2562,18 @@ def _run_supervisor_backend(args: argparse.Namespace) -> int:
                 f"{rotation_marker}"
             )
         rotation_marker.unlink(missing_ok=True)
+        session_batch_limit = current_batch_limit
+        command = [
+            str(args.isaac_python.expanduser().resolve(strict=True)),
+            "-m",
+            "qwen_material_pipeline",
+            "calibrate-cameras",
+            *_forwarded_calibration_arguments(
+                args,
+                render_backend="inprocess",
+                max_new_render_batches=session_batch_limit,
+            ),
+        ]
         print("[CAMERA] supervisor starting bounded Isaac session", flush=True)
         try:
             completed = subprocess.run(command, check=False, env=environment)
@@ -2596,11 +2599,14 @@ def _run_supervisor_backend(args: argparse.Namespace) -> int:
             if set(marker) != expected_keys:
                 raise RuntimeError("Camera session rotation marker has invalid fields")
             raw_checkpoint = marker.get("checkpoint")
+            marker_batch_limit = marker.get("max_new_render_batches")
             if (
                 marker.get("schema_version")
                 != SUPERVISOR_ROTATION_SCHEMA_VERSION
                 or marker.get("output_dir") != str(output_dir)
-                or marker.get("max_new_render_batches") != batch_limit
+                or isinstance(marker_batch_limit, bool)
+                or not isinstance(marker_batch_limit, int)
+                or marker_batch_limit != session_batch_limit
                 or not isinstance(raw_checkpoint, str)
             ):
                 raise RuntimeError("Camera session rotation marker is invalid")
@@ -2631,6 +2637,16 @@ def _run_supervisor_backend(args: argparse.Namespace) -> int:
                 "Camera child exited successfully without a final report or a "
                 "validated session rotation marker"
             )
+        if current_batch_limit != 1:
+            current_batch_limit = 1
+            if not degradation_logged:
+                print(
+                    "[CAMERA] child session failed; reducing all remaining "
+                    "Isaac sessions to one new render batch "
+                    f"(exit code {return_code})",
+                    flush=True,
+                )
+                degradation_logged = True
         failures += 1
         if failures >= RENDER_RETRY_ATTEMPTS:
             raise RuntimeError(

@@ -256,6 +256,7 @@ def test_inprocess_budget_rotation_writes_checkpoint_marker_and_closes_app(
 def test_supervisor_rotates_budget_sessions_and_retries_true_failures(
     tmp_path: Path,
     monkeypatch,
+    capsys,
 ) -> None:
     isaac_python = tmp_path / "python.sh"
     isaac_python.write_text("#!/bin/sh\n", encoding="utf-8")
@@ -287,6 +288,9 @@ def test_supervisor_rotates_budget_sessions_and_retries_true_failures(
         commands.append(list(command))
         outcome = next(outcomes)
         if outcome == "rotation":
+            session_batch_limit = int(
+                command[command.index("--max-new-render-batches") + 1]
+            )
             checkpoint = args.output_dir / "front" / "nano_scores.json"
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             checkpoint.write_text("{}", encoding="utf-8")
@@ -299,7 +303,7 @@ def test_supervisor_rotates_budget_sessions_and_retries_true_failures(
                     "output_dir": str(args.output_dir.resolve()),
                     "checkpoint": str(checkpoint.resolve()),
                     "checkpoint_sha256": camera_calibration._sha256_file(checkpoint),
-                    "max_new_render_batches": 2,
+                    "max_new_render_batches": session_batch_limit,
                 },
             )
             return SimpleNamespace(returncode=0)
@@ -318,15 +322,132 @@ def test_supervisor_rotates_budget_sessions_and_retries_true_failures(
 
     assert camera_calibration._run_supervisor_backend(args) == 0
     assert len(commands) == 5
-    assert all(command == commands[0] for command in commands)
     assert commands[0][0] == str(isaac_python.resolve())
     assert commands[0][commands[0].index("--render-backend") + 1] == "inprocess"
-    assert commands[0][commands[0].index("--max-new-render-batches") + 1] == "2"
+    assert [
+        command[command.index("--max-new-render-batches") + 1]
+        for command in commands
+    ] == ["2", "1", "1", "1", "1"]
     assert sleeps == [
         camera_calibration.RENDER_RETRY_DELAY_SECONDS,
         camera_calibration.RENDER_RETRY_DELAY_SECONDS,
         camera_calibration.RENDER_RETRY_DELAY_SECONDS,
     ]
+    assert capsys.readouterr().out.count(
+        "reducing all remaining Isaac sessions to one new render batch"
+    ) == 1
+
+
+def test_supervisor_keeps_batch_two_after_normal_budget_rotation(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    isaac_python = tmp_path / "python.sh"
+    isaac_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    output_dir = tmp_path / "camera"
+    args = SimpleNamespace(
+        registry=tmp_path / "registry.json",
+        reference_manifest=tmp_path / "references.json",
+        spatial_mapping=None,
+        initial_view_specs=None,
+        search_phases=None,
+        isaac_python=isaac_python,
+        output_dir=output_dir,
+        reference_ids=None,
+        search_resolution=256,
+        final_resolution=512,
+        rt_subframes=2,
+        analysis_up_axis="z",
+        analysis_front_axis="-y",
+        max_new_render_batches=None,
+    )
+    outcomes = iter(("rotation", "complete"))
+    limits: list[int] = []
+
+    def fake_run(command, *, check, env):
+        assert check is False
+        assert env["PYTHONPATH"]
+        session_batch_limit = int(
+            command[command.index("--max-new-render-batches") + 1]
+        )
+        limits.append(session_batch_limit)
+        outcome = next(outcomes)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if outcome == "rotation":
+            checkpoint = output_dir / "front" / "nano_scores.json"
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint.write_text("{}", encoding="utf-8")
+            camera_calibration._write_object(
+                output_dir / camera_calibration.SUPERVISOR_ROTATION_MARKER,
+                {
+                    "schema_version": (
+                        camera_calibration.SUPERVISOR_ROTATION_SCHEMA_VERSION
+                    ),
+                    "output_dir": str(output_dir.resolve()),
+                    "checkpoint": str(checkpoint.resolve()),
+                    "checkpoint_sha256": camera_calibration._sha256_file(checkpoint),
+                    "max_new_render_batches": session_batch_limit,
+                },
+            )
+        else:
+            (output_dir / "camera_calibration_report.json").write_text(
+                "{}", encoding="utf-8"
+            )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(camera_calibration.subprocess, "run", fake_run)
+
+    assert camera_calibration._run_supervisor_backend(args) == 0
+    assert limits == [2, 2]
+    assert "reducing all remaining Isaac sessions" not in capsys.readouterr().out
+
+
+def test_supervisor_completes_in_limit_one_session_after_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    isaac_python = tmp_path / "python.sh"
+    isaac_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    output_dir = tmp_path / "camera"
+    args = SimpleNamespace(
+        registry=tmp_path / "registry.json",
+        reference_manifest=tmp_path / "references.json",
+        spatial_mapping=None,
+        initial_view_specs=None,
+        search_phases=None,
+        isaac_python=isaac_python,
+        output_dir=output_dir,
+        reference_ids=None,
+        search_resolution=256,
+        final_resolution=512,
+        rt_subframes=2,
+        analysis_up_axis="z",
+        analysis_front_axis="-y",
+        max_new_render_batches=None,
+    )
+    return_codes = iter((1, 0))
+    limits: list[int] = []
+
+    def fake_run(command, *, check, env):
+        assert check is False
+        assert env["PYTHONPATH"]
+        limits.append(
+            int(command[command.index("--max-new-render-batches") + 1])
+        )
+        return_code = next(return_codes)
+        if return_code == 0:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "camera_calibration_report.json").write_text(
+                "{}", encoding="utf-8"
+            )
+        return SimpleNamespace(returncode=return_code)
+
+    monkeypatch.setattr(camera_calibration.subprocess, "run", fake_run)
+    monkeypatch.setattr(camera_calibration.time, "sleep", lambda _seconds: None)
+
+    assert camera_calibration._run_supervisor_backend(args) == 0
+    assert limits == [2, 1]
 
 
 def test_camera_phase_checkpoint_reuse_requires_exact_candidate_specs(
