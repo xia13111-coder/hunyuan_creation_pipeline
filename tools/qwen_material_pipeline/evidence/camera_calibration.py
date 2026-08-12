@@ -37,7 +37,11 @@ VIEW_SPEC_SCHEMA_VERSION = "qwen-camera-view-specs/v1"
 FINALIST_COUNT = 5
 RENDER_RETRY_ATTEMPTS = 3
 RENDER_RETRY_DELAY_SECONDS = 3.0
-SUPERVISOR_RENDER_BATCH_LIMIT = 8
+# Real Isaac 5.0 runs on the 24 GiB workstation showed that longer sessions
+# can accumulate enough RTX/Hydra state to become native-crash prone.  Four
+# completed batches still removes most process startup overhead while keeping
+# the worker lifetime below the observed failure window.
+SUPERVISOR_RENDER_BATCH_LIMIT = 4
 SUPERVISOR_ROTATION_SCHEMA_VERSION = "qwen-camera-session-rotation/v1"
 SUPERVISOR_ROTATION_MARKER = ".camera_session_rotation.json"
 MAX_FOCAL_LENGTH_MM = 2000.0
