@@ -18,6 +18,7 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from .part_id_parameter_tournament import (
@@ -40,10 +41,22 @@ from .tuning import (
 
 SCHEMA_VERSION = "qwen-appearance-component-actual-mdl-tournament/v1"
 COLOR_SCHEMA_VERSION = "qwen-appearance-component-color-tournament/v1"
+COLOR_MINIMUM_SCORE_IMPROVEMENT = 0.015
+COLOR_MAXIMUM_MEMBER_REGRESSION = 0.03
 
 
 class ComponentMdlTournamentError(ValueError):
     """Raised when a component candidate would violate immutable-MDL rules."""
+
+
+@dataclass(frozen=True)
+class ComponentColorScoreEvidence:
+    """Caller-owned render inputs used to replay every component color score."""
+
+    evidence: Mapping[str, Any]
+    spatial_mapping_report: Mapping[str, Any]
+    h0_rendered_registry: Mapping[str, Any]
+    h1_rendered_registries_by_component: Mapping[str, Mapping[str, Any]]
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -752,6 +765,8 @@ def build_component_color_candidate_plan(
         "target_color_srgb": list(authored["base_color_srgb"]),
         "authored_parameter_names": sorted(parameters),
         "parameter_mutation_scope": "reviewed_color3f_linear_only",
+        "minimum_score_improvement": COLOR_MINIMUM_SCORE_IMPROVEMENT,
+        "maximum_member_regression": COLOR_MAXIMUM_MEMBER_REGRESSION,
     }
     for part_id in members:
         assignment = assignments[part_id]
@@ -900,8 +915,8 @@ def select_component_color_winner(
     component_id: str,
     h0_score: Mapping[str, Any],
     h1_score: Mapping[str, Any],
-    minimum_score_improvement: float = 0.015,
-    maximum_member_regression: float = 0.03,
+    minimum_score_improvement: float = COLOR_MINIMUM_SCORE_IMPROVEMENT,
+    maximum_member_regression: float = COLOR_MAXIMUM_MEMBER_REGRESSION,
 ) -> dict[str, Any]:
     """Select H1 only after aggregate improvement and every-member safety pass."""
 
@@ -1323,11 +1338,79 @@ def _identity_plan_from_color_final(
     return identity_plan
 
 
+def _copied_trusted_color_score_evidence(
+    *,
+    tournament_audit: Mapping[str, Any],
+    trusted_color_score_evidence: ComponentColorScoreEvidence | None,
+) -> ComponentColorScoreEvidence | None:
+    """Snapshot caller-owned score inputs and require exact H1 registry cover."""
+
+    raw_color = tournament_audit.get("component_color_tournament")
+    if not isinstance(raw_color, Mapping):
+        return None
+    if not isinstance(trusted_color_score_evidence, ComponentColorScoreEvidence):
+        raise ComponentMdlTournamentError(
+            "component color authorization requires trusted score evidence"
+        )
+    raw_components = raw_color.get("components")
+    if not isinstance(raw_components, list):
+        raise ComponentMdlTournamentError(
+            "component color tournament has no component records"
+        )
+    component_ids: list[str] = []
+    for raw_component in raw_components:
+        component_id = (
+            raw_component.get("component_id")
+            if isinstance(raw_component, Mapping)
+            else None
+        )
+        if (
+            not isinstance(component_id, str)
+            or not component_id
+            or component_id in component_ids
+        ):
+            raise ComponentMdlTournamentError(
+                "component color tournament has invalid component evidence cover"
+            )
+        component_ids.append(component_id)
+
+    raw_evidence = trusted_color_score_evidence.evidence
+    raw_spatial = trusted_color_score_evidence.spatial_mapping_report
+    raw_h0_registry = trusted_color_score_evidence.h0_rendered_registry
+    raw_h1_registries = (
+        trusted_color_score_evidence.h1_rendered_registries_by_component
+    )
+    if (
+        not isinstance(raw_evidence, Mapping)
+        or not isinstance(raw_spatial, Mapping)
+        or not isinstance(raw_h0_registry, Mapping)
+        or not isinstance(raw_h1_registries, Mapping)
+        or set(raw_h1_registries) != set(component_ids)
+        or any(
+            not isinstance(raw_h1_registries.get(component_id), Mapping)
+            for component_id in component_ids
+        )
+    ):
+        raise ComponentMdlTournamentError(
+            "trusted H1 rendered registries do not exactly cover color components"
+        )
+    return ComponentColorScoreEvidence(
+        evidence=copy.deepcopy(dict(raw_evidence)),
+        spatial_mapping_report=copy.deepcopy(dict(raw_spatial)),
+        h0_rendered_registry=copy.deepcopy(dict(raw_h0_registry)),
+        h1_rendered_registries_by_component={
+            component_id: copy.deepcopy(dict(raw_h1_registries[component_id]))
+            for component_id in component_ids
+        },
+    )
+
+
 def _component_color_authorizations(
     *,
     final_plan: Mapping[str, Any],
     assignments: Mapping[str, Mapping[str, Any]],
     tournament_audit: Mapping[str, Any],
+    trusted_color_score_evidence: ComponentColorScoreEvidence | None,
 ) -> tuple[dict[str, Mapping[str, Any]], int]:
     """Validate the only contract that may authorize final color parameters."""
 
@@ -1345,6 +1428,10 @@ def _component_color_authorizations(
     if raw_color.get("schema_version") != COLOR_SCHEMA_VERSION:
         raise ComponentMdlTournamentError(
             "component color tournament has an unsupported schema"
+        )
+    if trusted_color_score_evidence is None:
+        raise ComponentMdlTournamentError(
+            "component color authorization requires trusted score evidence"
         )
     source_identity_plan_sha256 = _sha256_text(
         raw_color.get("source_identity_plan_sha256"),
@@ -1368,6 +1455,14 @@ def _component_color_authorizations(
         raw_color.get("maximum_member_regression"),
         "component color maximum member regression",
     )
+    if (
+        minimum_score_improvement != COLOR_MINIMUM_SCORE_IMPROVEMENT
+        or maximum_member_regression != COLOR_MAXIMUM_MEMBER_REGRESSION
+    ):
+        raise ComponentMdlTournamentError(
+            "component color tournament thresholds differ from the approved "
+            "production contract"
+        )
     if (
         tournament_audit.get("identity_final_plan_sha256")
         != source_identity_plan_sha256
@@ -1449,6 +1544,32 @@ def _component_color_authorizations(
             raise ComponentMdlTournamentError(
                 "component color record lacks replayable H0/H1 scores"
             )
+        trusted_h0_score = score_component_render(
+            component_id=component_id,
+            member_part_ids=members,
+            evidence=trusted_color_score_evidence.evidence,
+            spatial_mapping_report=(
+                trusted_color_score_evidence.spatial_mapping_report
+            ),
+            rendered_registry=trusted_color_score_evidence.h0_rendered_registry,
+        )
+        trusted_h1_score = score_component_render(
+            component_id=component_id,
+            member_part_ids=members,
+            evidence=trusted_color_score_evidence.evidence,
+            spatial_mapping_report=(
+                trusted_color_score_evidence.spatial_mapping_report
+            ),
+            rendered_registry=(
+                trusted_color_score_evidence.h1_rendered_registries_by_component[
+                    component_id
+                ]
+            ),
+        )
+        if dict(h0_score) != trusted_h0_score or dict(h1_score) != trusted_h1_score:
+            raise ComponentMdlTournamentError(
+                "component color scores do not match trusted render evidence"
+            )
         selection = raw_component.get("selection")
         if not isinstance(selection, Mapping):
             raise ComponentMdlTournamentError(
@@ -1458,8 +1579,8 @@ def _component_color_authorizations(
             component_id=component_id,
             h0_score=h0_score,
             h1_score=h1_score,
-            minimum_score_improvement=minimum_score_improvement,
-            maximum_member_regression=maximum_member_regression,
+            minimum_score_improvement=COLOR_MINIMUM_SCORE_IMPROVEMENT,
+            maximum_member_regression=COLOR_MAXIMUM_MEMBER_REGRESSION,
         )
         if dict(selection) != replayed_selection or (
             replayed_selection["selected_candidate_id"] != selected_candidate_id
@@ -1607,6 +1728,10 @@ def _component_color_authorizations(
                     != source_identity_plan_sha256
                     or binding.get("parameter_mutation_scope")
                     != "reviewed_color3f_linear_only"
+                    or binding.get("minimum_score_improvement")
+                    != COLOR_MINIMUM_SCORE_IMPROVEMENT
+                    or binding.get("maximum_member_regression")
+                    != COLOR_MAXIMUM_MEMBER_REGRESSION
                     or binding.get("authored_parameter_names")
                     != sorted(normalized_parameters)
                 ):
@@ -1646,6 +1771,7 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
     source_audit: Mapping[str, Any],
     final_plan: Mapping[str, Any],
     tournament_audit: Mapping[str, Any],
+    trusted_color_score_evidence: ComponentColorScoreEvidence | None = None,
 ) -> dict[str, Any]:
     """Bind a Part-ID exact-cover audit to immutable component-MDL winners.
 
@@ -1654,6 +1780,10 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
     material IDs and final-plan hash, while hidden Part-IDs remain unchanged.
     """
 
+    trusted_color_score_evidence = _copied_trusted_color_score_evidence(
+        tournament_audit=tournament_audit,
+        trusted_color_score_evidence=trusted_color_score_evidence,
+    )
     output = copy.deepcopy(dict(source_audit))
     raw_rows = output.get("parts")
     if not isinstance(raw_rows, list):
@@ -1670,6 +1800,7 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
             final_plan=final_plan,
             assignments=assignments,
             tournament_audit=tournament_audit,
+            trusted_color_score_evidence=trusted_color_score_evidence,
         )
     )
     rows_by_part: dict[str, dict[str, Any]] = {}
@@ -1813,8 +1944,11 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
 
 
 __all__ = [
+    "COLOR_MAXIMUM_MEMBER_REGRESSION",
+    "COLOR_MINIMUM_SCORE_IMPROVEMENT",
     "COLOR_SCHEMA_VERSION",
     "SCHEMA_VERSION",
+    "ComponentColorScoreEvidence",
     "ComponentMdlTournamentError",
     "build_component_candidate_plan",
     "build_component_color_candidate_plan",
