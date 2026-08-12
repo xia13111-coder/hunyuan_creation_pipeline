@@ -1547,6 +1547,34 @@ def _validate_semantic_hybrid_invocation(
         )
 
 
+def _validate_semantic_hybrid_pre_destination(
+    *,
+    config: Any,
+    inference_mode: str,
+    output_dir: Path | None,
+    require_complete_coverage: bool,
+    allow_policy_material_fallback: bool,
+) -> None:
+    """Reject invalid hybrid invocations before output/resume side effects."""
+
+    _validate_semantic_hybrid_invocation(
+        config=config,
+        inference_mode=inference_mode,
+        partial_live_resume=False,
+        require_complete_coverage=require_complete_coverage,
+        allow_policy_material_fallback=allow_policy_material_fallback,
+    )
+    if (
+        _semantic_hybrid_enabled(config)
+        and output_dir is not None
+        and output_dir.exists()
+    ):
+        raise FileExistsError(
+            "semantic_hybrid requires a fresh output directory and never "
+            f"resumes an existing run: {output_dir}"
+        )
+
+
 def _run_policy_part_id_stage(
     context: VisualMaterialPipelineContext,
     *,
@@ -8501,6 +8529,35 @@ def run_assign_visual_materials_job(
             "STEP/STP reference-image material assignment requires explicit "
             "--acknowledge-mvinverse-noncommercial"
         )
+
+    def resume_validator(
+        destination: Path,
+        loaded_references: tuple[tuple[str, Path], ...],
+        loaded_config: VisualMaterialConfig,
+        loaded_foreground: Path | None,
+    ) -> bool:
+        if _semantic_hybrid_enabled(loaded_config):
+            return False
+        return _verified_partial_live_resume_available(
+            destination,
+            loaded_references,
+            loaded_config,
+            loaded_foreground,
+        )
+
+    def pre_destination_validator(
+        loaded_config: VisualMaterialConfig,
+        loaded_mode: str,
+        destination: Path | None,
+    ) -> None:
+        _validate_semantic_hybrid_pre_destination(
+            config=loaded_config,
+            inference_mode=loaded_mode,
+            output_dir=destination,
+            require_complete_coverage=require_complete_coverage,
+            allow_policy_material_fallback=allow_policy_material_fallback,
+        )
+
     context = VisualMaterialPipelineContext.create(
         source_usd=source_usd,
         source_cad=source_cad,
@@ -8513,7 +8570,8 @@ def run_assign_visual_materials_job(
         config_loader=_config_loader,
         isaac_python_resolver=_isaac_python_resolver,
         reference_parser=_reference_parser,
-        resume_validator=_verified_partial_live_resume_available,
+        resume_validator=resume_validator,
+        pre_destination_validator=pre_destination_validator,
     )
     source = context.source
     resolved_source_cad = context.source_cad

@@ -100,6 +100,155 @@ def test_current_pipeline_mode_keeps_hybrid_invocation_gate_disabled() -> None:
     )
 
 
+def _minimal_orchestrator_job_dependencies(
+    tmp_path: Path,
+    *,
+    pipeline_mode: str,
+) -> tuple[Path, Path, SimpleNamespace]:
+    source = tmp_path / "asset.usda"
+    source.write_text("#usda 1.0\n", encoding="utf-8")
+    isaac = tmp_path / "isaac-python"
+    isaac.write_text("#!/bin/sh\n", encoding="utf-8")
+    isaac.chmod(0o755)
+    config = SimpleNamespace(material_selection_pipeline_mode=pipeline_mode)
+    return source, isaac, config
+
+
+def test_invalid_semantic_hybrid_rejects_before_output_or_resume_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source, isaac, config = _minimal_orchestrator_job_dependencies(
+        tmp_path,
+        pipeline_mode="semantic_hybrid",
+    )
+    output = tmp_path / "hybrid-output"
+    resume_calls: list[Path] = []
+    monkeypatch.setenv("ASSET_PIPELINE_DISABLE_CPU_STABILITY_GUARD", "1")
+    monkeypatch.setattr(
+        orchestrator,
+        "_verified_partial_live_resume_available",
+        lambda destination, *_args: resume_calls.append(destination) or False,
+    )
+
+    with pytest.raises(ValueError, match="fresh fail-closed contract"):
+        orchestrator.run_assign_visual_materials_job(
+            source_usd=str(source),
+            references=(),
+            output_dir=str(output),
+            inference_mode="live",
+            acknowledge_mvinverse_noncommercial=True,
+            require_complete_coverage=False,
+            allow_policy_material_fallback=False,
+            _config_loader=lambda _path: config,
+            _isaac_python_resolver=lambda: isaac,
+            _reference_parser=lambda _references: (),
+            _default_config_path=tmp_path / "unused-config.json",
+        )
+
+    assert not output.exists()
+    assert resume_calls == []
+
+
+def test_semantic_hybrid_rejects_existing_output_without_resume_validation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source, isaac, config = _minimal_orchestrator_job_dependencies(
+        tmp_path,
+        pipeline_mode="semantic_hybrid",
+    )
+    output = tmp_path / "hybrid-output"
+    output.mkdir()
+    resume_calls: list[Path] = []
+    monkeypatch.setenv("ASSET_PIPELINE_DISABLE_CPU_STABILITY_GUARD", "1")
+    monkeypatch.setattr(
+        orchestrator,
+        "_verified_partial_live_resume_available",
+        lambda destination, *_args: resume_calls.append(destination) or True,
+    )
+
+    with pytest.raises(FileExistsError, match="never resumes"):
+        orchestrator.run_assign_visual_materials_job(
+            source_usd=str(source),
+            references=(),
+            output_dir=str(output),
+            inference_mode="live",
+            acknowledge_mvinverse_noncommercial=True,
+            require_complete_coverage=True,
+            allow_policy_material_fallback=True,
+            _config_loader=lambda _path: config,
+            _isaac_python_resolver=lambda: isaac,
+            _reference_parser=lambda _references: (),
+            _default_config_path=tmp_path / "unused-config.json",
+        )
+
+    assert resume_calls == []
+
+
+@pytest.mark.parametrize(
+    ("pipeline_mode", "existing_output", "resume_available"),
+    [
+        ("semantic_hybrid", False, False),
+        ("current", True, True),
+    ],
+)
+def test_valid_fresh_hybrid_and_current_resume_reach_first_pipeline_stage(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    pipeline_mode: str,
+    existing_output: bool,
+    resume_available: bool,
+) -> None:
+    source, isaac, config = _minimal_orchestrator_job_dependencies(
+        tmp_path,
+        pipeline_mode=pipeline_mode,
+    )
+    output = tmp_path / f"{pipeline_mode}-output"
+    if existing_output:
+        output.mkdir()
+    resume_calls: list[Path] = []
+    stage_calls: list[Path] = []
+
+    class FirstStageReached(RuntimeError):
+        pass
+
+    def resume_spy(destination: Path, *_args: object) -> bool:
+        resume_calls.append(destination)
+        return resume_available
+
+    def stage_spy(context: object, **_kwargs: object) -> object:
+        stage_calls.append(context.destination)  # type: ignore[attr-defined]
+        raise FirstStageReached
+
+    monkeypatch.setenv("ASSET_PIPELINE_DISABLE_CPU_STABILITY_GUARD", "1")
+    monkeypatch.setattr(
+        orchestrator,
+        "_verified_partial_live_resume_available",
+        resume_spy,
+    )
+    monkeypatch.setattr(orchestrator, "prepare_source_evidence", stage_spy)
+
+    with pytest.raises(FirstStageReached):
+        orchestrator.run_assign_visual_materials_job(
+            source_usd=str(source),
+            references=(),
+            output_dir=str(output),
+            inference_mode="live",
+            acknowledge_mvinverse_noncommercial=True,
+            require_complete_coverage=pipeline_mode == "semantic_hybrid",
+            allow_policy_material_fallback=pipeline_mode == "semantic_hybrid",
+            _config_loader=lambda _path: config,
+            _isaac_python_resolver=lambda: isaac,
+            _reference_parser=lambda _references: (),
+            _default_config_path=tmp_path / "unused-config.json",
+        )
+
+    assert output.is_dir()
+    assert stage_calls == [output.resolve()]
+    assert resume_calls == ([] if pipeline_mode == "semantic_hybrid" else [output])
+
+
 def _absolute_quality(statuses: list[str], aggregate_status: str) -> dict[str, object]:
     reference_count = len(statuses)
     return {
