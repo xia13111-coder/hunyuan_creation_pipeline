@@ -610,26 +610,45 @@ class ComponentMdlTournamentTests(unittest.TestCase):
                 h1_score=tampered,
             )
 
-    def test_rebind_accepts_only_exact_hash_bound_component_color_h1(self) -> None:
+    def _component_color_rebind_fixture(
+        self,
+    ) -> tuple[dict, dict, dict, dict]:
         catalog = self._strict_catalog()
         matte = "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte"
-        identity_plan = self._plan()
-        for assignment in identity_plan["assignments"][:2]:
-            assignment["material_id"] = matte
-            assignment.pop("parameters", None)
-        color_plan = build_component_color_candidate_plan(
+        base_plan = self._plan()
+        member_semantics = self._member_semantics()
+        identity_plan = build_component_candidate_plan(
+            source_plan=base_plan,
+            component_id="AC_paint",
+            member_part_ids=["P0001", "P0002"],
+            material_id=matte,
+            member_material_semantics=member_semantics,
+            catalog_materials_by_id=catalog,
+        )
+        color_candidate_plan = build_component_color_candidate_plan(
             source_plan=identity_plan,
             component_id="AC_paint",
             member_part_ids=["P0001", "P0002"],
             material_id=matte,
             target_srgb=[0.2, 0.45, 0.25],
-            member_material_semantics=self._member_semantics(),
+            member_material_semantics=member_semantics,
             catalog_materials_by_id=catalog,
         )
+        color_plan = json.loads(json.dumps(identity_plan))
+        candidate_by_part = {
+            row["part_id"]: row for row in color_candidate_plan["assignments"]
+        }
+        for index, assignment in enumerate(color_plan["assignments"]):
+            if assignment["part_id"] in {"P0001", "P0002"}:
+                color_plan["assignments"][index] = json.loads(
+                    json.dumps(candidate_by_part[assignment["part_id"]])
+                )
+        h0_score = self._component_score("AC_paint", 0.4, 0.4)
+        h1_score = self._component_score("AC_paint", 0.45, 0.40)
         selection = select_component_color_winner(
             component_id="AC_paint",
-            h0_score=self._component_score("AC_paint", 0.4, 0.4),
-            h1_score=self._component_score("AC_paint", 0.45, 0.40),
+            h0_score=h0_score,
+            h1_score=h1_score,
         )
         parameters = color_plan["assignments"][0]["parameters"]
         source_audit = {
@@ -661,20 +680,43 @@ class ComponentMdlTournamentTests(unittest.TestCase):
                 "exact_cover": True,
             },
         }
+        normalized_semantics = (
+            identity_plan["assignments"][0]["provenance"]
+            ["appearance_component_actual_mdl_candidate"]
+            ["semantic_compatibility_gate"]
+            ["member_material_semantics"]
+        )
         tournament_audit = {
+            "identity_final_plan_sha256": self._sha256(identity_plan),
+            "final_plan_sha256": self._sha256(color_plan),
             "components": [
                 {
                     "component_id": "AC_paint",
                     "member_part_ids": ["P0001", "P0002"],
-                    "baseline_material_id": matte,
+                    "baseline_material_id": (
+                        "mdl:Metals/Steel_Cast.mdl#Steel_Cast"
+                    ),
                     "selected_material_id": matte,
-                    "selection_status": "BASELINE_RETAINED",
+                    "selection_status": "ACTUAL_CAD_RENDER_WINNER",
+                    "semantic_contract": {
+                        "schema_version": "qwen-component-surface-consensus/v1",
+                        "component_id": "AC_paint",
+                        "member_part_ids": ["P0001", "P0002"],
+                        "member_material_semantics": normalized_semantics,
+                        "member_material_semantics_sha256": self._sha256(
+                            normalized_semantics
+                        ),
+                    },
                 }
             ],
             "component_color_tournament": {
                 "schema_version": "qwen-appearance-component-color-tournament/v1",
                 "source_identity_plan_sha256": self._sha256(identity_plan),
                 "final_plan_sha256": self._sha256(color_plan),
+                "minimum_score_improvement": 0.015,
+                "maximum_member_regression": 0.03,
+                "candidate_count": 1,
+                "h1_winner_count": 1,
                 "components": [
                     {
                         "component_id": "AC_paint",
@@ -683,17 +725,33 @@ class ComponentMdlTournamentTests(unittest.TestCase):
                         "selected_candidate_id": "H1",
                         "parameters": parameters,
                         "source_plan_sha256": self._sha256(identity_plan),
-                        "color_candidate_plan_sha256": self._sha256(color_plan),
+                        "color_candidate_plan_sha256": self._sha256(
+                            color_candidate_plan
+                        ),
                         "selection": selection,
+                        "h0_score": h0_score,
+                        "h1_score": h1_score,
                     }
                 ],
             },
         }
+        return source_audit, identity_plan, color_plan, tournament_audit
+
+    def _reseal_final_plan_hashes(self, plan: dict, tournament_audit: dict) -> None:
+        digest = self._sha256(plan)
+        tournament_audit["final_plan_sha256"] = digest
+        tournament_audit["component_color_tournament"]["final_plan_sha256"] = digest
+
+    def test_rebind_accepts_only_exact_hash_bound_component_color_h1(self) -> None:
+        source_audit, _identity_plan, color_plan, tournament_audit = (
+            self._component_color_rebind_fixture()
+        )
         rebound = rebind_part_id_material_audit_for_component_mdl_tournament(
             source_audit=source_audit,
             final_plan=color_plan,
             tournament_audit=tournament_audit,
         )
+        parameters = color_plan["assignments"][0]["parameters"]
         by_part = {row["part_id"]: row for row in rebound["parts"]}
         self.assertEqual(by_part["P0001"]["parameters"], parameters)
         self.assertTrue(
@@ -726,12 +784,133 @@ class ComponentMdlTournamentTests(unittest.TestCase):
         ] = [1.0, 0.0, 0.0]
         with self.assertRaisesRegex(
             ComponentMdlTournamentError,
-            "differ from their color authorization",
+            "target, parameters, or semantic payload failed replay",
         ):
             rebind_part_id_material_audit_for_component_mdl_tournament(
                 source_audit=source_audit,
                 final_plan=color_plan,
                 tournament_audit=tampered,
+            )
+
+    def test_rebind_replays_scores_and_rejects_low_score_fake_h1_winner(self) -> None:
+        source_audit, _identity_plan, color_plan, audit = (
+            self._component_color_rebind_fixture()
+        )
+        record = audit["component_color_tournament"]["components"][0]
+        record["h0_score"] = self._component_score("AC_paint", 0.9, 0.9)
+        record["h1_score"] = self._component_score("AC_paint", 0.1, 0.1)
+        # Reseal the two payload hashes while retaining the forged H1 outcome.
+        record["selection"]["h0_score_sha256"] = self._sha256(record["h0_score"])
+        record["selection"]["h1_score_sha256"] = self._sha256(record["h1_score"])
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "deterministic score replay",
+        ):
+            rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
+            )
+
+    def test_rebind_rejects_target_parameter_mismatch_after_hash_reseal(self) -> None:
+        source_audit, _identity_plan, color_plan, audit = (
+            self._component_color_rebind_fixture()
+        )
+        for assignment in color_plan["assignments"][:2]:
+            assignment["provenance"]["appearance_component_color_candidate"][
+                "target_color_srgb"
+            ] = [1.0, 0.0, 0.0]
+        self._reseal_final_plan_hashes(color_plan, audit)
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "target, parameters, or semantic payload failed replay",
+        ):
+            rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
+            )
+
+    def test_rebind_rejects_catalog_payload_and_hash_reseal(self) -> None:
+        source_audit, _identity_plan, color_plan, audit = (
+            self._component_color_rebind_fixture()
+        )
+        for assignment in color_plan["assignments"][:2]:
+            binding = assignment["provenance"][
+                "appearance_component_color_candidate"
+            ]
+            binding["catalog_material_record"]["family"] = "glass"
+            binding["catalog_material_record_sha256"] = self._sha256(
+                binding["catalog_material_record"]
+            )
+        self._reseal_final_plan_hashes(color_plan, audit)
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "semantic payload failed replay",
+        ):
+            rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
+            )
+
+    def test_rebind_rejects_semantics_payload_and_hash_reseal(self) -> None:
+        source_audit, _identity_plan, color_plan, audit = (
+            self._component_color_rebind_fixture()
+        )
+        for assignment in color_plan["assignments"][:2]:
+            identity_gate = (
+                assignment["provenance"]
+                ["appearance_component_actual_mdl_candidate"]
+                ["semantic_compatibility_gate"]
+            )
+            identity_gate["member_material_semantics"]["P0001"]["confidence"] = 0.2
+            identity_gate["member_material_semantics_sha256"] = self._sha256(
+                identity_gate["member_material_semantics"]
+            )
+        # Reconstruct and reseal the modified identity hash just as an attacker
+        # would; the independent identity semantic contract must still catch it.
+        reconstructed = json.loads(json.dumps(color_plan))
+        for assignment in reconstructed["assignments"][:2]:
+            assignment.pop("parameters", None)
+            assignment["provenance"].pop(
+                "appearance_component_color_candidate", None
+            )
+        identity_digest = self._sha256(reconstructed)
+        audit["identity_final_plan_sha256"] = identity_digest
+        color = audit["component_color_tournament"]
+        color["source_identity_plan_sha256"] = identity_digest
+        color["components"][0]["source_plan_sha256"] = identity_digest
+        for assignment in color_plan["assignments"][:2]:
+            assignment["provenance"]["appearance_component_color_candidate"][
+                "source_plan_sha256"
+            ] = identity_digest
+        self._reseal_final_plan_hashes(color_plan, audit)
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "identity audit and assignment semantics disagree",
+        ):
+            rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
+            )
+
+    def test_rebind_rebuilds_and_rejects_tampered_candidate_plan_hash(self) -> None:
+        source_audit, _identity_plan, color_plan, audit = (
+            self._component_color_rebind_fixture()
+        )
+        audit["component_color_tournament"]["components"][0][
+            "color_candidate_plan_sha256"
+        ] = "0" * 64
+        with self.assertRaisesRegex(
+            ComponentMdlTournamentError,
+            "candidate plan hash failed deterministic rebuild",
+        ):
+            rebind_part_id_material_audit_for_component_mdl_tournament(
+                source_audit=source_audit,
+                final_plan=color_plan,
+                tournament_audit=audit,
             )
 
     def test_rebinds_part_id_audit_after_component_winner(self) -> None:
