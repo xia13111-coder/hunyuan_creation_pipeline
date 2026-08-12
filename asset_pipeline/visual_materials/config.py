@@ -19,6 +19,7 @@ QUALITY_LIGHTING_PROFILES = frozenset({"geometry", "material-neutral"})
 MATERIAL_SELECTION_OBJECTIVES = frozenset(
     {"semantic_compatible_visual", "visual_similarity"}
 )
+MATERIAL_SELECTION_PIPELINE_MODES = frozenset({"current", "semantic_hybrid"})
 MATERIAL_ASSIGNMENT_UNITS = frozenset({"palette_group", "part_id"})
 MATERIAL_PARAMETER_CANDIDATE_MODES = frozenset(
     {"disabled", "evidence_gated_h0_h1"}
@@ -103,6 +104,7 @@ class VisualMaterialConfig:
     siglip_top_k: int
     retrieval_final_top_k: int
     retrieval_batch_size: int
+    material_selection_pipeline_mode: str = "current"
     material_assignment_unit: str = "palette_group"
     quality_lighting_profile: str = "material-neutral"
     immutable_mdl_after_selection: bool = False
@@ -434,6 +436,7 @@ def load_visual_material_config(
         optional=frozenset(
             {
                 "root_scope",
+                "selection_pipeline_mode",
                 "immutable_after_selection",
                 "selection_objective",
                 "assignment_unit",
@@ -555,6 +558,57 @@ def load_visual_material_config(
             "config.materials.selection_objective must be one of "
             f"{sorted(MATERIAL_SELECTION_OBJECTIVES)}"
         )
+    material_selection_pipeline_mode = require_choice(
+        materials.get("selection_pipeline_mode", "current"),
+        "config.materials.selection_pipeline_mode",
+        MATERIAL_SELECTION_PIPELINE_MODES,
+    )
+    material_assignment_unit = require_choice(
+        materials.get("assignment_unit", "palette_group"),
+        "config.materials.assignment_unit",
+        MATERIAL_ASSIGNMENT_UNITS,
+    )
+    immutable_mdl_after_selection = require_bool(
+        materials.get("immutable_after_selection", False),
+        "config.materials.immutable_after_selection",
+    )
+    material_parameter_candidate_mode = require_choice(
+        materials.get("parameter_candidate_mode", "disabled"),
+        "config.materials.parameter_candidate_mode",
+        MATERIAL_PARAMETER_CANDIDATE_MODES,
+    )
+    exact_mdl_tournament_max_candidates = require_at_least_two(
+        materials.get("exact_mdl_tournament_max_candidates", 12),
+        "config.materials.exact_mdl_tournament_max_candidates",
+    )
+    if material_selection_pipeline_mode == "semantic_hybrid":
+        required_hybrid_values = {
+            "assignment_unit": (material_assignment_unit, "part_id"),
+            "immutable_after_selection": (immutable_mdl_after_selection, False),
+            "parameter_candidate_mode": (
+                material_parameter_candidate_mode,
+                "evidence_gated_h0_h1",
+            ),
+            "selection_objective": (
+                material_selection_objective,
+                "semantic_compatible_visual",
+            ),
+            "exact_mdl_tournament_max_candidates": (
+                exact_mdl_tournament_max_candidates,
+                3,
+            ),
+        }
+        mismatches = [
+            f"{name}={actual!r} (required {expected!r})"
+            for name, (actual, expected) in required_hybrid_values.items()
+            if actual != expected
+        ]
+        if mismatches:
+            raise ValueError(
+                "config.materials.selection_pipeline_mode='semantic_hybrid' "
+                "requires the bounded semantic/H0-H1 contract: "
+                + ", ".join(mismatches)
+            )
     siglip_top_k = require_at_least_two(
         retrieval.get("siglip_top_k"),
         "config.retrieval.siglip_top_k",
@@ -843,25 +897,12 @@ def load_visual_material_config(
             retrieval.get("batch_size"),
             "config.retrieval.batch_size",
         ),
-        material_assignment_unit=require_choice(
-            materials.get("assignment_unit", "palette_group"),
-            "config.materials.assignment_unit",
-            MATERIAL_ASSIGNMENT_UNITS,
-        ),
+        material_selection_pipeline_mode=material_selection_pipeline_mode,
+        material_assignment_unit=material_assignment_unit,
         quality_lighting_profile=quality_lighting_profile,
-        immutable_mdl_after_selection=require_bool(
-            materials.get("immutable_after_selection", False),
-            "config.materials.immutable_after_selection",
-        ),
-        material_parameter_candidate_mode=require_choice(
-            materials.get("parameter_candidate_mode", "disabled"),
-            "config.materials.parameter_candidate_mode",
-            MATERIAL_PARAMETER_CANDIDATE_MODES,
-        ),
-        exact_mdl_tournament_max_candidates=require_at_least_two(
-            materials.get("exact_mdl_tournament_max_candidates", 12),
-            "config.materials.exact_mdl_tournament_max_candidates",
-        ),
+        immutable_mdl_after_selection=immutable_mdl_after_selection,
+        material_parameter_candidate_mode=material_parameter_candidate_mode,
+        exact_mdl_tournament_max_candidates=exact_mdl_tournament_max_candidates,
         exact_mdl_tournament_all_groups=require_bool(
             materials.get("exact_mdl_tournament_all_groups", True),
             "config.materials.exact_mdl_tournament_all_groups",
@@ -1011,6 +1052,7 @@ __all__ = [
     "FINAL_VISUAL_GATE_DEFAULTS",
     "LOCAL_INFERENCE_DEVICES",
     "MATERIAL_SELECTION_OBJECTIVES",
+    "MATERIAL_SELECTION_PIPELINE_MODES",
     "QWEN_MODEL_FAMILIES",
     "VisualMaterialConfig",
     "canonical_sha256",
