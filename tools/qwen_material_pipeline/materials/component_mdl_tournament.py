@@ -16,9 +16,12 @@ import copy
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .part_id_parameter_tournament import (
@@ -41,6 +44,9 @@ from .tuning import (
 
 SCHEMA_VERSION = "qwen-appearance-component-actual-mdl-tournament/v1"
 COLOR_SCHEMA_VERSION = "qwen-appearance-component-color-tournament/v1"
+COLOR_ARTIFACT_BINDING_SCHEMA_VERSION = (
+    "qwen-appearance-component-color-render-artifact-binding/v1"
+)
 COLOR_MINIMUM_SCORE_IMPROVEMENT = 0.015
 COLOR_MAXIMUM_MEMBER_REGRESSION = 0.03
 
@@ -50,9 +56,29 @@ class ComponentMdlTournamentError(ValueError):
 
 
 @dataclass(frozen=True)
-class ComponentColorScoreEvidence:
-    """Caller-owned render inputs used to replay every component color score."""
+class ComponentColorRenderArtifactPaths:
+    """Paths that prove one color candidate was applied and rendered."""
 
+    plan: str | Path
+    apply_plan: str | Path
+    apply_report: str | Path
+    look_usd: str | Path
+    rendered_registry: str | Path
+
+
+@dataclass(frozen=True)
+class ComponentColorScoreEvidence:
+    """Caller-owned capability used to replay scores from immutable artifacts."""
+
+    evidence: Mapping[str, Any]
+    spatial_mapping_report: Mapping[str, Any]
+    artifact_root: str | Path
+    h0_artifact: ComponentColorRenderArtifactPaths
+    h1_artifacts_by_component: Mapping[str, ComponentColorRenderArtifactPaths]
+
+
+@dataclass(frozen=True)
+class _VerifiedComponentColorScoreEvidence:
     evidence: Mapping[str, Any]
     spatial_mapping_report: Mapping[str, Any]
     h0_rendered_registry: Mapping[str, Any]
@@ -69,6 +95,243 @@ def _canonical_sha256(value: Any) -> str:
             allow_nan=False,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _stable_file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_nlink,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _artifact_root(value: str | Path) -> Path:
+    if not isinstance(value, (str, Path)) or not str(value):
+        raise ComponentMdlTournamentError("component color artifact root is invalid")
+    raw = Path(value).expanduser()
+    if raw.is_symlink():
+        raise ComponentMdlTournamentError(
+            "component color artifact root cannot be a symlink"
+        )
+    try:
+        resolved = raw.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ComponentMdlTournamentError(
+            "component color artifact root cannot be resolved"
+        ) from exc
+    if not resolved.is_dir():
+        raise ComponentMdlTournamentError(
+            "component color artifact root is not a directory"
+        )
+    return resolved
+
+
+def _read_component_color_artifact_file(
+    *,
+    artifact_root: Path,
+    value: str | Path,
+    label: str,
+    json_object: bool,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Read one root-contained regular file once through an O_NOFOLLOW fd."""
+
+    if not isinstance(value, (str, Path)) or not str(value):
+        raise ComponentMdlTournamentError(f"{label} path is invalid")
+    raw = Path(value).expanduser()
+    if raw.is_symlink():
+        raise ComponentMdlTournamentError(f"{label} cannot be a symlink")
+    try:
+        resolved = raw.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ComponentMdlTournamentError(f"{label} cannot be resolved") from exc
+    if not resolved.is_relative_to(artifact_root):
+        raise ComponentMdlTournamentError(
+            f"{label} is outside the component color artifact root"
+        )
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(resolved, flags)
+    except OSError as exc:
+        raise ComponentMdlTournamentError(
+            f"{label} could not be opened as a trusted artifact"
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise ComponentMdlTournamentError(
+                f"{label} must be a single-link regular file"
+            )
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        path_after = os.stat(resolved, follow_symlinks=False)
+    except OSError as exc:
+        raise ComponentMdlTournamentError(
+            f"{label} changed while it was being read"
+        ) from exc
+    expected_identity = _stable_file_identity(before)
+    if (
+        _stable_file_identity(after) != expected_identity
+        or _stable_file_identity(path_after) != expected_identity
+    ):
+        raise ComponentMdlTournamentError(
+            f"{label} changed while it was being read"
+        )
+
+    file_binding: dict[str, Any] = {
+        "path": str(resolved),
+        "sha256": digest.hexdigest(),
+    }
+    if not json_object:
+        return file_binding, None
+    try:
+        document = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ComponentMdlTournamentError(
+            f"{label} is not valid UTF-8 JSON"
+        ) from exc
+    if not isinstance(document, dict):
+        raise ComponentMdlTournamentError(f"{label} must contain a JSON object")
+    try:
+        file_binding["canonical_sha256"] = _canonical_sha256(document)
+    except (TypeError, ValueError) as exc:
+        raise ComponentMdlTournamentError(
+            f"{label} cannot be canonically sealed"
+        ) from exc
+    return file_binding, document
+
+
+def _reported_artifact_path(
+    value: Any,
+    *,
+    expected: Path,
+    label: str,
+) -> None:
+    if not isinstance(value, str) or not value:
+        raise ComponentMdlTournamentError(f"{label} path is invalid")
+    try:
+        reported = Path(value).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ComponentMdlTournamentError(f"{label} path cannot be resolved") from exc
+    if reported != expected:
+        raise ComponentMdlTournamentError(
+            f"{label} does not identify the exact component color Look"
+        )
+
+
+def _load_component_color_render_artifact_binding(
+    *,
+    artifact_root: str | Path,
+    artifact: ComponentColorRenderArtifactPaths,
+    expected_plan_sha256: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(artifact, ComponentColorRenderArtifactPaths):
+        raise ComponentMdlTournamentError(
+            "component color render artifact capability is invalid"
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_plan_sha256):
+        raise ComponentMdlTournamentError(
+            "component color artifact expected plan hash is invalid"
+        )
+    root = _artifact_root(artifact_root)
+    files: dict[str, dict[str, Any]] = {}
+    documents: dict[str, dict[str, Any]] = {}
+    for name, value in (
+        ("plan", artifact.plan),
+        ("apply_plan", artifact.apply_plan),
+        ("apply_report", artifact.apply_report),
+        ("rendered_registry", artifact.rendered_registry),
+    ):
+        binding, document = _read_component_color_artifact_file(
+            artifact_root=root,
+            value=value,
+            label=f"component color {name}",
+            json_object=True,
+        )
+        assert document is not None
+        files[name] = binding
+        documents[name] = document
+    look_binding, _ = _read_component_color_artifact_file(
+        artifact_root=root,
+        value=artifact.look_usd,
+        label="component color look_usd",
+        json_object=False,
+    )
+    files["look_usd"] = look_binding
+
+    plan = documents["plan"]
+    apply_plan = documents["apply_plan"]
+    apply_report = documents["apply_report"]
+    rendered_registry = documents["rendered_registry"]
+    if _canonical_sha256(plan) != expected_plan_sha256:
+        raise ComponentMdlTournamentError(
+            "component color artifact plan hash does not match its candidate"
+        )
+    if plan.get("assignments") != apply_plan.get("assignments"):
+        raise ComponentMdlTournamentError(
+            "component color artifact apply-plan assignments differ from its plan"
+        )
+    apply_plan_sha256 = _canonical_sha256(apply_plan)
+    if apply_report.get("plan_sha256") != apply_plan_sha256:
+        raise ComponentMdlTournamentError(
+            "component color apply report is not bound to its apply plan"
+        )
+    look_path = Path(look_binding["path"])
+    _reported_artifact_path(
+        apply_report.get("output_usd"),
+        expected=look_path,
+        label="component color apply report output",
+    )
+    _reported_artifact_path(
+        rendered_registry.get("asset_usd"),
+        expected=look_path,
+        label="component color rendered registry asset",
+    )
+    if rendered_registry.get("asset_sha256") != look_binding["sha256"]:
+        raise ComponentMdlTournamentError(
+            "component color rendered registry is not hash-bound to its Look"
+        )
+
+    binding = {
+        "schema_version": COLOR_ARTIFACT_BINDING_SCHEMA_VERSION,
+        "artifact_root": str(root),
+        "expected_plan_sha256": expected_plan_sha256,
+        "files": files,
+    }
+    binding["binding_sha256"] = _canonical_sha256(binding)
+    return binding, rendered_registry
+
+
+def build_component_color_render_artifact_binding(
+    *,
+    artifact_root: str | Path,
+    artifact: ComponentColorRenderArtifactPaths,
+    expected_plan_sha256: str,
+) -> dict[str, Any]:
+    """Build the audit binding for one safely read, internally bound render."""
+
+    binding, _rendered_registry = _load_component_color_render_artifact_binding(
+        artifact_root=artifact_root,
+        artifact=artifact,
+        expected_plan_sha256=expected_plan_sha256,
+    )
+    return binding
 
 
 def _assignments(
@@ -1342,8 +1605,8 @@ def _copied_trusted_color_score_evidence(
     *,
     tournament_audit: Mapping[str, Any],
     trusted_color_score_evidence: ComponentColorScoreEvidence | None,
-) -> ComponentColorScoreEvidence | None:
-    """Snapshot caller-owned score inputs and require exact H1 registry cover."""
+) -> _VerifiedComponentColorScoreEvidence | None:
+    """Safely read render artifacts and require exact audit/capability cover."""
 
     raw_color = tournament_audit.get("component_color_tournament")
     if not isinstance(raw_color, Mapping):
@@ -1358,6 +1621,7 @@ def _copied_trusted_color_score_evidence(
             "component color tournament has no component records"
         )
     component_ids: list[str] = []
+    components_by_id: dict[str, Mapping[str, Any]] = {}
     for raw_component in raw_components:
         component_id = (
             raw_component.get("component_id")
@@ -1373,33 +1637,70 @@ def _copied_trusted_color_score_evidence(
                 "component color tournament has invalid component evidence cover"
             )
         component_ids.append(component_id)
+        assert isinstance(raw_component, Mapping)
+        components_by_id[component_id] = raw_component
 
     raw_evidence = trusted_color_score_evidence.evidence
     raw_spatial = trusted_color_score_evidence.spatial_mapping_report
-    raw_h0_registry = trusted_color_score_evidence.h0_rendered_registry
-    raw_h1_registries = (
-        trusted_color_score_evidence.h1_rendered_registries_by_component
-    )
+    artifact_root = trusted_color_score_evidence.artifact_root
+    h0_artifact = trusted_color_score_evidence.h0_artifact
+    h1_artifacts = trusted_color_score_evidence.h1_artifacts_by_component
     if (
         not isinstance(raw_evidence, Mapping)
         or not isinstance(raw_spatial, Mapping)
-        or not isinstance(raw_h0_registry, Mapping)
-        or not isinstance(raw_h1_registries, Mapping)
-        or set(raw_h1_registries) != set(component_ids)
+        or not isinstance(h0_artifact, ComponentColorRenderArtifactPaths)
+        or not isinstance(h1_artifacts, Mapping)
+        or set(h1_artifacts) != set(component_ids)
         or any(
-            not isinstance(raw_h1_registries.get(component_id), Mapping)
+            not isinstance(
+                h1_artifacts.get(component_id),
+                ComponentColorRenderArtifactPaths,
+            )
             for component_id in component_ids
         )
     ):
         raise ComponentMdlTournamentError(
-            "trusted H1 rendered registries do not exactly cover color components"
+            "trusted H1 render artifacts do not exactly cover color components"
         )
-    return ComponentColorScoreEvidence(
+
+    source_identity_plan_sha256 = _sha256_text(
+        raw_color.get("source_identity_plan_sha256"),
+        "component color source identity plan hash",
+    )
+    h0_binding, h0_registry = _load_component_color_render_artifact_binding(
+        artifact_root=artifact_root,
+        artifact=h0_artifact,
+        expected_plan_sha256=source_identity_plan_sha256,
+    )
+    h1_registries: dict[str, Mapping[str, Any]] = {}
+    for component_id in component_ids:
+        record = components_by_id[component_id]
+        candidate_plan_sha256 = _sha256_text(
+            record.get("color_candidate_plan_sha256"),
+            "component color candidate plan hash",
+        )
+        h1_binding, h1_registry = _load_component_color_render_artifact_binding(
+            artifact_root=artifact_root,
+            artifact=h1_artifacts[component_id],
+            expected_plan_sha256=candidate_plan_sha256,
+        )
+        expected_artifacts = {"h0": h0_binding, "h1": h1_binding}
+        candidate_artifacts = record.get("candidate_artifacts")
+        if (
+            not isinstance(candidate_artifacts, Mapping)
+            or dict(candidate_artifacts) != expected_artifacts
+        ):
+            raise ComponentMdlTournamentError(
+                "component color audit artifacts do not match trusted files"
+            )
+        h1_registries[component_id] = copy.deepcopy(h1_registry)
+
+    return _VerifiedComponentColorScoreEvidence(
         evidence=copy.deepcopy(dict(raw_evidence)),
         spatial_mapping_report=copy.deepcopy(dict(raw_spatial)),
-        h0_rendered_registry=copy.deepcopy(dict(raw_h0_registry)),
+        h0_rendered_registry=copy.deepcopy(h0_registry),
         h1_rendered_registries_by_component={
-            component_id: copy.deepcopy(dict(raw_h1_registries[component_id]))
+            component_id: h1_registries[component_id]
             for component_id in component_ids
         },
     )
@@ -1410,7 +1711,7 @@ def _component_color_authorizations(
     final_plan: Mapping[str, Any],
     assignments: Mapping[str, Mapping[str, Any]],
     tournament_audit: Mapping[str, Any],
-    trusted_color_score_evidence: ComponentColorScoreEvidence | None,
+    trusted_color_score_evidence: _VerifiedComponentColorScoreEvidence | None,
 ) -> tuple[dict[str, Mapping[str, Any]], int]:
     """Validate the only contract that may authorize final color parameters."""
 
@@ -1944,14 +2245,17 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
 
 
 __all__ = [
+    "COLOR_ARTIFACT_BINDING_SCHEMA_VERSION",
     "COLOR_MAXIMUM_MEMBER_REGRESSION",
     "COLOR_MINIMUM_SCORE_IMPROVEMENT",
     "COLOR_SCHEMA_VERSION",
     "SCHEMA_VERSION",
+    "ComponentColorRenderArtifactPaths",
     "ComponentColorScoreEvidence",
     "ComponentMdlTournamentError",
     "build_component_candidate_plan",
     "build_component_color_candidate_plan",
+    "build_component_color_render_artifact_binding",
     "score_component_render",
     "select_component_color_winner",
     "select_component_mdl_winner",
