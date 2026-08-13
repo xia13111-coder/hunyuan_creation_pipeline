@@ -6,12 +6,10 @@ import pytest
 from qwen_material_pipeline.evidence.pose_camera_joint_refine import (
     BASELINE_SCALES,
     PARAMETER_NAMES,
-    _interpolate_camera_seed,
     full_resolution_spec,
     joint_candidate_spec,
     joint_directions,
     select_final_candidate,
-    seal_multiview_rigid_anchors,
 )
 
 
@@ -40,9 +38,8 @@ def _record(
     score: float,
     anchor: bool = False,
     consensus: bool = True,
-    anchor_score: float | None = None,
 ) -> dict:
-    result = {
+    return {
         "view_id": view_id,
         "projection_iou": iou,
         "boundary_p95_px": boundary,
@@ -53,14 +50,6 @@ def _record(
             "lineage": {"kind": kind},
         },
     }
-    if anchor_score is not None:
-        result.update(
-            {
-                "fixed_anchor_valid": True,
-                "fixed_anchor_score": anchor_score,
-            }
-        )
-    return result
 
 
 def test_joint_directions_are_dense_deterministic_and_antithetic() -> None:
@@ -186,81 +175,6 @@ def test_select_final_candidate_falls_back_on_regression(candidate: dict) -> Non
 def test_select_final_candidate_requires_one_anchor() -> None:
     with pytest.raises(ValueError, match="exactly one"):
         select_final_candidate([])
-
-
-def test_select_final_candidate_requires_fixed_anchor_gain_when_enabled() -> None:
-    baseline = _record(
-        view_id="baseline",
-        kind="sealed_baseline",
-        iou=0.88,
-        boundary=17.5,
-        score=0.61,
-        anchor=True,
-        anchor_score=0.70,
-    )
-    candidate = _record(
-        view_id="candidate",
-        kind="gigapose",
-        iou=0.881,
-        boundary=17.4,
-        score=0.64,
-        anchor_score=0.699,
-    )
-    decision, selected = select_final_candidate(
-        [baseline, candidate], require_fixed_anchor=True
-    )
-    assert decision == "BASELINE_RETAINED"
-    assert selected["view_id"] == "baseline"
-
-
-def test_seal_multiview_rigid_anchors_keeps_only_repeated_inliers() -> None:
-    def score(inliers: list[str], rows: list[str]) -> dict:
-        return {
-            "rigid_consensus_inlier_part_ids": inliers,
-            "rigid_consensus_part_residuals": [
-                {
-                    "part_id": part_id,
-                    "assembly_subtree": "/Asset/Rigid",
-                    "residual_px": 2.0,
-                    "inside_reference_ratio": 0.95,
-                    "consensus_observable": True,
-                }
-                for part_id in rows
-            ],
-        }
-
-    result = seal_multiview_rigid_anchors(
-        {
-            "front": score(["P1", "P2", "P3", "P4"], ["P1", "P2", "P3", "P4"]),
-            "side": score(["P1", "P2", "P3"], ["P1", "P2", "P3", "P4"]),
-        }
-    )
-
-    assert result["part_ids"] == ["P1", "P2", "P3"]
-    assert result["part_count"] == 3
-    assert result["per_mesh_or_subtree_transform_applied"] is False
-
-
-def test_interpolate_camera_seed_moves_extrinsics_and_intrinsics_together() -> None:
-    center = {
-        **_seed(),
-        "analysis_direction": [0.2, -0.95, 0.24],
-        "analysis_up_axis": [0.0, 0.24, 0.97],
-        "focal_length_mm": 60.0,
-        "distance_multiplier": 3.0,
-        "target_offset_u": 0.1,
-        "principal_point_u": -0.05,
-        "radial_distortion_k1": 0.08,
-    }
-
-    result = _interpolate_camera_seed(_seed(), center, fraction=0.5)
-
-    assert result["analysis_direction"] != _seed()["analysis_direction"]
-    assert result["focal_length_mm"] == pytest.approx(np.sqrt(45.0 * 60.0))
-    assert result["distance_multiplier"] == pytest.approx(np.sqrt(2.15 * 3.0))
-    assert result["target_offset_u"] == pytest.approx(0.05)
-    assert result["principal_point_u"] == pytest.approx(-0.025)
-    assert result["radial_distortion_k1"] == pytest.approx(0.04)
 
 
 def test_full_resolution_spec_discards_search_pixel_anchor() -> None:

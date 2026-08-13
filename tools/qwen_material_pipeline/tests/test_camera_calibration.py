@@ -1405,43 +1405,6 @@ def test_multiview_residual_classification_requires_repeated_rejection() -> None
     assert diagnosis["view_local_mismatch_part_ids"] == ["P0003"]
 
 
-def test_fixed_rigid_anchor_scores_exact_sealed_parts_and_penalizes_missing() -> None:
-    from qwen_material_pipeline.evidence.camera_calibration import (
-        _fixed_rigid_anchor_metrics,
-    )
-
-    observations = [
-        {
-            "part_id": part_id,
-            "stratum": stratum,
-            "projected_pixels": pixels,
-            "residual_px": residual,
-            "inside_reference_ratio": inside,
-        }
-        for part_id, stratum, pixels, residual, inside in (
-            ("P1", "small", 64, 2.0, 0.9),
-            ("P2", "medium", 256, 3.0, 0.8),
-            ("P3", "large", 1024, 4.0, 0.7),
-        )
-    ]
-
-    complete = _fixed_rigid_anchor_metrics(
-        observations=observations,
-        expected_part_ids=["P1", "P2", "P3"],
-        image_shape=(512, 512),
-    )
-    missing = _fixed_rigid_anchor_metrics(
-        observations=observations[:2],
-        expected_part_ids=["P1", "P2", "P3"],
-        image_shape=(512, 512),
-    )
-
-    assert complete["fixed_anchor_valid"] is True
-    assert complete["fixed_anchor_coverage"] == 1.0
-    assert missing["fixed_anchor_coverage"] == pytest.approx(2 / 3)
-    assert missing["fixed_anchor_score"] < complete["fixed_anchor_score"]
-
-
 def test_boundary_metric_detects_pixel_shift() -> None:
     target = np.zeros((128, 128), dtype=np.uint8)
     cv2.rectangle(target, (24, 24), (104, 104), 255, -1)
