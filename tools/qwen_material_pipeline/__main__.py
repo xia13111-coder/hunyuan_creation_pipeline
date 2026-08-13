@@ -120,6 +120,10 @@ COMMANDS: dict[str, CommandSpec] = {
         "qwen_material_pipeline.evidence.assembly_pose",
         "repair coherent local assembly displacement with bounded rigid motion",
     ),
+    "evaluate-assembly-pose-multiview": CommandSpec(
+        "qwen_material_pipeline.scripts.evaluate_multiview_assembly_pose",
+        "validate one assembly-pose correction across sealed cameras",
+    ),
     "appearance-components": CommandSpec(
         "qwen_material_pipeline.evidence.appearance_components",
         "derive conservative photo-supported visual coating components for CAD Part IDs",
