@@ -238,10 +238,6 @@ def test_seal_multiview_rigid_anchors_keeps_only_repeated_inliers() -> None:
 
     assert result["part_ids"] == ["P1", "P2", "P3"]
     assert result["part_count"] == 3
-    assert result["visible_part_ids_by_view"] == {
-        "front": ["P1", "P2", "P3"],
-        "side": ["P1", "P2", "P3"],
-    }
     assert result["per_mesh_or_subtree_transform_applied"] is False
 
 

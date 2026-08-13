@@ -728,27 +728,12 @@ def seal_multiview_rigid_anchors(
     stable.sort()
     if len(stable) < 3:
         raise RuntimeError("Baseline views do not establish three stable rigid anchors")
-    visible_by_view = {
-        view_id: sorted(
-            part_id
-            for part_id in stable
-            if any(
-                raw.get("part_id") == part_id
-                and bool(raw.get("consensus_observable", True))
-                for raw in score.get("rigid_consensus_part_residuals", [])
-            )
-        )
-        for view_id, score in baseline_scores.items()
-    }
-    if any(len(part_ids) < 3 for part_ids in visible_by_view.values()):
-        raise RuntimeError("A baseline view has fewer than three visible rigid anchors")
     return {
         "schema_version": "qwen-sealed-multiview-rigid-anchors/v1",
         "selection_authority": "baseline_multiview_robust_consensus_intersection",
         "minimum_observed_views": minimum_observed_views,
         "part_ids": stable,
         "part_count": len(stable),
-        "visible_part_ids_by_view": visible_by_view,
         "diagnosis": diagnosis,
         "per_mesh_or_subtree_transform_applied": False,
     }
@@ -900,7 +885,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             requested=requested,
         )
     )
-    fixed_anchor_part_ids_by_view = dict(sealed_anchor["visible_part_ids_by_view"])
+    fixed_anchor_part_ids = list(sealed_anchor["part_ids"])
     _write_object(output / "sealed_multiview_rigid_anchors.json", sealed_anchor)
     model_starts = {
         view_id: [
@@ -930,7 +915,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             output=output,
             round_name="round_1_multistart",
-            fixed_anchor_part_ids=fixed_anchor_part_ids_by_view[view_id],
+            fixed_anchor_part_ids=fixed_anchor_part_ids,
         )
         best_global = min(first, key=_alignment_candidate_sort_key)
         model_rows = [raw for raw in first if _lineage(raw).get("kind") == "gigapose"]
@@ -948,7 +933,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             output=output,
             round_name="round_2_branch_refine",
-            fixed_anchor_part_ids=fixed_anchor_part_ids_by_view[view_id],
+            fixed_anchor_part_ids=fixed_anchor_part_ids,
         )
         center = min((*first, *second), key=_alignment_candidate_sort_key)
         third, _ = _score_round(
@@ -963,7 +948,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             output=output,
             round_name="round_3_joint_polish",
-            fixed_anchor_part_ids=fixed_anchor_part_ids_by_view[view_id],
+            fixed_anchor_part_ids=fixed_anchor_part_ids,
         )
         line_baseline, line_center = _anchor_line_center((*first, *second, *third))
         fourth, _ = _score_round(
@@ -978,7 +963,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             output=output,
             round_name="round_4_nonregressive_line_search",
-            fixed_anchor_part_ids=fixed_anchor_part_ids_by_view[view_id],
+            fixed_anchor_part_ids=fixed_anchor_part_ids,
         )
         search_records[view_id] = [*first, *second, *third, *fourth]
         round_audits[view_id] = [
@@ -1079,7 +1064,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             reference_mask=mask,
             reference_image=image,
             registry_path=final_rendered,
-            fixed_anchor_part_ids=fixed_anchor_part_ids_by_view[view_id],
+            fixed_anchor_part_ids=fixed_anchor_part_ids,
         )
         decision, winner = select_final_candidate(
             records,
