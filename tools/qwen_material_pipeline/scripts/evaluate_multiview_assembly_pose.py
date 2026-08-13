@@ -259,11 +259,33 @@ def _viewer(*, output: Path, report: Mapping[str, Any]) -> None:
             f"<figure><img src='assets/{view_id}_after_residual.png'><figcaption>优化后残差</figcaption></figure>"
             "</div></section>"
         )
+    gates = report["gates"]
+    if report["status"] == "PASS":
+        conclusion = (
+            "同一组 3D 装配变换在主视角产生改善，并通过其余视角非退化门禁。"
+        )
+    else:
+        conclusion = (
+            "联合拒绝：主视角 IoU 改善 "
+            f"{float(gates['primary_iou_gain']):+.4f}，但其他视角最坏退化 "
+            f"{float(gates['worst_secondary_iou_regression']):.4f}，超过 "
+            f"{float(gates['maximum_allowed_secondary_iou_regression']):.4f}。"
+            "这说明当前参考照片不能由这一组固定 3D 装配姿态共同解释。"
+        )
+    shutil.copy2(
+        output / "multiview_assembly_pose_report.json",
+        output / "viewer" / "multiview_assembly_pose_report.json",
+    )
+    shutil.copy2(
+        output / "assembly_pose_overrides.json",
+        output / "viewer" / "assembly_pose_overrides.json",
+    )
     page = f"""<!doctype html><html lang='zh-CN'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>通用多视角装配位姿验收</title><style>
 body{{margin:0;background:#0d1117;color:#f0f6fc;font:15px/1.55 system-ui}}main{{width:min(1500px,96vw);margin:auto;padding:28px 0}}p,figcaption{{color:#9da7b3}}.cards,.grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}}article,figure{{margin:0;background:#161b22;border:1px solid #30363d;border-radius:10px;overflow:hidden}}article{{padding:14px}}figure img{{display:block;width:100%}}figcaption{{padding:8px}}b{{color:#56d364}}code{{color:#ffa657}}@media(max-width:900px){{.cards,.grid{{grid-template-columns:1fr 1fr}}}}@media(max-width:560px){{.cards,.grid{{grid-template-columns:1fr}}}}</style></head><body><main>
 <h1>通用分层装配刚体配准 · 四视角联合验收</h1><p>四个视角独立检测残差，但共享唯一 3D 装配状态。只有产生可靠装配证据的视角提出变换；同一变换随后在全部相机中真实重渲染。红=仅照片，蓝=仅 CAD，绿=重合。没有做 2D warp，也没有按视角分别扭曲模型。</p>
+<article><h2>结论：{html.escape(str(report['status']))}</h2><p>{html.escape(conclusion)}</p></article>
 <div class='cards'>{''.join(cards)}</div>{''.join(figures)}
-<p>联合结论：<b>{html.escape(str(report['status']))}</b>。完整数据：<a href='../multiview_assembly_pose_report.json'>JSON 报告</a>；3D 变换：<a href='../assembly_pose_overrides.json'>override</a>。</p></main></body></html>"""
+<p>完整数据：<a href='multiview_assembly_pose_report.json'>JSON 报告</a>；3D 变换：<a href='assembly_pose_overrides.json'>override</a>。</p></main></body></html>"""
     (output / "viewer" / "index.html").write_text(page, encoding="utf-8")
 
 
