@@ -7,7 +7,7 @@ keeps the final decision evidence-bounded: it creates a candidate plan that
 changes one appearance component's *MDL identity only*, and scores its member
 Part-ID cores after a real CAD render.  A separate helper may build one
 same-identity color-only H1 after identity selection, but only through a
-reviewed Paint/Metal tuning interface.
+reviewed color interface on the already selected material.
 """
 
 from __future__ import annotations
@@ -397,7 +397,6 @@ def _member_ids(member_part_ids: Sequence[str]) -> list[str]:
     return members
 
 
-_FORBIDDEN_PROXY_TOKENS = frozenset({"grass", "mirror", "water"})
 _METAL_SURFACE_TREATMENTS = frozenset(
     {
         "anodized",
@@ -445,7 +444,7 @@ def _strict_member_semantics(
     expected_member_part_ids: Sequence[str] | None = None,
     preferred_finish: str | None = None,
 ) -> tuple[dict[str, dict[str, Any]], str, str | None]:
-    """Validate the common opaque Paint/Metal contract for one component."""
+    """Validate one resolved physical-material contract for a component."""
 
     if not isinstance(member_material_semantics, Mapping):
         raise ComponentMdlTournamentError(
@@ -498,18 +497,19 @@ def _strict_member_semantics(
     treatment = next(iter(treatments))
     optical = next(iter(optical_behaviors))
     substrates = {value["substrate"] for value in normalized.values()}
-    if optical != "opaque":
+    if len(substrates) != 1:
         raise ComponentMdlTournamentError(
-            "strict component tournament supports only opaque surfaces"
+            "component member material substrates conflict"
         )
+    substrate = next(iter(substrates))
     if treatment == "paint":
         target_family = "paint"
-    elif substrates == {"metal"} and treatment in _METAL_SURFACE_TREATMENTS:
+    elif substrate == "metal" and treatment in _METAL_SURFACE_TREATMENTS:
         target_family = "metal"
     else:
-        raise ComponentMdlTournamentError(
-            "strict component tournament supports only compatible Paint or Metal surfaces"
-        )
+        # The hierarchical catalog contract below is authoritative.  This
+        # label is retained only for audit and reviewed H1 surface-class checks.
+        target_family = substrate
 
     if preferred_finish is not None and (
         not isinstance(preferred_finish, str)
@@ -531,15 +531,6 @@ def _strict_member_semantics(
     return normalized, target_family, preferred_finish or inferred_finish
 
 
-def _proxy_material_id(material_id: str) -> bool:
-    tokens = {
-        token
-        for token in re.split(r"[^a-z0-9]+", material_id.casefold())
-        if token
-    }
-    return bool(tokens & _FORBIDDEN_PROXY_TOKENS)
-
-
 def _catalog_candidate_semantics(
     *,
     material_id: str,
@@ -549,11 +540,7 @@ def _catalog_candidate_semantics(
 ) -> dict[str, Any] | None:
     """Return normalized metadata only for a fully compatible strict candidate."""
 
-    if (
-        not isinstance(material_id, str)
-        or not material_id.startswith("mdl:")
-        or _proxy_material_id(material_id)
-    ):
+    if not isinstance(material_id, str) or not material_id.startswith("mdl:"):
         return None
     raw_record = catalog_materials_by_id.get(material_id)
     if not isinstance(raw_record, Mapping):
@@ -562,14 +549,40 @@ def _catalog_candidate_semantics(
     if recorded_id is not None and recorded_id != material_id:
         return None
     family = raw_record.get("family")
-    if not isinstance(family, str) or family.casefold() != target_family:
+    if not isinstance(family, str) or not family:
         return None
     raw_surface = raw_record.get("surface_semantics")
     if not isinstance(raw_surface, Mapping):
         return None
     try:
         surface = normalize_catalog_surface_semantics(raw_surface)
-        if surface["confidence"] != "high":
+        if surface["confidence"] == "low":
+            return None
+        identifier_tokens = {
+            token
+            for token in re.split(r"[^a-z0-9]+", material_id.casefold())
+            if token
+        }
+        # Defense in depth against a malformed catalog row claiming that a
+        # visually convenient proxy belongs to an unrelated predicted class.
+        # The checks are conditional, so a genuine liquid Water or glass
+        # Mirror remains usable for those predicted material categories.
+        if (
+            "water" in identifier_tokens
+            and (
+                "liquid" not in surface["compatible_substrates"]
+                or surface["optical_behavior"] != "transparent"
+            )
+        ) or (
+            "mirror" in identifier_tokens
+            and (
+                "glass" not in surface["compatible_substrates"]
+                or surface["optical_behavior"] != "opaque"
+            )
+        ) or (
+            "grass" in identifier_tokens
+            and surface["surface_treatment"] in {"paint", "powder_coat"}
+        ):
             return None
         if not all(
             catalog_matches_part_semantics(surface, semantics)
@@ -968,10 +981,10 @@ def build_component_color_candidate_plan(
             "component color H1 material is not compatible with every member"
         )
     profile = tuning_profile_for_material(material_id)
-    expected_surface_class = "dielectric" if target_family == "paint" else "metal"
+    expected_surface_class = "metal" if target_family == "metal" else "dielectric"
     if profile is None or profile.surface_class != expected_surface_class:
         raise ComponentMdlTournamentError(
-            "component color H1 lacks a reviewed Paint/Metal tuning profile"
+            "component color H1 lacks a reviewed same-material tuning profile"
         )
     try:
         parameters, authored = color_parameters_for_target_srgb(
@@ -1271,6 +1284,7 @@ def select_component_mdl_winner(
     member_material_semantics: Mapping[str, Mapping[str, Any]] | None = None,
     catalog_materials_by_id: Mapping[str, Mapping[str, Any]] | None = None,
     authorized_candidate_material_ids: Sequence[str] | None = None,
+    lock_baseline_identity: bool = False,
 ) -> dict[str, Any]:
     """Choose a fixed MDL only when real-CAD evidence clearly improves it."""
 
@@ -1358,7 +1372,7 @@ def select_component_mdl_winner(
     )
     baseline_score = float(normalized[baseline_material_id]["appearance_score"])
     winner_score = float(normalized[winner_id]["appearance_score"])
-    accepted = winner_id != baseline_material_id and (
+    accepted = not lock_baseline_identity and winner_id != baseline_material_id and (
         winner_score >= baseline_score + float(minimum_score_improvement)
     )
     selected_id = winner_id if accepted else baseline_material_id
@@ -1372,7 +1386,16 @@ def select_component_mdl_winner(
         "winning_appearance_score": round(winner_score, 8),
         "score_improvement": round(winner_score - baseline_score, 8),
         "minimum_score_improvement": float(minimum_score_improvement),
-        "selection_status": "ACTUAL_CAD_RENDER_WINNER" if accepted else "BASELINE_RETAINED",
+        "selection_status": (
+            "ACTUAL_CAD_RENDER_WINNER"
+            if accepted
+            else (
+                "PREDICTED_MATERIAL_IDENTITY_LOCKED_COLOR_DEFERRED"
+                if lock_baseline_identity
+                else "BASELINE_RETAINED"
+            )
+        ),
+        "predicted_material_identity_locked": bool(lock_baseline_identity),
         "mdl_parameter_mutation_allowed": False,
     }
 
@@ -1394,13 +1417,10 @@ def _validate_color_parameters(
     parameters: Any,
 ) -> dict[str, list[float]]:
     profile = tuning_profile_for_material(material_id)
-    required_profile = {
-        "paint": "nvidia_base_paint_omnipbr",
-        "metal": "nvidia_base_metal_omnipbr",
-    }.get(target_family)
-    if profile is None or profile.profile_id != required_profile:
+    expected_surface_class = "metal" if target_family == "metal" else "dielectric"
+    if profile is None or profile.surface_class != expected_surface_class:
         raise ComponentMdlTournamentError(
-            "component color authorization lacks a reviewed Paint/Metal profile"
+            "component color authorization lacks a reviewed same-material profile"
         )
     if not isinstance(parameters, Mapping) or set(parameters) != set(
         profile.color_parameters

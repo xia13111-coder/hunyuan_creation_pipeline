@@ -64,7 +64,33 @@ def _observed_surface_part(part_id: str, surface_class: str) -> dict[str, object
     }
 
 
-def test_semantic_hybrid_component_contract_requires_two_thirds_consensus() -> None:
+def _material_prediction(
+    component_id: str,
+    *,
+    substrate: str = "metal",
+    treatment: str = "paint",
+    optical: str = "opaque",
+    finish: str = "matte",
+    status: str = "accepted",
+) -> dict[str, object]:
+    return {
+        "part_id": component_id,
+        "decision_status": status,
+        "confidence": 0.9,
+        "material_semantics": {
+            "schema_version": "qwen-part-material-semantics/v1",
+            "substrate": substrate,
+            "surface_treatment": treatment,
+            "optical_behavior": optical,
+            "finish": finish,
+            "physical_source": "vision_inference",
+            "evidence_status": "observed" if status == "accepted" else "unknown",
+            "confidence": 0.9,
+        },
+    }
+
+
+def test_semantic_hybrid_component_contract_uses_predicted_material_first() -> None:
     semantics, contract = orchestrator._semantic_hybrid_component_contract(
         component_id="AC_dark",
         member_part_ids=["P1", "P2", "P3"],
@@ -75,40 +101,285 @@ def test_semantic_hybrid_component_contract_requires_two_thirds_consensus() -> N
                 _observed_surface_part("P3", "dielectric"),
             ]
         },
+        material_prediction=_material_prediction(
+            "AC_dark", substrate="metal", treatment="bare", finish="brushed"
+        ),
     )
 
-    assert contract["consensus_surface_class"] == "conductor"
-    assert contract["legacy_physical_surface_class"] == "bare_metal"
-    assert contract["consensus_count"] == 2
+    assert contract["source"] == "appearance_component_qwen.material_predictions"
+    assert contract["selection_order"] == (
+        "material_prediction_then_mdl_identity_then_color"
+    )
     assert all(value["substrate"] == "metal" for value in semantics.values())
     assert all(
         value["surface_treatment"] == "bare" for value in semantics.values()
     )
 
 
-@pytest.mark.parametrize(
-    "surface_classes",
-    [
-        ["conductor", "dielectric", "conductor", "dielectric"],
-        ["dielectric", "dielectric", "unknown"],
-    ],
-)
-def test_semantic_hybrid_component_contract_fails_closed_without_resolved_consensus(
-    surface_classes: list[str],
+@pytest.mark.parametrize("status", ["ambiguous", "unknown"])
+def test_semantic_hybrid_component_contract_fails_closed_without_prediction(
+    status: str,
 ) -> None:
     with pytest.raises(
         orchestrator.ComponentMdlTournamentError,
-        match="(two-thirds|resolved observed surface evidence)",
+        match="no accepted material prediction",
     ):
         orchestrator._semantic_hybrid_component_contract(
             component_id="AC_unresolved",
-            member_part_ids=[f"P{index}" for index in range(len(surface_classes))],
+            member_part_ids=["P1", "P2"],
             part_id_evidence={
                 "parts": [
-                    _observed_surface_part(f"P{index}", surface_class)
-                    for index, surface_class in enumerate(surface_classes)
+                    _observed_surface_part("P1", "dielectric"),
+                    _observed_surface_part("P2", "dielectric"),
                 ]
             },
+            material_prediction=_material_prediction(
+                "AC_unresolved", status=status
+            ),
+        )
+
+
+def test_semantic_hybrid_choice_replay_rejects_cross_material_color_proxy() -> None:
+    paint = "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte"
+    water = "mdl:Natural/Water.mdl#Water"
+    catalog = {
+        "schema_version": 2,
+        "materials": [
+            {
+                "material_id": paint,
+                "family": "paint",
+                "surface_semantics": _catalog_surface(
+                    treatment="paint",
+                    substrates=["metal", "polymer", "wood"],
+                    finish="matte",
+                ),
+            },
+            {
+                "material_id": water,
+                "family": "liquid",
+                "surface_semantics": {
+                    **_catalog_surface(
+                        treatment="bare",
+                        substrates=["liquid"],
+                        finish="smooth",
+                    ),
+                    "optical_behavior": "transparent",
+                },
+            },
+        ],
+    }
+    prediction = _material_prediction("P1")
+    accepted_unsigned = {
+        "require_material_prediction": True,
+        "choices": {"P1": paint},
+        "material_predictions": {"P1": prediction},
+    }
+    orchestrator._require_predicted_material_choices_compatible(
+        qwen_document={
+            **accepted_unsigned,
+            "integrity": {
+                "document_sha256": orchestrator.canonical_sha256(
+                    accepted_unsigned
+                )
+            },
+        },
+        catalog_document=catalog,
+        assignment_label="Part-ID",
+    )
+    rejected_unsigned = {
+        "require_material_prediction": True,
+        "choices": {"P1": water},
+        "material_predictions": {"P1": prediction},
+    }
+    with pytest.raises(RuntimeError, match="does not match its predicted material"):
+        orchestrator._require_predicted_material_choices_compatible(
+            qwen_document={
+                **rejected_unsigned,
+                "integrity": {
+                    "document_sha256": orchestrator.canonical_sha256(
+                        rejected_unsigned
+                    )
+                },
+            },
+            catalog_document=catalog,
+            assignment_label="Part-ID",
+        )
+
+
+def test_semantic_hybrid_binds_prediction_to_part_id_plan_and_audit() -> None:
+    material_id = "mdl:Plastics/Plastic_ABS.mdl#Plastic_ABS"
+    prediction = _material_prediction(
+        "P1", substrate="polymer", treatment="bare", finish="smooth"
+    )
+    qwen_unsigned = {
+        "require_material_prediction": True,
+        "selection_order": (
+            "material_prediction_then_mdl_identity_lock_then_same_id_color"
+        ),
+        "choices": {"P1": material_id},
+        "material_predictions": {"P1": prediction},
+    }
+    qwen_document = {
+        **qwen_unsigned,
+        "integrity": {
+            "document_sha256": orchestrator.canonical_sha256(qwen_unsigned)
+        },
+    }
+    plan, audit = orchestrator._bind_part_id_material_predictions(
+        plan={
+            "schema_version": "1.0",
+            "assignments": [
+                {
+                    "part_id": "P1",
+                    "material_id": material_id,
+                    "provenance": {"assignment_unit": "part_id"},
+                }
+            ],
+        },
+        audit={
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "status": "independently_selected",
+                    "material_id": material_id,
+                }
+            ],
+            "summary": {"part_count": 1},
+        },
+        qwen_document=qwen_document,
+    )
+    binding = plan["assignments"][0]["provenance"][
+        "material_prediction_selection"
+    ]
+    assert binding["selected_material_id"] == material_id
+    assert binding["material_identity_locked_before_color"] is True
+    assert binding["color_stage_material_id_change_allowed"] is False
+    assert audit["parts"][0]["material_prediction_selection"] == binding
+    assert audit["output_plan_sha256"] == orchestrator.canonical_sha256(plan)
+
+
+def test_semantic_hybrid_catalog_expansion_is_bound_for_downstream_plan() -> None:
+    material_id = "mdl:Plastics/Plastic_ABS.mdl#Plastic_ABS"
+    retrieval_unsigned = {
+        "schema_version": "qwen-visual-material-retrieval-result/v1",
+        "groups": [{"group_id": "P1", "fused_ranking": []}],
+    }
+    retrieval = {
+        **retrieval_unsigned,
+        "integrity": {
+            "result_sha256": orchestrator.canonical_sha256(retrieval_unsigned)
+        },
+    }
+    expanded = orchestrator._retrieval_with_predicted_material_choices(
+        retrieval_document=retrieval,
+        qwen_document={
+            "choices": {"P1": material_id},
+            "visual_compatibility_gate": {
+                "parts": [
+                    {
+                        "part_id": "P1",
+                        "material_prediction_gate": {
+                            "full_catalog_expansion_used": True
+                        },
+                    }
+                ]
+            },
+        },
+    )
+    self_check = copy.deepcopy(expanded)
+    integrity = self_check.pop("integrity")
+    assert integrity["result_sha256"] == orchestrator.canonical_sha256(self_check)
+    assert expanded["groups"][0]["fused_ranking"] == [
+        {
+            "rank": 1,
+            "material_id": material_id,
+            "score": 0.0,
+            "physical_catalog_expansion": True,
+            "selection_source": "predicted_material_compatible_catalog",
+        }
+    ]
+
+
+def test_semantic_hybrid_rejects_unsealed_retrieval_expansion() -> None:
+    retrieval_unsigned = {
+        "schema_version": "qwen-visual-material-retrieval-result/v1",
+        "groups": [{"group_id": "P1", "fused_ranking": []}],
+    }
+    retrieval = {
+        **retrieval_unsigned,
+        "integrity": {
+            "result_sha256": orchestrator.canonical_sha256(retrieval_unsigned)
+        },
+    }
+    with pytest.raises(RuntimeError, match="neither retrieved nor authorized"):
+        orchestrator._retrieval_with_predicted_material_choices(
+            retrieval_document=retrieval,
+            qwen_document={
+                "choices": {"P1": "mdl:Plastics/Plastic_ABS.mdl#Plastic_ABS"},
+                "visual_compatibility_gate": {
+                    "parts": [
+                        {
+                            "part_id": "P1",
+                            "material_prediction_gate": {
+                                "full_catalog_expansion_used": False
+                            },
+                        }
+                    ]
+                },
+            },
+        )
+
+
+def _absolute_quality(statuses: list[str], aggregate_status: str) -> dict[str, object]:
+    reference_count = len(statuses)
+    return {
+        "aggregate": {
+            "status": aggregate_status,
+            "reference_view_count": reference_count,
+            "comparable_view_count": reference_count,
+            "passed_view_count": statuses.count("PASS"),
+            "review_view_count": statuses.count("REVIEW"),
+            "failed_view_count": statuses.count("FAIL"),
+            "unscorable_view_count": statuses.count("UNSCORABLE"),
+        },
+        "views": [
+            {"reference_view_id": f"view_{index}", "status": status}
+            for index, status in enumerate(statuses)
+        ],
+    }
+
+
+def test_semantic_hybrid_absolute_quality_requires_every_view_pass() -> None:
+    orchestrator._require_semantic_hybrid_absolute_quality_pass(
+        _absolute_quality(["PASS", "PASS", "PASS", "PASS"], "PASS"),
+        expected_reference_view_ids=["view_0", "view_1", "view_2", "view_3"],
+    )
+
+    with pytest.raises(RuntimeError, match="every registered reference view"):
+        orchestrator._require_semantic_hybrid_absolute_quality_pass(
+            _absolute_quality(["PASS", "FAIL", "PASS", "PASS"], "FAIL"),
+            expected_reference_view_ids=["view_0", "view_1", "view_2", "view_3"],
+        )
+
+
+def test_semantic_hybrid_absolute_quality_rejects_omitted_view() -> None:
+    quality = _absolute_quality(["PASS", "PASS"], "PASS")
+    quality["aggregate"]["reference_view_count"] = 3  # type: ignore[index]
+
+    with pytest.raises(RuntimeError, match="absolute visual gate failed"):
+        orchestrator._require_semantic_hybrid_absolute_quality_pass(
+            quality,
+            expected_reference_view_ids=["view_0", "view_1", "view_2"],
+        )
+
+
+def test_semantic_hybrid_absolute_quality_does_not_trust_self_reported_view_count() -> None:
+    forged = _absolute_quality(["PASS", "PASS"], "PASS")
+
+    with pytest.raises(RuntimeError, match="absolute visual gate failed"):
+        orchestrator._require_semantic_hybrid_absolute_quality_pass(
+            forged,
+            expected_reference_view_ids=["view_0", "view_1", "view_2", "view_3"],
         )
 
 
@@ -290,59 +561,6 @@ def test_valid_fresh_hybrid_and_current_resume_reach_first_pipeline_stage(
     assert resume_calls == ([] if pipeline_mode == "semantic_hybrid" else [output])
 
 
-def _absolute_quality(statuses: list[str], aggregate_status: str) -> dict[str, object]:
-    reference_count = len(statuses)
-    return {
-        "aggregate": {
-            "status": aggregate_status,
-            "reference_view_count": reference_count,
-            "comparable_view_count": reference_count,
-            "passed_view_count": statuses.count("PASS"),
-            "review_view_count": statuses.count("REVIEW"),
-            "failed_view_count": statuses.count("FAIL"),
-            "unscorable_view_count": statuses.count("UNSCORABLE"),
-        },
-        "views": [
-            {"reference_view_id": f"view_{index}", "status": status}
-            for index, status in enumerate(statuses)
-        ],
-    }
-
-
-def test_semantic_hybrid_absolute_quality_requires_every_view_pass() -> None:
-    orchestrator._require_semantic_hybrid_absolute_quality_pass(
-        _absolute_quality(["PASS", "PASS", "PASS", "PASS"], "PASS"),
-        expected_reference_view_ids=["view_0", "view_1", "view_2", "view_3"],
-    )
-
-    with pytest.raises(RuntimeError, match="every registered reference view"):
-        orchestrator._require_semantic_hybrid_absolute_quality_pass(
-            _absolute_quality(["PASS", "FAIL", "PASS", "PASS"], "FAIL"),
-            expected_reference_view_ids=["view_0", "view_1", "view_2", "view_3"],
-        )
-
-
-def test_semantic_hybrid_absolute_quality_rejects_omitted_view() -> None:
-    quality = _absolute_quality(["PASS", "PASS"], "PASS")
-    quality["aggregate"]["reference_view_count"] = 3  # type: ignore[index]
-
-    with pytest.raises(RuntimeError, match="absolute visual gate failed"):
-        orchestrator._require_semantic_hybrid_absolute_quality_pass(
-            quality,
-            expected_reference_view_ids=["view_0", "view_1", "view_2"],
-        )
-
-
-def test_semantic_hybrid_absolute_quality_does_not_trust_self_reported_view_count() -> None:
-    forged = _absolute_quality(["PASS", "PASS"], "PASS")
-
-    with pytest.raises(RuntimeError, match="absolute visual gate failed"):
-        orchestrator._require_semantic_hybrid_absolute_quality_pass(
-            forged,
-            expected_reference_view_ids=["view_0", "view_1", "view_2", "view_3"],
-        )
-
-
 def _catalog_surface(
     *,
     treatment: str,
@@ -486,7 +704,19 @@ def test_semantic_hybrid_full_component_flow_discards_unsafe_h0_and_binds_h1(
     )
     orchestrator.write_object(
         workspace.appearance.qwen_result,
-        {"visual_compatibility_gate": {"parts": []}},
+        {
+            "require_material_prediction": True,
+            "material_predictions": {
+                "AC_01_paint": _material_prediction("AC_01_paint"),
+                "AC_02_metal": _material_prediction(
+                    "AC_02_metal",
+                    substrate="metal",
+                    treatment="bare",
+                    finish="smooth",
+                ),
+            },
+            "visual_compatibility_gate": {"parts": []},
+        },
     )
     orchestrator.write_object(
         workspace.part_id.evidence,

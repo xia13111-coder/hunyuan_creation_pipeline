@@ -165,7 +165,12 @@ from qwen_material_pipeline.materials.component_mdl_tournament import (
 )
 from qwen_material_pipeline.materials.semantics import (
     MaterialSemanticsError,
-    semantics_from_legacy_surface,
+    catalog_matches_part_semantics,
+    normalize_catalog_surface_semantics,
+    normalize_part_material_semantics,
+)
+from qwen_material_pipeline.materials.tuning import (
+    tuning_profile_for_material,
 )
 from qwen_material_pipeline.materials.multigroup_exact_mdl_tournament import (
     MultigroupExactMdlTournamentError,
@@ -1318,8 +1323,9 @@ def _semantic_hybrid_component_contract(
     component_id: str,
     member_part_ids: Sequence[str],
     part_id_evidence: Mapping[str, Any],
+    material_prediction: Mapping[str, Any],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Derive one observed opaque Paint/Metal contract from Part-ID PBR cues."""
+    """Seal one predicted material class for all observed component members."""
 
     if not isinstance(component_id, str) or not component_id:
         raise ComponentMdlTournamentError("component_id must be non-empty")
@@ -1347,7 +1353,7 @@ def _semantic_hybrid_component_contract(
         if isinstance(part_id, str) and part_id and part_id not in evidence_by_part:
             evidence_by_part[part_id] = raw_part
 
-    observed_surface_classes: dict[str, str] = {}
+    observed_surface_classes: dict[str, str | None] = {}
     for part_id in members:
         part = evidence_by_part.get(part_id)
         descriptor = part.get("descriptor") if isinstance(part, Mapping) else None
@@ -1357,61 +1363,53 @@ def _semantic_hybrid_component_contract(
             else None
         )
         if (
-            not isinstance(part, Mapping)
-            or part.get("status") != "observed"
-            or surface_class not in {"conductor", "dielectric"}
+            not isinstance(part, Mapping) or part.get("status") != "observed"
         ):
             raise ComponentMdlTournamentError(
-                f"component {component_id} lacks resolved observed surface evidence "
-                f"for {part_id}"
+                f"component {component_id} has an unobserved member {part_id}"
             )
-        observed_surface_classes[part_id] = surface_class
+        observed_surface_classes[part_id] = (
+            str(surface_class)
+            if surface_class in {"conductor", "dielectric"}
+            else None
+        )
 
-    conductor_count = sum(
-        surface_class == "conductor"
-        for surface_class in observed_surface_classes.values()
-    )
-    dielectric_count = len(members) - conductor_count
-    minimum_consensus_count = (2 * len(members) + 2) // 3
-    if conductor_count >= minimum_consensus_count:
-        consensus_surface_class = "conductor"
-        legacy_surface_class = "bare_metal"
-        consensus_count = conductor_count
-    elif dielectric_count >= minimum_consensus_count:
-        consensus_surface_class = "dielectric"
-        legacy_surface_class = "painted_metal"
-        consensus_count = dielectric_count
-    else:
+    raw_semantics = material_prediction.get("material_semantics")
+    if (
+        material_prediction.get("part_id") != component_id
+        or material_prediction.get("decision_status") != "accepted"
+        or not isinstance(raw_semantics, Mapping)
+    ):
         raise ComponentMdlTournamentError(
-            f"component {component_id} has no two-thirds Paint/Metal surface consensus"
+            f"component {component_id} has no accepted material prediction"
         )
-    confidence = consensus_count / len(members)
     try:
-        consensus_semantics = semantics_from_legacy_surface(
-            legacy_surface_class,
-            confidence=confidence,
-            physical_source="vision_inference",
-            evidence_status="observed",
-        )
-    except MaterialSemanticsError as exc:
+        predicted_semantics = normalize_part_material_semantics(raw_semantics)
+    except (MaterialSemanticsError, TypeError) as exc:
         raise ComponentMdlTournamentError(
-            f"component {component_id} surface consensus is invalid: {exc}"
+            f"component {component_id} material prediction is invalid: {exc}"
         ) from exc
+    if (
+        predicted_semantics["evidence_status"] != "observed"
+        or predicted_semantics["substrate"] == "unknown"
+        or predicted_semantics["surface_treatment"] == "unknown"
+        or predicted_semantics["optical_behavior"] == "unknown"
+    ):
+        raise ComponentMdlTournamentError(
+            f"component {component_id} material prediction is unresolved"
+        )
     member_semantics = {
-        part_id: copy.deepcopy(consensus_semantics) for part_id in members
+        part_id: copy.deepcopy(predicted_semantics) for part_id in members
     }
     contract = {
-        "schema_version": "qwen-component-surface-consensus/v1",
+        "schema_version": "qwen-component-material-prediction/v1",
         "component_id": component_id,
         "member_part_ids": members,
-        "source": "part_id_evidence.descriptor.surface_class",
+        "source": "appearance_component_qwen.material_predictions",
+        "selection_order": "material_prediction_then_mdl_identity_then_color",
+        "material_prediction": copy.deepcopy(dict(material_prediction)),
+        "material_prediction_sha256": canonical_sha256(material_prediction),
         "observed_surface_classes": observed_surface_classes,
-        "minimum_consensus_fraction": 2 / 3,
-        "minimum_consensus_count": minimum_consensus_count,
-        "consensus_count": consensus_count,
-        "consensus_fraction": round(confidence, 8),
-        "consensus_surface_class": consensus_surface_class,
-        "legacy_physical_surface_class": legacy_surface_class,
         "member_material_semantics": member_semantics,
         "member_material_semantics_sha256": canonical_sha256(member_semantics),
     }
@@ -1525,6 +1523,285 @@ def _require_semantic_hybrid_absolute_quality_pass(
             "diagnostic quality report: every registered reference view must "
             f"exist and PASS (aggregate={status!r})"
         )
+
+
+def _require_predicted_material_choices_compatible(
+    *,
+    qwen_document: Mapping[str, Any],
+    catalog_document: Mapping[str, Any],
+    assignment_label: str,
+) -> None:
+    """Replay the prediction-first MDL gate before any plan is authored."""
+
+    unsigned_qwen = copy.deepcopy(dict(qwen_document))
+    qwen_integrity = unsigned_qwen.pop("integrity", None)
+    if (
+        not isinstance(qwen_integrity, Mapping)
+        or qwen_integrity.get("document_sha256")
+        != canonical_sha256(unsigned_qwen)
+    ):
+        raise RuntimeError(
+            f"semantic_hybrid {assignment_label} result failed its integrity seal"
+        )
+    if qwen_document.get("require_material_prediction") is not True:
+        raise RuntimeError(
+            f"semantic_hybrid {assignment_label} result did not run material prediction"
+        )
+    raw_choices = qwen_document.get("choices")
+    raw_predictions = qwen_document.get("material_predictions")
+    if not isinstance(raw_choices, Mapping) or not isinstance(
+        raw_predictions, Mapping
+    ) or set(raw_choices) != set(raw_predictions):
+        raise RuntimeError(
+            f"semantic_hybrid {assignment_label} prediction/choice cover is invalid"
+        )
+    try:
+        catalog_by_id = _semantic_hybrid_catalog_materials(catalog_document)
+    except ComponentMdlTournamentError as exc:
+        raise RuntimeError(
+            f"semantic_hybrid {assignment_label} catalog is invalid: {exc}"
+        ) from exc
+    for entity_id in sorted(raw_choices):
+        material_id = raw_choices[entity_id]
+        prediction = raw_predictions[entity_id]
+        if (
+            not isinstance(entity_id, str)
+            or not entity_id
+            or not isinstance(material_id, str)
+            or material_id not in catalog_by_id
+            or not isinstance(prediction, Mapping)
+            or prediction.get("part_id") != entity_id
+            or prediction.get("decision_status") != "accepted"
+            or not isinstance(prediction.get("material_semantics"), Mapping)
+        ):
+            raise RuntimeError(
+                f"semantic_hybrid {assignment_label} choice {entity_id!r} lacks "
+                "an accepted material prediction"
+            )
+        try:
+            semantics = normalize_part_material_semantics(
+                prediction["material_semantics"]
+            )
+            surface = normalize_catalog_surface_semantics(
+                catalog_by_id[material_id]["surface_semantics"]
+            )
+        except (MaterialSemanticsError, KeyError, TypeError) as exc:
+            raise RuntimeError(
+                f"semantic_hybrid {assignment_label} semantic payload for "
+                f"{entity_id} is invalid: {exc}"
+            ) from exc
+        if (
+            semantics["evidence_status"] != "observed"
+            or not catalog_matches_part_semantics(surface, semantics)
+        ):
+            raise RuntimeError(
+                f"semantic_hybrid {assignment_label} selected MDL for {entity_id} "
+                "does not match its predicted material"
+            )
+
+
+def _retrieval_with_predicted_material_choices(
+    *,
+    retrieval_document: Mapping[str, Any],
+    qwen_document: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind catalog-expanded semantic choices into the downstream shortlist."""
+
+    output = copy.deepcopy(dict(retrieval_document))
+    groups = output.get("groups")
+    choices = qwen_document.get("choices")
+    gates = qwen_document.get("visual_compatibility_gate")
+    gate_rows = gates.get("parts") if isinstance(gates, Mapping) else None
+    if (
+        not isinstance(groups, list)
+        or not isinstance(choices, Mapping)
+        or not isinstance(gate_rows, list)
+    ):
+        raise RuntimeError("semantic_hybrid retrieval expansion inputs are invalid")
+    gate_by_id = {
+        row.get("part_id"): row
+        for row in gate_rows
+        if isinstance(row, Mapping) and isinstance(row.get("part_id"), str)
+    }
+    for group in groups:
+        entity_id = group.get("group_id") if isinstance(group, dict) else None
+        if not isinstance(entity_id, str) or entity_id not in choices:
+            raise RuntimeError(
+                "semantic_hybrid retrieval expansion has incomplete entity cover"
+            )
+        material_id = choices[entity_id]
+        ranking = group.get("fused_ranking")
+        gate = gate_by_id.get(entity_id)
+        material_gate = (
+            gate.get("material_prediction_gate")
+            if isinstance(gate, Mapping)
+            else None
+        )
+        if not isinstance(material_id, str) or not isinstance(ranking, list):
+            raise RuntimeError(
+                f"semantic_hybrid retrieval expansion is malformed for {entity_id}"
+            )
+        if not any(
+            isinstance(row, Mapping) and row.get("material_id") == material_id
+            for row in ranking
+        ):
+            if (
+                not isinstance(material_gate, Mapping)
+                or material_gate.get("full_catalog_expansion_used") is not True
+            ):
+                raise RuntimeError(
+                    f"semantic_hybrid choice {entity_id} is neither retrieved nor "
+                    "authorized by the sealed compatible-catalog expansion"
+                )
+            ranking.append(
+                {
+                    "rank": len(ranking) + 1,
+                    "material_id": material_id,
+                    "score": 0.0,
+                    "physical_catalog_expansion": True,
+                    "selection_source": "predicted_material_compatible_catalog",
+                }
+            )
+    integrity = output.get("integrity")
+    if isinstance(integrity, Mapping) and "result_sha256" in integrity:
+        output.pop("integrity", None)
+        output["integrity"] = {"result_sha256": canonical_sha256(output)}
+    return output
+
+
+def _bind_part_id_material_predictions(
+    *,
+    plan: Mapping[str, Any],
+    audit: Mapping[str, Any],
+    qwen_document: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Persist the prediction -> MDL -> deferred-color lineage in the plan."""
+
+    qwen_unsigned = copy.deepcopy(dict(qwen_document))
+    qwen_integrity = qwen_unsigned.pop("integrity", None)
+    if (
+        not isinstance(qwen_integrity, Mapping)
+        or qwen_integrity.get("document_sha256")
+        != canonical_sha256(qwen_unsigned)
+        or qwen_document.get("require_material_prediction") is not True
+        or qwen_document.get("selection_order")
+        != "material_prediction_then_mdl_identity_lock_then_same_id_color"
+    ):
+        raise RuntimeError("semantic_hybrid Part-ID prediction result is not sealed")
+    choices = qwen_document.get("choices")
+    predictions = qwen_document.get("material_predictions")
+    if not isinstance(choices, Mapping) or not isinstance(predictions, Mapping):
+        raise RuntimeError("semantic_hybrid Part-ID prediction lineage is invalid")
+
+    output_plan = copy.deepcopy(dict(plan))
+    output_audit = copy.deepcopy(dict(audit))
+    assignments = output_plan.get("assignments")
+    audit_rows = output_audit.get("parts")
+    if not isinstance(assignments, list) or not isinstance(audit_rows, list):
+        raise RuntimeError("semantic_hybrid Part-ID plan/audit is malformed")
+    assignment_by_part = {
+        row.get("part_id"): row
+        for row in assignments
+        if isinstance(row, dict) and isinstance(row.get("part_id"), str)
+    }
+    audit_by_part = {
+        row.get("part_id"): row
+        for row in audit_rows
+        if isinstance(row, dict) and isinstance(row.get("part_id"), str)
+    }
+    if (
+        len(assignment_by_part) != len(assignments)
+        or len(audit_by_part) != len(audit_rows)
+        or set(assignment_by_part) != set(audit_by_part)
+        or set(choices) != set(predictions)
+    ):
+        raise RuntimeError(
+            "semantic_hybrid Part-ID prediction lineage has invalid exact cover"
+        )
+
+    qwen_sha256 = canonical_sha256(qwen_document)
+    for part_id in sorted(choices):
+        assignment = assignment_by_part.get(part_id)
+        audit_row = audit_by_part.get(part_id)
+        prediction = predictions[part_id]
+        selected_material_id = choices[part_id]
+        if (
+            not isinstance(assignment, dict)
+            or not isinstance(audit_row, dict)
+            or not isinstance(prediction, Mapping)
+            or prediction.get("part_id") != part_id
+            or prediction.get("decision_status") != "accepted"
+            or not isinstance(selected_material_id, str)
+            or not selected_material_id.startswith("mdl:")
+        ):
+            raise RuntimeError(
+                f"semantic_hybrid Part-ID prediction binding is invalid for {part_id}"
+            )
+        status = audit_row.get("status")
+        if status == "independently_selected":
+            selection_applied = True
+            if (
+                assignment.get("material_id") != selected_material_id
+                or audit_row.get("material_id") != selected_material_id
+            ):
+                raise RuntimeError(
+                    f"semantic_hybrid predicted material choice drifted for {part_id}"
+                )
+        elif status == "observed_low_confidence_baseline_retained":
+            selection_applied = False
+            if audit_row.get("rejected_qwen_material_id") != selected_material_id:
+                raise RuntimeError(
+                    f"semantic_hybrid rejected material choice drifted for {part_id}"
+                )
+        else:
+            raise RuntimeError(
+                f"semantic_hybrid Qwen prediction has unsupported audit status for {part_id}"
+            )
+        binding = {
+            "schema_version": "qwen-material-prediction-selection-binding/v1",
+            "part_id": part_id,
+            "prediction_sha256": canonical_sha256(prediction),
+            "predicted_material_semantics": copy.deepcopy(
+                prediction.get("material_semantics")
+            ),
+            "selected_material_id": selected_material_id,
+            "selection_applied": selection_applied,
+            "material_identity_locked_before_color": selection_applied,
+            "color_stage_material_id_change_allowed": False,
+            "qwen_result_sha256": qwen_sha256,
+        }
+        provenance = assignment.get("provenance")
+        if not isinstance(provenance, dict):
+            raise RuntimeError(
+                f"semantic_hybrid Part-ID assignment provenance is invalid for {part_id}"
+            )
+        provenance["material_prediction_selection"] = copy.deepcopy(binding)
+        audit_row["material_prediction_selection"] = copy.deepcopy(binding)
+
+    plan_provenance = output_plan.get("provenance")
+    if not isinstance(plan_provenance, dict):
+        plan_provenance = {}
+        output_plan["provenance"] = plan_provenance
+    plan_provenance["material_prediction_selection"] = {
+        "schema_version": "qwen-material-prediction-selection-binding/v1",
+        "selection_order": (
+            "material_prediction_then_mdl_identity_lock_then_same_id_color"
+        ),
+        "qwen_result_sha256": qwen_sha256,
+        "observed_part_count": len(choices),
+        "material_identity_locked_before_color": True,
+        "color_stage_material_id_change_allowed": False,
+    }
+    output_audit["output_plan_sha256"] = canonical_sha256(output_plan)
+    summary = output_audit.get("summary")
+    if not isinstance(summary, dict):
+        raise RuntimeError("semantic_hybrid Part-ID audit summary is invalid")
+    summary["material_prediction_bound_count"] = len(choices)
+    output_audit.pop("integrity", None)
+    output_audit["integrity"] = {
+        "document_sha256": canonical_sha256(output_audit)
+    }
+    return output_plan, output_audit
 
 
 def _validate_semantic_hybrid_invocation(
@@ -2158,9 +2435,10 @@ def _run_policy_part_id_stage(
         if (
             not config.immutable_mdl_after_selection
             and config.material_parameter_candidate_mode == "evidence_gated_h0_h1"
-            and not _semantic_hybrid_enabled(config)
         ):
             part_id_qwen_command.append("--allow-mdl-color-tuning")
+        if _semantic_hybrid_enabled(config):
+            part_id_qwen_command.append("--require-material-prediction")
         _run_stage(
             "part_id_qwen_rerank",
             part_id_qwen_command,
@@ -2172,6 +2450,15 @@ def _run_policy_part_id_stage(
             part_id_qwen_result,
             "Part-ID Qwen choices",
         )
+        if _semantic_hybrid_enabled(config):
+            _require_predicted_material_choices_compatible(
+                qwen_document=qwen_part_document,
+                catalog_document=read_object(
+                    effective_catalog,
+                    "semantic_hybrid Part-ID material catalog",
+                ),
+                assignment_label="Part-ID",
+            )
         qwen_part_choices = qwen_part_document.get("choices")
         if not isinstance(qwen_part_choices, dict):
             raise RuntimeError("Part-ID Qwen result contains no choices")
@@ -2308,6 +2595,8 @@ def _run_policy_part_id_stage(
                     "--max-new-tokens",
                     str(config.qwen_max_new_tokens),
                 ]
+                if _semantic_hybrid_enabled(config):
+                    component_qwen_command.append("--require-material-prediction")
                 _run_stage(
                     "appearance_component_qwen_rerank",
                     component_qwen_command,
@@ -2324,19 +2613,37 @@ def _run_policy_part_id_stage(
                     appearance_component_qwen_result,
                     "appearance-component Qwen choices",
                 )
+                if _semantic_hybrid_enabled(config):
+                    _require_predicted_material_choices_compatible(
+                        qwen_document=appearance_component_qwen_document,
+                        catalog_document=read_object(
+                            effective_catalog,
+                            "semantic_hybrid component material catalog",
+                        ),
+                        assignment_label="appearance-component",
+                    )
         direct_plan_document, direct_audit_document = build_part_id_material_plan(
             base_plan=read_object(policy_plan, "Part-ID exact-cover baseline"),
             evidence=evidence_document,
-            retrieval_result=read_object(
-                part_id_retrieval_result,
-                "Part-ID visual retrieval result",
+            retrieval_result=(
+                _retrieval_with_predicted_material_choices(
+                    retrieval_document=read_object(
+                        part_id_retrieval_result,
+                        "Part-ID visual retrieval result",
+                    ),
+                    qwen_document=qwen_part_document,
+                )
+                if _semantic_hybrid_enabled(config)
+                else read_object(
+                    part_id_retrieval_result,
+                    "Part-ID visual retrieval result",
+                )
             ),
             qwen_choices=qwen_part_choices,
             qwen_confidences=qwen_part_confidences,
             allow_color_parameters=(
                 not config.immutable_mdl_after_selection
                 and config.material_parameter_candidate_mode == "evidence_gated_h0_h1"
-                and not _semantic_hybrid_enabled(config)
             ),
             part_registry=read_object(
                 source_registry,
@@ -2357,7 +2664,16 @@ def _run_policy_part_id_stage(
                         appearance_components=appearance_component_document,
                         part_id_evidence=evidence_document,
                         component_evidence=component_evidence_document,
-                        component_retrieval=appearance_component_retrieval_document,
+                        component_retrieval=(
+                            _retrieval_with_predicted_material_choices(
+                                retrieval_document=(
+                                    appearance_component_retrieval_document
+                                ),
+                                qwen_document=appearance_component_qwen_document,
+                            )
+                            if _semantic_hybrid_enabled(config)
+                            else appearance_component_retrieval_document
+                        ),
                         component_qwen_choices=appearance_component_qwen_document,
                     )
                 )
@@ -2369,6 +2685,14 @@ def _run_policy_part_id_stage(
             write_object(
                 appearance_component_mdl_selection_audit,
                 direct_audit_document["appearance_component_mdl_selection"],
+            )
+        if _semantic_hybrid_enabled(config):
+            direct_plan_document, direct_audit_document = (
+                _bind_part_id_material_predictions(
+                    plan=direct_plan_document,
+                    audit=direct_audit_document,
+                    qwen_document=qwen_part_document,
+                )
             )
         write_object(part_id_material_plan, direct_plan_document)
         write_object(part_id_material_audit, direct_audit_document)
@@ -2764,6 +3088,7 @@ def _run_semantic_hybrid_component_tournament(
     raw_selections = selection_document.get("selections")
     raw_retrieval_groups = retrieval_document.get("groups")
     raw_visual_gate = qwen_document.get("visual_compatibility_gate")
+    raw_material_predictions = qwen_document.get("material_predictions")
     raw_compatibility_parts = (
         raw_visual_gate.get("parts") if isinstance(raw_visual_gate, Mapping) else None
     )
@@ -2773,6 +3098,8 @@ def _run_semantic_hybrid_component_tournament(
         or any(not isinstance(row, Mapping) for row in raw_selections)
         or not isinstance(raw_retrieval_groups, list)
         or not isinstance(raw_compatibility_parts, list)
+        or qwen_document.get("require_material_prediction") is not True
+        or not isinstance(raw_material_predictions, Mapping)
     ):
         raise RuntimeError(
             "semantic_hybrid appearance-component inputs are malformed"
@@ -2786,6 +3113,11 @@ def _run_semantic_hybrid_component_tournament(
         row.get("part_id"): row
         for row in raw_compatibility_parts
         if isinstance(row, Mapping) and isinstance(row.get("part_id"), str)
+    }
+    material_prediction_by_component = {
+        str(component_id): prediction
+        for component_id, prediction in raw_material_predictions.items()
+        if isinstance(component_id, str) and isinstance(prediction, Mapping)
     }
 
     original_plan = copy.deepcopy(dict(source_plan))
@@ -2995,6 +3327,9 @@ def _run_semantic_hybrid_component_tournament(
                     component_id=component_id,
                     member_part_ids=members,
                     part_id_evidence=evidence_document,
+                    material_prediction=material_prediction_by_component.get(
+                        component_id, {}
+                    ),
                 )
             )
             retrieval_group = retrieval_by_component.get(component_id)
@@ -3128,6 +3463,7 @@ def _run_semantic_hybrid_component_tournament(
                 member_material_semantics=member_semantics,
                 catalog_materials_by_id=catalog_by_id,
                 authorized_candidate_material_ids=material_ids,
+                lock_baseline_identity=qwen_baseline_semantically_compatible,
             )
             selected_material_id = winner["selected_material_id"]
             identity_plan = build_component_candidate_plan(
@@ -3218,6 +3554,23 @@ def _run_semantic_hybrid_component_tournament(
         runtime = component_runtime[component_id]
         members = runtime["members"]
         material_id = runtime["selected_material_id"]
+        tuning_profile = tuning_profile_for_material(material_id)
+        if tuning_profile is None:
+            record["color_tournament"] = {
+                "component_id": component_id,
+                "member_part_ids": members,
+                "material_id": material_id,
+                "selected_candidate_id": "H0",
+                "selection_status": "NOT_TUNABLE_REVIEWED_INTERFACE_UNAVAILABLE",
+                "parameter_mutation_allowed": False,
+            }
+            log_message(
+                log_cb,
+                "Semantic-hybrid component color stage retained H0 for "
+                f"{component_id}: the selected material has no reviewed color "
+                "interface.",
+            )
+            continue
         try:
             h0_score = score_component_render(
                 component_id=component_id,
@@ -3597,10 +3950,38 @@ def _run_visual_qa_stage(
 
     spatial_report_path = analysis_dir / "spatial_mapping_report.json"
     parameter_tournament_document: dict[str, Any] | None = None
+    component_actual_mdl_tournament_document: dict[str, Any] | None = None
+
+    # In semantic-hybrid mode the material identity pass is authoritative and
+    # therefore runs before any color candidate.  The component stage also
+    # produces a fresh registered H0 render, which becomes the baseline for
+    # the independent Part-ID same-MDL H1 comparisons below.
+    if _semantic_hybrid_enabled(config):
+        hybrid_component_result = _run_semantic_hybrid_component_tournament(
+            context,
+            prepared_source=prepared_source,
+            planning=planning,
+            look=look,
+            source_plan=plan,
+            spatial_report_path=spatial_report_path,
+            quality_render_view_arguments=quality_render_view_arguments,
+            expected_applied_count=applied_count,
+            log_cb=log_cb,
+            command_runner=_command_runner,
+        )
+        component_actual_mdl_tournament_document = (
+            hybrid_component_result.tournament_document
+        )
+        plan = hybrid_component_result.plan
+        effective_material_plan = hybrid_component_result.effective_material_plan
+        assignments = hybrid_component_result.assignments
+        applied_count = hybrid_component_result.applied_count
+        if hybrid_component_result.instance_plan is not None:
+            instance_plan = hybrid_component_result.instance_plan
+
     if (
         config.material_assignment_unit == "part_id"
         and config.material_parameter_candidate_mode == "evidence_gated_h0_h1"
-        and not _semantic_hybrid_enabled(config)
     ):
         pending_parameter_part_ids = pending_h1_part_ids(plan)
         if pending_parameter_part_ids:
@@ -3937,7 +4318,6 @@ def _run_visual_qa_stage(
     # fixed-MDL tournament on the registered CAD.  This remains a Part-ID
     # process (no palette groups), preserves all assignments outside the
     # component, and never writes colour/PBR parameters.
-    component_actual_mdl_tournament_document: dict[str, Any] | None = None
     component_actual_tournament_inputs = (
         appearance_component_mdl_selection_audit,
         appearance_component_retrieval_result,
@@ -3946,29 +4326,9 @@ def _run_visual_qa_stage(
         spatial_report_path,
         quality_rendered_registry,
     )
-    if _semantic_hybrid_enabled(config):
-        hybrid_component_result = _run_semantic_hybrid_component_tournament(
-            context,
-            prepared_source=prepared_source,
-            planning=planning,
-            look=look,
-            source_plan=plan,
-            spatial_report_path=spatial_report_path,
-            quality_render_view_arguments=quality_render_view_arguments,
-            expected_applied_count=applied_count,
-            log_cb=log_cb,
-            command_runner=_command_runner,
-        )
-        component_actual_mdl_tournament_document = (
-            hybrid_component_result.tournament_document
-        )
-        plan = hybrid_component_result.plan
-        effective_material_plan = hybrid_component_result.effective_material_plan
-        assignments = hybrid_component_result.assignments
-        applied_count = hybrid_component_result.applied_count
-        if hybrid_component_result.instance_plan is not None:
-            instance_plan = hybrid_component_result.instance_plan
-    elif (
+    if (
+        not _semantic_hybrid_enabled(config)
+        and
         config.material_assignment_unit == "part_id"
         and config.immutable_mdl_after_selection
         and all(path.is_file() for path in component_actual_tournament_inputs)

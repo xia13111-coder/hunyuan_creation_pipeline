@@ -19,6 +19,17 @@ from qwen_material_pipeline.materials.perceptual_color import (
     perceptual_similarity,
     srgb_delta_e,
 )
+from qwen_material_pipeline.materials.semantics import (
+    FINISH_CLASSES,
+    OPTICAL_BEHAVIORS,
+    PART_MATERIAL_SEMANTICS_SCHEMA_VERSION,
+    SUBSTRATES,
+    SURFACE_TREATMENTS,
+    catalog_matches_part_semantics,
+    legacy_surface_from_semantics,
+    normalize_catalog_surface_semantics,
+    normalize_part_material_semantics,
+)
 from qwen_material_pipeline.materials.tuning import (
     tuning_profile_for_material,
 )
@@ -31,6 +42,7 @@ from qwen_material_pipeline.qwen.local_vl import TransformersQwen3VLRunner
 
 OUTPUT_SCHEMA_VERSION = "qwen-part-id-material-rerank/v1"
 BATCH_SCHEMA_VERSION = "qwen-part-id-material-rerank-batch/v2"
+PHYSICAL_BATCH_SCHEMA_VERSION = "qwen-part-id-physical-surface-batch/v2"
 SELECTIVE_REGRESSION_SCHEMA_VERSION = "qwen-part-id-selective-visual-regression/v1"
 DEFAULT_MAXIMUM_LOCAL_SCORE_REGRESSION = 0.02
 COLOR_CRITICAL_MINIMUM_TRUSTED_PIXELS = 512
@@ -39,10 +51,99 @@ MINIMUM_PART_ID_APPEARANCE_PIXELS = 6
 COLOR_CRITICAL_MAXIMUM_DELTA_E = 25.0
 COLOR_CRITICAL_MAXIMUM_HUE_DISTANCE_DEGREES = 30.0
 COLOR_CRITICAL_MINIMUM_CANDIDATE_SATURATION = 0.10
+MINIMUM_ACCEPTED_MATERIAL_PREDICTION_CONFIDENCE = 0.60
+MAXIMUM_MATERIAL_PREDICTION_VIEWS = 3
 
 
 class PartIdQwenError(ValueError):
     """Raised when Qwen cannot produce a bounded Part-ID decision."""
+
+
+def candidate_matches_material_semantics(
+    catalog_record: Mapping[str, Any],
+    material_semantics: Mapping[str, Any],
+) -> bool:
+    """Return whether one untouched catalog MDL matches predicted semantics."""
+
+    normalized = normalize_part_material_semantics(material_semantics)
+    catalog_semantics = catalog_record.get("surface_semantics")
+    if not isinstance(catalog_semantics, Mapping):
+        return False
+    try:
+        candidate = normalize_catalog_surface_semantics(catalog_semantics)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        candidate["confidence"] != "low"
+        and catalog_matches_part_semantics(candidate, normalized)
+    )
+
+
+def _physical_filter_ranking(
+    *,
+    part_id: str,
+    ranking: Sequence[Mapping[str, Any]],
+    catalog_by_id: Mapping[str, Mapping[str, Any]],
+    decision: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Filter visual candidates by the sealed material prediction first."""
+
+    semantics = normalize_part_material_semantics(decision["material_semantics"])
+    if semantics["evidence_status"] != "observed":
+        raise PartIdQwenError(
+            f"physical_surface_unknown: {part_id} has no accepted material class"
+        )
+    compatible_retrieved = [
+        dict(raw)
+        for raw in ranking
+        if isinstance(raw.get("material_id"), str)
+        and raw["material_id"] in catalog_by_id
+        and candidate_matches_material_semantics(
+            catalog_by_id[str(raw["material_id"])], semantics
+        )
+    ]
+    compatible = list(compatible_retrieved)
+    known_material_ids = {
+        str(raw["material_id"])
+        for raw in compatible
+        if isinstance(raw.get("material_id"), str)
+    }
+    catalog_expansion = [
+            {
+                "material_id": material_id,
+                "rank": len(compatible) + rank,
+                "siglip2_score": None,
+                "dino_score": None,
+                "color_score": None,
+                "mvinverse_score": None,
+                "physical_catalog_expansion": True,
+            }
+            for rank, (material_id, record) in enumerate(
+                (
+                    (material_id, record)
+                    for material_id, record in sorted(catalog_by_id.items())
+                    if material_id not in known_material_ids
+                    if candidate_matches_material_semantics(record, semantics)
+                ),
+                start=1,
+            )
+        ]
+    compatible.extend(catalog_expansion)
+    if not compatible:
+        raise PartIdQwenError(
+            "physical_material_library_gap: Part-ID "
+            f"{part_id} has no compatible immutable catalog MDL"
+        )
+    return compatible, {
+        "policy": "predict_material_then_filter_mdl/v1",
+        "material_semantics": semantics,
+        "input_candidate_count": len(ranking),
+        "compatible_candidate_count": len(compatible),
+        "compatible_retrieved_candidate_count": len(compatible_retrieved),
+        "compatible_catalog_expansion_count": len(catalog_expansion),
+        "full_catalog_expansion_used": bool(catalog_expansion),
+        "visual_cross_family_fallback_allowed": False,
+    }
 
 
 def _read(path: Path, label: str) -> dict[str, Any]:
@@ -788,6 +889,7 @@ def _apply_part_id_selective_regression(
     jobs: Sequence[Mapping[str, Any]],
     qwen_selections: Sequence[Mapping[str, Any]],
     maximum_local_score_regression: float = (DEFAULT_MAXIMUM_LOCAL_SCORE_REGRESSION),
+    lock_predicted_material_identity: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Keep each Qwen choice only when it does not regress its own Part-ID.
 
@@ -898,7 +1000,10 @@ def _apply_part_id_selective_regression(
         effective_maximum_regression = (
             0.0 if strict_color_nonregression else float(maximum_local_score_regression)
         )
-        gate_changed = regression > effective_maximum_regression
+        gate_changed = bool(
+            not lock_predicted_material_identity
+            and regression > effective_maximum_regression
+        )
         selected = best if gate_changed else qwen_scored
         final.append(
             {
@@ -922,9 +1027,13 @@ def _apply_part_id_selective_regression(
                 ),
                 "strict_color_nonregression": strict_color_nonregression,
                 "selection_source": (
-                    "fresh_local_baseline"
-                    if gate_changed
-                    else "qwen_within_local_nonregression_limit"
+                    "predicted_material_identity_locked_color_deferred"
+                    if lock_predicted_material_identity
+                    else (
+                        "fresh_local_baseline"
+                        if gate_changed
+                        else "qwen_within_local_nonregression_limit"
+                    )
                 ),
                 "gate_changed_qwen_choice": gate_changed,
                 "previous_material_plan_consulted": False,
@@ -1122,11 +1231,260 @@ def _validate_batch(
     return [output[str(item["part_id"])] for item in expected]
 
 
+def _validate_physical_batch(
+    document: Mapping[str, Any],
+    *,
+    expected: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    if set(document) != {"schema_version", "classifications"} or document.get(
+        "schema_version"
+    ) != PHYSICAL_BATCH_SCHEMA_VERSION:
+        raise PartIdQwenError("material-prediction batch uses an invalid schema")
+    rows = document.get("classifications")
+    if not isinstance(rows, list) or len(rows) != len(expected):
+        raise PartIdQwenError("material-prediction batch coverage is invalid")
+    expected_by_id = {str(item["part_id"]): item for item in expected}
+    output: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(rows):
+        required = {
+            "part_id",
+            "decision_status",
+            "substrate",
+            "surface_treatment",
+            "optical_behavior",
+            "finish",
+            "confidence",
+        }
+        if not isinstance(raw, Mapping) or set(raw) != required:
+            raise PartIdQwenError(
+                f"material prediction {index} has unexpected fields"
+            )
+        part_id = raw.get("part_id")
+        confidence = raw.get("confidence")
+        decision_status = raw.get("decision_status")
+        if (
+            not isinstance(part_id, str)
+            or part_id not in expected_by_id
+            or part_id in output
+            or decision_status not in {"accepted", "ambiguous", "unknown"}
+            or isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not math.isfinite(float(confidence))
+            or not 0.0 <= float(confidence) <= 1.0
+        ):
+            raise PartIdQwenError(f"material prediction {index} is invalid")
+        if (
+            decision_status == "accepted"
+            and float(confidence)
+            < MINIMUM_ACCEPTED_MATERIAL_PREDICTION_CONFIDENCE
+        ):
+            raise PartIdQwenError(
+                f"material prediction {index} accepted below the confidence floor"
+            )
+        evidence_status = {
+            "accepted": "observed",
+            "ambiguous": "ambiguous",
+            "unknown": "unknown",
+        }[str(decision_status)]
+        try:
+            semantics = normalize_part_material_semantics(
+                {
+                    "schema_version": PART_MATERIAL_SEMANTICS_SCHEMA_VERSION,
+                    "substrate": raw.get("substrate"),
+                    "surface_treatment": raw.get("surface_treatment"),
+                    "optical_behavior": raw.get("optical_behavior"),
+                    "finish": raw.get("finish"),
+                    "physical_source": "vision_inference",
+                    "evidence_status": evidence_status,
+                    "confidence": float(confidence),
+                    "legacy_physical_surface_class": None,
+                }
+            )
+        except ValueError as exc:
+            raise PartIdQwenError(
+                f"material prediction {index} has invalid semantics: {exc}"
+            ) from exc
+        output[part_id] = {
+            "part_id": part_id,
+            "decision_status": decision_status,
+            "confidence": float(confidence),
+            "confidence_authoritative": False,
+            "material_semantics": semantics,
+            "legacy_physical_surface_class": legacy_surface_from_semantics(semantics),
+        }
+    if set(output) != set(expected_by_id):
+        raise PartIdQwenError("material prediction did not cover every target")
+    return [output[str(item["part_id"])] for item in expected]
+
+
+def _physical_payload(
+    *,
+    model: str,
+    batch: Sequence[Mapping[str, Any]],
+    retry_detail: str | None = None,
+) -> dict[str, Any]:
+    content: list[dict[str, Any]] = []
+    for item in batch:
+        raw_crops = item.get("crops")
+        crops = (
+            list(raw_crops)
+            if isinstance(raw_crops, Sequence)
+            and not isinstance(raw_crops, (str, bytes))
+            else [item.get("crop")]
+        )
+        if (
+            not 1 <= len(crops) <= MAXIMUM_MATERIAL_PREDICTION_VIEWS
+            or any(not isinstance(crop, str) or not crop for crop in crops)
+        ):
+            raise PartIdQwenError(
+                f"material prediction {item.get('part_id')} has invalid view evidence"
+            )
+        content.append(
+            {
+                "type": "text",
+                "text": (
+                    f"MATERIAL PREDICTION FOR {item['part_id']}. "
+                    "All following images are isolated views of the same CAD "
+                    "entity. Classify their shared physical material, not color. "
+                    "Evidence: "
+                    + json.dumps(
+                        {
+                            "cad_identity": item.get("cad_identity"),
+                            "descriptor": item.get("descriptor"),
+                            "view_count": len(crops),
+                        },
+                        ensure_ascii=False,
+                    )
+                ),
+            }
+        )
+        content.extend(
+            {
+                "type": "image_url",
+                "image_url": {"url": load_image_url(crop)},
+            }
+            for crop in crops
+        )
+    output_shape = {
+        "schema_version": PHYSICAL_BATCH_SCHEMA_VERSION,
+        "classifications": [
+            {
+                "part_id": item["part_id"],
+                "decision_status": "accepted",
+                "substrate": "metal",
+                "surface_treatment": "paint",
+                "optical_behavior": "opaque",
+                "finish": "matte",
+                "confidence": 0.75,
+            }
+            for item in batch
+        ],
+    }
+    content.append(
+        {
+            "type": "text",
+            "text": "\n".join(
+                [
+                    "First predict physical material semantics. Do not optimize color and do not choose an MDL yet.",
+                    "Separate bulk substrate from visible treatment: painted metal is substrate=metal, surface_treatment=paint, optical_behavior=opaque.",
+                    "Use ambiguous or unknown rather than forcing a category. Confidence is audit-only.",
+                    "Allowed substrates: " + json.dumps(sorted(SUBSTRATES)),
+                    "Allowed treatments: " + json.dumps(sorted(SURFACE_TREATMENTS)),
+                    "Allowed optical behaviors: " + json.dumps(sorted(OPTICAL_BEHAVIORS)),
+                    "Allowed finishes: " + json.dumps(sorted(FINISH_CLASSES)),
+                    "Return strict JSON only: " + json.dumps(output_shape, ensure_ascii=False),
+                    *(
+                        [f"Correct this validation error: {retry_detail}"]
+                        if retry_detail
+                        else []
+                    ),
+                ]
+            ),
+        }
+    )
+    return {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a fail-closed industrial material classifier. "
+                    "Material identity precedes color matching."
+                ),
+            },
+            {"role": "user", "content": content},
+        ],
+        "response_format": {"type": "json_object"},
+        "temperature": 0,
+        "stream": False,
+        "enable_thinking": False,
+    }
+
+
+def _classify_physical_surfaces(
+    *,
+    inputs: Sequence[Mapping[str, Any]],
+    runner: Any,
+    model: str,
+    output_dir: Path,
+    batch_size: int,
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    raw_dir = output_dir / "material_prediction" / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    decisions: dict[str, dict[str, Any]] = {}
+    audits: list[dict[str, Any]] = []
+    batches = [
+        inputs[index : index + batch_size]
+        for index in range(0, len(inputs), batch_size)
+    ]
+    for batch_index, batch in enumerate(batches, start=1):
+        final_error: Exception | None = None
+        for attempt in range(1, 3):
+            generated = runner.generate_with_metadata(
+                _physical_payload(
+                    model=model,
+                    batch=batch,
+                    retry_detail=str(final_error) if final_error is not None else None,
+                )
+            )
+            raw_path = raw_dir / f"batch_{batch_index:03d}_attempt_{attempt}.txt"
+            raw_path.write_text(generated.text, encoding="utf-8")
+            try:
+                document, parse_audit = parse_plan_content_with_audit(generated.text)
+                validated = _validate_physical_batch(document, expected=batch)
+            except Exception as exc:
+                final_error = exc
+                continue
+            for decision in validated:
+                decisions[str(decision["part_id"])] = decision
+            audit_path = _write(
+                raw_dir / f"batch_{batch_index:03d}_attempt_{attempt}.parse.json",
+                {**parse_audit, "status": "valid", "generation": generated.metadata()},
+            )
+            audits.append(
+                {
+                    "batch_index": batch_index,
+                    "attempt": attempt,
+                    "part_ids": [str(item["part_id"]) for item in batch],
+                    "parse_audit": str(audit_path),
+                }
+            )
+            break
+        else:
+            raise PartIdQwenError(
+                f"material-prediction batch {batch_index} failed twice: {final_error}"
+            )
+    if set(decisions) != {str(item["part_id"]) for item in inputs}:
+        raise PartIdQwenError("material prediction lost an input Part-ID")
+    return decisions, audits
+
+
 def _payload(
     *,
     model: str,
     batch: Sequence[dict[str, Any]],
     allow_color_tuning: bool,
+    require_material_prediction: bool = False,
     entity_label: str = "exact CAD Part-ID",
     retry_detail: str | None = None,
 ) -> dict[str, Any]:
@@ -1172,7 +1530,15 @@ def _payload(
             f"Choose one NVIDIA Base MDL independently for each {entity_label}.",
             "Each TARGET is the bounded, core-masked material evidence from a globally registered CAD Part-ID. Neutral pixels are not material evidence. Use the supplied descriptor and the visible core; do not infer a material from an adjacent part or background.",
             "Do not create new material groups or copy a decision to an unrelated target.",
-            "Optimize visible similarity only. Exact engineering/semantic category may differ, but visual behavior may not: opacity versus transmission, surface continuity, texture scale, color, brightness, highlight response and roughness are mandatory constraints.",
+            (
+                "The physical material prediction is already sealed. Every "
+                "candidate passed its substrate, surface-treatment and optical-"
+                "behavior hard gate. Material category is immutable; rank "
+                "only texture scale, surface structure, finish, roughness and "
+                "highlight response inside the compatible set."
+                if require_material_prediction
+                else "Optimize visible similarity only. Exact engineering/semantic category may differ, but visual behavior may not: opacity versus transmission, surface continuity, texture scale, color, brightness, highlight response and roughness are mandatory constraints."
+            ),
             "Compare TARGET directly with the numbered actual MDL renders. Never choose a transmissive/transparent candidate for an opaque target, and never introduce grass, fabric, wood, stone or other repeating/high-frequency texture when TARGET is smooth.",
             (
                 "For color_tunable=true candidates, a Part-ID-specific H1 may "
@@ -1189,7 +1555,13 @@ def _payload(
                     "The program maps that index to the exact MDL ID."
                 )
             ),
-            "SigLIP2, DINO, MVInverse and compatibility scores are evidence, not an instruction to choose rank 1. The actual comparison image has final authority.",
+            (
+                "SigLIP2 and DINO rank appearance only. The sealed material "
+                "prediction bounds the allowed MDLs and cannot be overridden "
+                "by a closer default color."
+                if require_material_prediction
+                else "SigLIP2, DINO, MVInverse and compatibility scores are evidence, not an instruction to choose rank 1. The actual comparison image has final authority."
+            ),
             "Every supplied candidate is selectable. Return its integer candidate_index exactly; never write, reconstruct or guess a material_id path.",
             "Valid candidate_index ranges: "
             + ", ".join(
@@ -1241,6 +1613,7 @@ def run_part_id_qwen_rerank(
     batch_size: int = 4,
     candidate_count: int = 4,
     allow_color_tuning: bool = False,
+    require_material_prediction: bool = False,
     entity_label: str = "exact CAD Part-ID",
 ) -> dict[str, Any]:
     """Rerank each Part-ID shortlist without any palette-group decision."""
@@ -1284,6 +1657,79 @@ def run_part_id_qwen_rerank(
             "Qwen rerank inputs do not exactly cover the same observed Part IDs"
         )
     catalog_by_id = _catalog_by_id(catalog)
+    physical_decisions: dict[str, dict[str, Any]] = {}
+    physical_batch_audits: list[dict[str, Any]] = []
+    if require_material_prediction:
+        physical_inputs: list[dict[str, Any]] = []
+        for part_id in sorted(part_by_id):
+            part = part_by_id[part_id]
+            selected = [
+                observation
+                for observation in part.get("observations", [])
+                if isinstance(observation, Mapping)
+                and observation.get("selected_for_material_inference") is True
+            ]
+            if len(selected) != 1:
+                raise PartIdQwenError(
+                    f"Part-ID {part_id} needs one material-prediction observation"
+                )
+            observation = selected[0]
+            crop = observation.get("isolated_crop", observation.get("crop"))
+            if not isinstance(crop, str) or not crop:
+                raise PartIdQwenError(
+                    f"Part-ID {part_id} has no isolated material crop"
+                )
+            physical_inputs.append(
+                {
+                    "part_id": part_id,
+                    "crop": crop,
+                    "crops": [
+                        str(value)
+                        for value in dict.fromkeys(
+                            observation.get("isolated_crop", observation.get("crop"))
+                            for observation in sorted(
+                                (
+                                    observation
+                                    for observation in part.get("observations", [])
+                                    if isinstance(observation, Mapping)
+                                    and isinstance(
+                                        observation.get(
+                                            "isolated_crop", observation.get("crop")
+                                        ),
+                                        str,
+                                    )
+                                ),
+                                key=lambda observation: (
+                                    observation.get(
+                                        "selected_for_material_inference"
+                                    )
+                                    is not True,
+                                    -int(
+                                        observation.get("trusted_pixels", 0)
+                                        if isinstance(
+                                            observation.get("trusted_pixels", 0), int
+                                        )
+                                        and not isinstance(
+                                            observation.get("trusted_pixels", 0), bool
+                                        )
+                                        else 0
+                                    ),
+                                    str(observation.get("view_id", "")),
+                                ),
+                            )
+                        )
+                    ][:MAXIMUM_MATERIAL_PREDICTION_VIEWS],
+                    "cad_identity": part.get("cad_identity"),
+                    "descriptor": part.get("descriptor"),
+                }
+            )
+        physical_decisions, physical_batch_audits = _classify_physical_surfaces(
+            inputs=physical_inputs,
+            runner=runner,
+            model=model,
+            output_dir=output_dir,
+            batch_size=batch_size,
+        )
     bank_context = _observation_bank_context(retrieval)
     bank_root = bank_context[0] if bank_context is not None else None
     profiles_by_id = bank_context[1] if bank_context is not None else {}
@@ -1316,6 +1762,14 @@ def run_part_id_qwen_rerank(
         ranking = retrieval_by_id[part_id].get("fused_ranking")
         if not isinstance(ranking, list) or len(ranking) < 2:
             raise PartIdQwenError(f"Part-ID {part_id} has no candidate ranking")
+        physical_gate: dict[str, Any] | None = None
+        if require_material_prediction:
+            ranking, physical_gate = _physical_filter_ranking(
+                part_id=part_id,
+                ranking=ranking,
+                catalog_by_id=catalog_by_id,
+                decision=physical_decisions[part_id],
+            )
         target = _target_appearance(selected_observations[0])
         shortlist = _compatibility_shortlist(
             ranking=ranking,
@@ -1325,7 +1779,7 @@ def run_part_id_qwen_rerank(
             candidate_count=candidate_count,
             allow_color_tuning=allow_color_tuning,
         )
-        if len(shortlist) < 2:
+        if len(shortlist) < (1 if require_material_prediction else 2):
             raise PartIdQwenError(
                 f"Part-ID {part_id} has too few visually compatible candidates"
             )
@@ -1400,6 +1854,7 @@ def run_part_id_qwen_rerank(
                     "isolated_crop", selected_observations[0]["crop"]
                 ),
                 "descriptor": part["descriptor"],
+                "material_prediction": physical_decisions.get(part_id),
                 "target_appearance": target,
                 "candidates": candidates,
                 "library_gap_fallback": library_gap_fallback,
@@ -1408,6 +1863,8 @@ def run_part_id_qwen_rerank(
         gate_audits.append(
             {
                 "part_id": part_id,
+                "material_prediction": physical_decisions.get(part_id),
+                "material_prediction_gate": physical_gate,
                 "target_appearance": target,
                 "library_gap_fallback": library_gap_fallback,
                 "input_candidate_count": len(ranking),
@@ -1472,6 +1929,7 @@ def run_part_id_qwen_rerank(
                 model=model,
                 batch=batch,
                 allow_color_tuning=allow_color_tuning,
+                require_material_prediction=require_material_prediction,
                 entity_label=entity_label,
                 retry_detail=str(final_error) if final_error is not None else None,
             )
@@ -1523,6 +1981,7 @@ def run_part_id_qwen_rerank(
     selections, selective_regression = _apply_part_id_selective_regression(
         jobs=jobs,
         qwen_selections=qwen_selections,
+        lock_predicted_material_identity=require_material_prediction,
     )
     choices = {row["part_id"]: row["material_id"] for row in selections}
     if set(choices) != set(part_by_id):
@@ -1539,6 +1998,14 @@ def run_part_id_qwen_rerank(
         "batch_size": batch_size,
         "candidate_count": candidate_count,
         "allow_color_tuning": allow_color_tuning,
+        "require_material_prediction": require_material_prediction,
+        "selection_order": (
+            "material_prediction_then_mdl_identity_lock_then_same_id_color"
+            if require_material_prediction
+            else "visual_similarity"
+        ),
+        "material_predictions": physical_decisions,
+        "material_prediction_batches": physical_batch_audits,
         "comparison_sheets_used": all(
             isinstance(job.get("comparison_sheet"), str) for job in jobs
         ),
@@ -1559,6 +2026,8 @@ def run_part_id_qwen_rerank(
             "material_library_gap_fallback_count": sum(
                 job.get("library_gap_fallback") is not None for job in jobs
             ),
+            "material_prediction_count": len(physical_decisions),
+            "physical_cross_family_fallback_count": 0,
             "selective_regression_changed_count": (
                 selective_regression["summary"]["fresh_local_baseline_selected_count"]
             ),
@@ -1589,6 +2058,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "treat reviewed Base MDL colour inputs as target-reproducible while "
             "keeping texture, normal and coating on the selected preset"
+        ),
+    )
+    parser.add_argument(
+        "--require-material-prediction",
+        action="store_true",
+        help=(
+            "predict physical material semantics before MDL reranking and "
+            "forbid cross-category visual fallbacks"
         ),
     )
     parser.add_argument("--max-new-tokens", type=int, default=1024)
@@ -1635,6 +2112,7 @@ def main(argv: list[str] | None = None) -> int:
             batch_size=args.batch_size,
             candidate_count=args.candidate_count,
             allow_color_tuning=args.allow_mdl_color_tuning,
+            require_material_prediction=args.require_material_prediction,
         )
     finally:
         runner.unload()

@@ -460,6 +460,24 @@ class ComponentMdlTournamentTests(unittest.TestCase):
         )
         self.assertEqual(winner["selected_material_id"], satin)
 
+        locked = select_component_mdl_winner(
+            component_id="AC_paint",
+            baseline_material_id=matte,
+            candidate_scores={
+                matte: {"appearance_score": 0.3},
+                satin: {"appearance_score": 0.9},
+            },
+            authorized_candidate_material_ids=[matte, satin],
+            lock_baseline_identity=True,
+            **strict,
+        )
+        self.assertEqual(locked["selected_material_id"], matte)
+        self.assertTrue(locked["predicted_material_identity_locked"])
+        self.assertEqual(
+            locked["selection_status"],
+            "PREDICTED_MATERIAL_IDENTITY_LOCKED_COLOR_DEFERRED",
+        )
+
     @staticmethod
     def _component_score(
         component_id: str,
@@ -532,6 +550,56 @@ class ComponentMdlTournamentTests(unittest.TestCase):
         self.assertEqual(binding["maximum_member_regression"], 0.03)
         self.assertNotIn("parameters", source["assignments"][0])
 
+    def test_plastic_identity_stays_plastic_then_uses_same_id_color_h1(self) -> None:
+        plastic = "mdl:Plastics/Plastic_ABS.mdl#Plastic_ABS"
+        semantics = {
+            part_id: {
+                "schema_version": "qwen-part-material-semantics/v1",
+                "substrate": "polymer",
+                "surface_treatment": "bare",
+                "optical_behavior": "opaque",
+                "finish": "smooth",
+                "physical_source": "vision_inference",
+                "evidence_status": "observed",
+                "confidence": 0.9,
+            }
+            for part_id in ("P0001", "P0002")
+        }
+        catalog = {
+            plastic: self._catalog_record(
+                plastic,
+                family="plastic",
+                treatment="bare",
+                finish="smooth",
+                compatible_substrates=["polymer"],
+            )
+        }
+        source = self._plan()
+        for assignment in source["assignments"][:2]:
+            assignment["material_id"] = plastic
+            assignment.pop("parameters", None)
+        candidate = build_component_color_candidate_plan(
+            source_plan=source,
+            component_id="AC_plastic",
+            member_part_ids=["P0001", "P0002"],
+            material_id=plastic,
+            target_srgb=[0.12, 0.32, 0.72],
+            member_material_semantics=semantics,
+            catalog_materials_by_id=catalog,
+        )
+        assignments = {row["part_id"]: row for row in candidate["assignments"]}
+        self.assertEqual(assignments["P0001"]["material_id"], plastic)
+        self.assertEqual(assignments["P0002"]["material_id"], plastic)
+        self.assertEqual(
+            assignments["P0001"]["parameters"],
+            assignments["P0002"]["parameters"],
+        )
+        self.assertEqual(
+            assignments["P0001"]["provenance"]
+            ["appearance_component_color_candidate"]["target_family"],
+            "polymer",
+        )
+
     def test_component_color_candidate_rejects_identity_change_or_unreviewed_profile(
         self,
     ) -> None:
@@ -561,7 +629,7 @@ class ComponentMdlTournamentTests(unittest.TestCase):
             assignment["material_id"] = custom
         with self.assertRaisesRegex(
             ComponentMdlTournamentError,
-            "reviewed Paint/Metal tuning profile",
+            "reviewed same-material tuning profile",
         ):
             build_component_color_candidate_plan(
                 source_plan=source,
