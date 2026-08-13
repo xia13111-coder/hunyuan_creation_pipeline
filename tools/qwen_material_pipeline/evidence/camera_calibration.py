@@ -13,6 +13,7 @@ import argparse
 import copy
 import hashlib
 import importlib
+import itertools
 import json
 import math
 import os
@@ -45,13 +46,32 @@ SUPERVISOR_RENDER_BATCH_LIMIT = 2
 SUPERVISOR_ROTATION_SCHEMA_VERSION = "qwen-camera-session-rotation/v1"
 SUPERVISOR_ROTATION_MARKER = ".camera_session_rotation.json"
 MAX_FOCAL_LENGTH_MM = 2000.0
-CAMERA_OBJECTIVE_VERSION = "hierarchical_visible_part_alignment/v8"
+CAMERA_OBJECTIVE_VERSION = "physical_camera_constrained_silhouette/v13"
+CHECKPOINT_COMPATIBLE_OBJECTIVE_VERSIONS = frozenset(
+    {
+        "physical_camera_constrained_silhouette/v12",
+        CAMERA_OBJECTIVE_VERSION,
+    }
+)
 COMPLETE_ALIGNMENT_MINIMUM_IOU = 0.97
 COMPLETE_ALIGNMENT_MAXIMUM_BOUNDARY_P95_PX = 3.0
+PHASE_INCUMBENT_MAXIMUM_IOU_REGRESSION = 0.005
+PHASE_INCUMBENT_MAXIMUM_BOUNDARY_REGRESSION_PX = 0.75
+# A camera candidate is scored after only a small, camera-independent frame
+# normalization.  Unlike the historical bbox fit, this correction cannot hide
+# an incorrect focal length, distance, roll, or principal point.
+FRAME_RESIDUAL_MINIMUM_SCALE = 0.985
+FRAME_RESIDUAL_MAXIMUM_SCALE = 1.015
+FRAME_RESIDUAL_MAXIMUM_ROTATION_DEGREES = 1.0
+FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO = 0.02
+FRAME_RESIDUAL_OPTIMIZATION_MAXIMUM_SIDE = 256
 CAMERA_PHASES = (
     "coarse",
     "lens",
     "fine",
+    "roll",
+    "principal_point",
+    "radial_distortion",
     "perspective",
     "component_pose",
     "perspective_recheck",
@@ -63,6 +83,8 @@ CAMERA_PHASES = (
     "lens_micro",
     "nano",
     "target_micro",
+    "frame_micro",
+    "radial_distortion_micro",
     "pico",
     "target_pico",
 )
@@ -187,6 +209,40 @@ def _camera_up(direction: Sequence[float]) -> list[float]:
     return _normalize(projected).tolist()
 
 
+def _roll_up_axis(
+    direction: Sequence[float],
+    up_axis: Sequence[float],
+    roll_degrees: float,
+) -> list[float]:
+    """Rotate a camera up vector around its optical/orbit direction."""
+
+    view = _normalize(direction)
+    up = _normalize(up_axis)
+    up = up - float(np.dot(up, view)) * view
+    up = _normalize(up)
+    angle = math.radians(float(roll_degrees))
+    rotated = up * math.cos(angle) + np.cross(view, up) * math.sin(angle)
+    return _normalize(rotated).tolist()
+
+
+def _transport_up_axis(
+    source_direction: Sequence[float],
+    source_up: Sequence[float],
+    target_direction: Sequence[float],
+) -> list[float]:
+    """Parallel-transport the incumbent roll into a nearby view direction."""
+
+    source_view = _normalize(source_direction)
+    target_view = _normalize(target_direction)
+    up = _normalize(source_up)
+    up = up - float(np.dot(up, source_view)) * source_view
+    up = _normalize(up)
+    transported = up - float(np.dot(up, target_view)) * target_view
+    if float(np.linalg.norm(transported)) <= 1e-6:
+        return _camera_up(target_view)
+    return _normalize(transported).tolist()
+
+
 def _candidate_specs(
     *,
     reference_id: str,
@@ -199,6 +255,12 @@ def _candidate_specs(
     seed_target_u = float(seed.get("target_offset_u", 0.0))
     seed_target_v = float(seed.get("target_offset_v", 0.0))
     seed_projection_mode = str(seed.get("projection_mode", "perspective"))
+    seed_roll = float(seed.get("roll_degrees", 0.0))
+    seed_principal_u = float(seed.get("principal_point_u", 0.0))
+    seed_principal_v = float(seed.get("principal_point_v", 0.0))
+    seed_radial_k1 = float(seed.get("radial_distortion_k1", 0.0))
+    seed_radial_k2 = float(seed.get("radial_distortion_k2", 0.0))
+    seed_frame_anchor = seed.get("frame_anchor_affine")
     seed_orthographic_span = float(
         seed.get("orthographic_span_multiplier", 2.0)
     )
@@ -206,6 +268,11 @@ def _candidate_specs(
     orthographic_span_multiplier = seed_orthographic_span
     target_u_values = (seed_target_u,)
     target_v_values = (seed_target_v,)
+    roll_values = (seed_roll,)
+    principal_u_values = (seed_principal_u,)
+    principal_v_values = (seed_principal_v,)
+    radial_k1_values = (seed_radial_k1,)
+    radial_k2_values = (seed_radial_k2,)
     distance_focal_pairs: tuple[tuple[float, float], ...] | None = None
     if phase == "coarse":
         # Replicator render products are expensive to register in bulk.  A
@@ -248,6 +315,73 @@ def _candidate_specs(
             }
         )
         focal_lengths = (seed_focal,)
+    elif phase == "roll":
+        angle_offsets = (0.0,)
+        elevation_offsets = (0.0,)
+        distances = (seed_distance,)
+        focal_lengths = (seed_focal,)
+        roll_values = tuple(
+            sorted(
+                {
+                    round(float(np.clip(seed_roll + value, -15.0, 15.0)), 5)
+                    for value in (-6.0, -3.0, 0.0, 3.0, 6.0)
+                }
+            )
+        )
+    elif phase == "principal_point":
+        angle_offsets = (0.0,)
+        elevation_offsets = (0.0,)
+        distances = (seed_distance,)
+        focal_lengths = (seed_focal,)
+        principal_u_values = tuple(
+            sorted(
+                {
+                    round(
+                        float(np.clip(seed_principal_u + value, -0.20, 0.20)),
+                        5,
+                    )
+                    for value in (-0.08, -0.04, 0.0, 0.04, 0.08)
+                }
+            )
+        )
+        principal_v_values = tuple(
+            sorted(
+                {
+                    round(
+                        float(np.clip(seed_principal_v + value, -0.20, 0.20)),
+                        5,
+                    )
+                    for value in (-0.08, -0.04, 0.0, 0.04, 0.08)
+                }
+            )
+        )
+    elif phase == "radial_distortion":
+        angle_offsets = (0.0,)
+        elevation_offsets = (0.0,)
+        distances = (seed_distance,)
+        focal_lengths = (seed_focal,)
+        radial_k1_values = tuple(
+            sorted(
+                {
+                    round(
+                        float(np.clip(seed_radial_k1 + value, -0.35, 0.35)),
+                        5,
+                    )
+                    for value in (-0.16, -0.08, 0.0, 0.08, 0.16)
+                }
+            )
+        )
+        radial_k2_values = tuple(
+            sorted(
+                {
+                    round(
+                        float(np.clip(seed_radial_k2 + value, -0.20, 0.20)),
+                        5,
+                    )
+                    for value in (-0.06, 0.0, 0.06)
+                }
+            )
+        )
     elif phase in {"perspective", "perspective_recheck"}:
         # Apparent image scale is resolved by the single whole-image
         # similarity, but depth-dependent parallax is controlled by physical
@@ -430,6 +564,68 @@ def _candidate_specs(
                 }
             )
         )
+    elif phase == "frame_micro":
+        angle_offsets = (0.0,)
+        elevation_offsets = (0.0,)
+        distances = (seed_distance,)
+        focal_lengths = (seed_focal,)
+        roll_values = tuple(
+            sorted(
+                {
+                    round(float(np.clip(seed_roll + value, -15.0, 15.0)), 5)
+                    for value in (-0.5, 0.0, 0.5)
+                }
+            )
+        )
+        principal_u_values = tuple(
+            sorted(
+                {
+                    round(
+                        float(np.clip(seed_principal_u + value, -0.20, 0.20)),
+                        5,
+                    )
+                    for value in (-0.01, 0.0, 0.01)
+                }
+            )
+        )
+        principal_v_values = tuple(
+            sorted(
+                {
+                    round(
+                        float(np.clip(seed_principal_v + value, -0.20, 0.20)),
+                        5,
+                    )
+                    for value in (-0.01, 0.0, 0.01)
+                }
+            )
+        )
+    elif phase == "radial_distortion_micro":
+        angle_offsets = (0.0,)
+        elevation_offsets = (0.0,)
+        distances = (seed_distance,)
+        focal_lengths = (seed_focal,)
+        radial_k1_values = tuple(
+            sorted(
+                {
+                    round(
+                        float(np.clip(seed_radial_k1 + value, -0.35, 0.35)),
+                        5,
+                    )
+                    for value in (-0.02, 0.0, 0.02)
+                }
+            )
+        )
+        radial_k2_values = tuple(
+            sorted(
+                {
+                    round(
+                        float(np.clip(seed_radial_k2 + value, -0.20, 0.20)),
+                        5,
+                    )
+                    for value in (-0.01, 0.0, 0.01)
+                }
+            )
+        )
     elif phase == "pico":
         # The production result is selected only after this sub-tenth-degree
         # stage.  Keeping it last is essential: a later coarse "settle" pass
@@ -483,80 +679,145 @@ def _candidate_specs(
                 for projection_mode in projection_modes:
                     for target_u in target_u_values:
                         for target_v in target_v_values:
-                            exact_seed = (
-                                azimuth_offset == 0.0
-                                and elevation_offset == 0.0
-                                and math.isclose(
-                                    distance, seed_distance, abs_tol=1e-6
+                            for (
+                                roll,
+                                principal_u,
+                                principal_v,
+                                radial_k1,
+                                radial_k2,
+                            ) in itertools.product(
+                                roll_values,
+                                principal_u_values,
+                                principal_v_values,
+                                radial_k1_values,
+                                radial_k2_values,
+                            ):
+                                exact_seed = (
+                                    azimuth_offset == 0.0
+                                    and elevation_offset == 0.0
+                                    and math.isclose(
+                                        distance, seed_distance, abs_tol=1e-6
+                                    )
+                                    and math.isclose(
+                                        focal_length, seed_focal, abs_tol=1e-6
+                                    )
+                                    and math.isclose(
+                                        target_u, seed_target_u, abs_tol=1e-6
+                                    )
+                                    and math.isclose(
+                                        target_v, seed_target_v, abs_tol=1e-6
+                                    )
+                                    and projection_mode == seed_projection_mode
+                                    and math.isclose(
+                                        roll, seed_roll, abs_tol=1e-6
+                                    )
+                                    and math.isclose(
+                                        principal_u,
+                                        seed_principal_u,
+                                        abs_tol=1e-6,
+                                    )
+                                    and math.isclose(
+                                        principal_v,
+                                        seed_principal_v,
+                                        abs_tol=1e-6,
+                                    )
+                                    and math.isclose(
+                                        radial_k1, seed_radial_k1, abs_tol=1e-6
+                                    )
+                                    and math.isclose(
+                                        radial_k2, seed_radial_k2, abs_tol=1e-6
+                                    )
                                 )
-                                and math.isclose(
-                                    focal_length, seed_focal, abs_tol=1e-6
+                                direction = (
+                                    _normalize(seed["analysis_direction"]).tolist()
+                                    if exact_seed
+                                    else _direction(
+                                        azimuth + azimuth_offset,
+                                        elevation + elevation_offset,
+                                    )
                                 )
-                                and math.isclose(
-                                    target_u, seed_target_u, abs_tol=1e-6
+                                up_axis = (
+                                    _normalize(seed["analysis_up_axis"]).tolist()
+                                    if exact_seed
+                                    and seed.get("analysis_up_axis") is not None
+                                    else (
+                                        _transport_up_axis(
+                                            seed["analysis_direction"],
+                                            seed["analysis_up_axis"],
+                                            direction,
+                                        )
+                                        if seed.get("analysis_up_axis") is not None
+                                        else _camera_up(direction)
+                                    )
                                 )
-                                and math.isclose(
-                                    target_v, seed_target_v, abs_tol=1e-6
+                                up_axis = _roll_up_axis(
+                                    direction,
+                                    up_axis,
+                                    0.0 if exact_seed else roll - seed_roll,
                                 )
-                                and projection_mode == seed_projection_mode
-                            )
-                            direction = (
-                                _normalize(seed["analysis_direction"]).tolist()
-                                if exact_seed
-                                else _direction(
-                                    azimuth + azimuth_offset,
-                                    elevation + elevation_offset,
-                                )
-                            )
-                            up_axis = (
-                                _normalize(seed["analysis_up_axis"]).tolist()
-                                if exact_seed
-                                and seed.get("analysis_up_axis") is not None
-                                else _camera_up(direction)
-                            )
-                            view_id = f"cal_{reference_id}_{phase}_{index:03d}"
-                            views.append(
-                                {
-                                    "view_id": view_id,
-                                    "analysis_direction": direction,
-                                    "analysis_up_axis": up_axis,
-                                    "focal_length_mm": focal_length,
-                                    "distance_multiplier": distance,
-                                    "target_offset_u": target_u,
-                                    "target_offset_v": target_v,
-                                    "projection_mode": projection_mode,
-                                    "orthographic_span_multiplier": (
-                                        orthographic_span_multiplier
-                                    ),
-                                    "calibration": {
-                                        "reference_view_id": reference_id,
-                                        "phase": phase,
-                                        "azimuth_degrees": round(
-                                            (azimuth + azimuth_offset) % 360.0,
-                                            6,
-                                        ),
-                                        "elevation_degrees": round(
-                                            float(
-                                                np.clip(
-                                                    elevation + elevation_offset,
-                                                    -90.0,
-                                                    90.0,
-                                                )
-                                            ),
-                                            6,
-                                        ),
-                                        "distance_multiplier": distance,
+                                view_id = f"cal_{reference_id}_{phase}_{index:03d}"
+                                views.append(
+                                    {
+                                        "view_id": view_id,
+                                        "analysis_direction": direction,
+                                        "analysis_up_axis": up_axis,
                                         "focal_length_mm": focal_length,
+                                        "distance_multiplier": distance,
                                         "target_offset_u": target_u,
                                         "target_offset_v": target_v,
+                                        "roll_degrees": roll,
+                                        "principal_point_u": principal_u,
+                                        "principal_point_v": principal_v,
+                                        "radial_distortion_k1": radial_k1,
+                                        "radial_distortion_k2": radial_k2,
                                         "projection_mode": projection_mode,
                                         "orthographic_span_multiplier": (
                                             orthographic_span_multiplier
                                         ),
-                                    },
-                                }
-                            )
-                            index += 1
+                                        "calibration": {
+                                            "reference_view_id": reference_id,
+                                            "phase": phase,
+                                            "frame_anchor": exact_seed,
+                                            "azimuth_degrees": round(
+                                                (azimuth + azimuth_offset) % 360.0,
+                                                6,
+                                            ),
+                                            "elevation_degrees": round(
+                                                float(
+                                                    np.clip(
+                                                        elevation + elevation_offset,
+                                                        -90.0,
+                                                        90.0,
+                                                    )
+                                                ),
+                                                6,
+                                            ),
+                                            "distance_multiplier": distance,
+                                            "focal_length_mm": focal_length,
+                                            "target_offset_u": target_u,
+                                            "target_offset_v": target_v,
+                                            "roll_degrees": roll,
+                                            "principal_point_u": principal_u,
+                                            "principal_point_v": principal_v,
+                                            "radial_distortion_k1": radial_k1,
+                                            "radial_distortion_k2": radial_k2,
+                                            "projection_mode": projection_mode,
+                                            "orthographic_span_multiplier": (
+                                                orthographic_span_multiplier
+                                            ),
+                                            **(
+                                                {
+                                                    "frame_anchor_affine": (
+                                                        seed_frame_anchor
+                                                    )
+                                                }
+                                                if seed_frame_anchor is not None
+                                                else {}
+                                            ),
+                                        },
+                                    }
+                                )
+                                index += 1
     return {"schema_version": VIEW_SPEC_SCHEMA_VERSION, "views": views}
 
 
@@ -622,6 +883,279 @@ def _boundary_metrics(
     return {
         "boundary_mean_px": float(np.mean(distances)),
         "boundary_p95_px": float(np.percentile(distances, 95)),
+    }
+
+
+def _compose_affines(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    left3 = np.vstack((np.asarray(left, dtype=np.float64), (0.0, 0.0, 1.0)))
+    right3 = np.vstack((np.asarray(right, dtype=np.float64), (0.0, 0.0, 1.0)))
+    return (left3 @ right3)[:2].astype(np.float32)
+
+
+def _constrained_frame_projection(
+    reference_mask: np.ndarray,
+    render_mask: np.ndarray,
+    *,
+    anchor_affine: np.ndarray,
+) -> dict[str, Any]:
+    """Fit only a small residual around one shared physical-camera frame.
+
+    ``anchor_affine`` is bootstrapped once from the incumbent camera in the
+    current render batch.  Every competing camera uses that same mapping.
+    This prevents a fresh bbox fit from independently erasing the physical
+    effect of focal length, distance, roll, or principal-point candidates.
+    """
+
+    height, width = reference_mask.shape
+    output_size = (width, height)
+    anchored = cv2.warpAffine(
+        render_mask,
+        np.asarray(anchor_affine, dtype=np.float32),
+        output_size,
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    resize_factor = min(
+        1.0,
+        FRAME_RESIDUAL_OPTIMIZATION_MAXIMUM_SIDE / max(height, width),
+    )
+    small_size = (
+        max(1, int(round(width * resize_factor))),
+        max(1, int(round(height * resize_factor))),
+    )
+    small_reference = cv2.resize(
+        reference_mask,
+        small_size,
+        interpolation=cv2.INTER_NEAREST,
+    )
+    small_anchored = cv2.resize(
+        anchored,
+        small_size,
+        interpolation=cv2.INTER_NEAREST,
+    )
+    target = small_reference > 0
+    target_edge = cv2.morphologyEx(
+        target.astype(np.uint8),
+        cv2.MORPH_GRADIENT,
+        np.ones((3, 3), np.uint8),
+    )
+    target_distance = cv2.distanceTransform(
+        1 - target_edge,
+        cv2.DIST_L2,
+        3,
+    )
+    center = (0.5 * (small_size[0] - 1), 0.5 * (small_size[1] - 1))
+
+    def evaluate(values: Sequence[float]) -> tuple[float, dict[str, float], np.ndarray]:
+        scale, rotation, tx_ratio, ty_ratio = (float(value) for value in values)
+        residual = cv2.getRotationMatrix2D(center, rotation, scale).astype(np.float32)
+        residual[0, 2] += tx_ratio * small_size[0]
+        residual[1, 2] += ty_ratio * small_size[1]
+        registered = cv2.warpAffine(
+            small_anchored,
+            residual,
+            small_size,
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        selected = registered > 0
+        intersection = int(np.count_nonzero(target & selected))
+        union = int(np.count_nonzero(target | selected))
+        iou = intersection / max(1, union)
+        edge = cv2.morphologyEx(
+            selected.astype(np.uint8),
+            cv2.MORPH_GRADIENT,
+            np.ones((3, 3), np.uint8),
+        )
+        if np.any(edge) and np.any(target_edge):
+            selected_distance = cv2.distanceTransform(
+                1 - edge,
+                cv2.DIST_L2,
+                3,
+            )
+            distances = np.concatenate(
+                (target_distance[edge > 0], selected_distance[target_edge > 0])
+            )
+            boundary_mean = float(np.mean(distances))
+            boundary_p95 = float(np.percentile(distances, 95))
+        else:
+            boundary_mean = boundary_p95 = float(max(small_size))
+        diagonal = max(1.0, math.hypot(*small_size))
+        residual_prior = (
+            abs(math.log(max(scale, 1e-9))) / math.log(FRAME_RESIDUAL_MAXIMUM_SCALE)
+            + abs(rotation) / FRAME_RESIDUAL_MAXIMUM_ROTATION_DEGREES
+            + abs(tx_ratio) / FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO
+            + abs(ty_ratio) / FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO
+        ) / 4.0
+        loss = (
+            0.40 * (1.0 - iou)
+            + 0.25 * min(1.0, boundary_mean / (0.025 * diagonal))
+            + 0.25 * min(1.0, boundary_p95 / (0.06 * diagonal))
+            + 0.10 * residual_prior
+        )
+        return (
+            float(loss),
+            {
+                "iou": iou,
+                "boundary_mean_px": boundary_mean / resize_factor,
+                "boundary_p95_px": boundary_p95 / resize_factor,
+                "residual_prior": residual_prior,
+            },
+            residual,
+        )
+
+    centroid_delta = np.asarray((0.0, 0.0), dtype=np.float64)
+    anchored_moments = cv2.moments((small_anchored > 0).astype(np.uint8), True)
+    target_moments = cv2.moments(target.astype(np.uint8), True)
+    if anchored_moments["m00"] > 0.0 and target_moments["m00"] > 0.0:
+        centroid_delta = np.asarray(
+            (
+                target_moments["m10"] / target_moments["m00"]
+                - anchored_moments["m10"] / anchored_moments["m00"],
+                target_moments["m01"] / target_moments["m00"]
+                - anchored_moments["m01"] / anchored_moments["m00"],
+            )
+        )
+    centroid_seed = (
+        1.0,
+        0.0,
+        float(
+            np.clip(
+                centroid_delta[0] / max(1, small_size[0]),
+                -FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO,
+                FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO,
+            )
+        ),
+        float(
+            np.clip(
+                centroid_delta[1] / max(1, small_size[1]),
+                -FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO,
+                FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO,
+            )
+        ),
+    )
+    seeds = [
+        (1.0, 0.0, 0.0, 0.0),
+        centroid_seed,
+        (FRAME_RESIDUAL_MINIMUM_SCALE, 0.0, centroid_seed[2], centroid_seed[3]),
+        (FRAME_RESIDUAL_MAXIMUM_SCALE, 0.0, centroid_seed[2], centroid_seed[3]),
+    ]
+    bounds = (
+        (FRAME_RESIDUAL_MINIMUM_SCALE, FRAME_RESIDUAL_MAXIMUM_SCALE),
+        (
+            -FRAME_RESIDUAL_MAXIMUM_ROTATION_DEGREES,
+            FRAME_RESIDUAL_MAXIMUM_ROTATION_DEGREES,
+        ),
+        (
+            -FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO,
+            FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO,
+        ),
+        (
+            -FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO,
+            FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO,
+        ),
+    )
+    initial_steps = (0.015, 1.0, 0.02, 0.02)
+    best: tuple[float, tuple[float, ...], dict[str, float], np.ndarray] | None = None
+    evaluation_count = 0
+    for seed in seeds:
+        values = [float(value) for value in seed]
+        loss, metrics, matrix = evaluate(values)
+        evaluation_count += 1
+        local = (loss, tuple(values), metrics, matrix)
+        steps = list(initial_steps)
+        for _level in range(4):
+            changed = True
+            while changed:
+                changed = False
+                for index, step in enumerate(steps):
+                    for direction in (-1.0, 1.0):
+                        candidate = list(local[1])
+                        candidate[index] = float(
+                            np.clip(
+                                candidate[index] + direction * step,
+                                bounds[index][0],
+                                bounds[index][1],
+                            )
+                        )
+                        candidate_loss, candidate_metrics, candidate_matrix = evaluate(
+                            candidate
+                        )
+                        evaluation_count += 1
+                        proposed = (
+                            candidate_loss,
+                            tuple(candidate),
+                            candidate_metrics,
+                            candidate_matrix,
+                        )
+                        if (proposed[0], proposed[1]) < (local[0], local[1]):
+                            local = proposed
+                            changed = True
+            steps = [step * 0.5 for step in steps]
+        if best is None or (local[0], local[1]) < (best[0], best[1]):
+            best = local
+    if best is None:
+        raise RuntimeError("Constrained frame optimizer produced no candidate")
+    scale, rotation, tx_ratio, ty_ratio = best[1]
+    full_residual = cv2.getRotationMatrix2D(
+        (0.5 * (width - 1), 0.5 * (height - 1)),
+        rotation,
+        scale,
+    ).astype(np.float32)
+    full_residual[0, 2] += tx_ratio * width
+    full_residual[1, 2] += ty_ratio * height
+    total = _compose_affines(full_residual, anchor_affine)
+    registered = cv2.warpAffine(
+        render_mask,
+        total,
+        output_size,
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    target_selected = reference_mask > 0
+    registered_selected = registered > 0
+    intersection = int(np.count_nonzero(target_selected & registered_selected))
+    union = int(np.count_nonzero(target_selected | registered_selected))
+    full_iou = intersection / max(1, union)
+    return {
+        "bbox_affine": [
+            [round(float(value), 10) for value in row] for row in total.tolist()
+        ],
+        "ecc_warp": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        "global_similarity_affine": [
+            [round(float(value), 10) for value in row] for row in total.tolist()
+        ],
+        "projection_iou_before": round(
+            float(
+                np.count_nonzero(target_selected & (anchored > 0))
+                / max(1, np.count_nonzero(target_selected | (anchored > 0)))
+            ),
+            8,
+        ),
+        "projection_iou": round(float(full_iou), 8),
+        "ecc_status": "constrained_multi_start_coordinate_descent",
+        "ecc_correlation": 0.0,
+        "ecc_transform_audit": {
+            "registration_mode": "shared_anchor_plus_bounded_frame_residual",
+            "anchor_affine": [
+                [round(float(value), 10) for value in row]
+                for row in np.asarray(anchor_affine).tolist()
+            ],
+            "residual_scale": round(scale, 8),
+            "residual_rotation_degrees": round(rotation, 8),
+            "residual_translation_ratio_xy": [
+                round(tx_ratio, 8),
+                round(ty_ratio, 8),
+            ],
+            "residual_prior": round(float(best[2]["residual_prior"]), 8),
+            "optimizer_loss": round(float(best[0]), 8),
+            "optimizer_evaluation_count": evaluation_count,
+            "constraints_passed": True,
+            "constraint_failures": [],
+        },
     }
 
 
@@ -1054,6 +1588,7 @@ def _score_candidates(
         if isinstance(part, dict) and isinstance(part.get("part_id"), str)
     ]
     records: list[dict[str, Any]] = []
+    scored_views: list[tuple[Mapping[str, Any], np.ndarray, np.ndarray]] = []
     for view in registry.get("render_set", {}).get("views", []):
         calibration = view.get("camera_calibration")
         if (
@@ -1069,10 +1604,61 @@ def _score_candidates(
         if ids is None:
             raise ValueError(f"Unable to read calibration render {view.get('view_id')}")
         foreground = _deterministic_part_id_foreground(ids, colors)
-        projection = _refine_projection(
+        scored_views.append((view, ids, foreground))
+    if not scored_views:
+        raise ValueError(f"No calibration candidates found for {reference_id}")
+    bound_anchor_values = [
+        item[0].get("camera_calibration", {}).get("frame_anchor_affine")
+        for item in scored_views
+        if item[0].get("camera_calibration", {}).get("frame_anchor_affine")
+        is not None
+    ]
+    if bound_anchor_values:
+        if len(bound_anchor_values) != len(scored_views):
+            raise ValueError(
+                "Camera candidate batch mixes bound and unbound frame anchors"
+            )
+        canonical_bound_anchors = {
+            json.dumps(value, sort_keys=True, separators=(",", ":"))
+            for value in bound_anchor_values
+        }
+        if len(canonical_bound_anchors) != 1:
+            raise ValueError("Camera candidate batch has inconsistent frame anchors")
+        anchor_affine = np.asarray(bound_anchor_values[0], dtype=np.float32)
+        if anchor_affine.shape != (2, 3) or not np.isfinite(anchor_affine).all():
+            raise ValueError("Bound camera frame anchor must be a finite 2x3 affine")
+    else:
+        anchors = [
+            item
+            for item in scored_views
+            if item[0].get("camera_calibration", {}).get("frame_anchor") is True
+        ]
+        if len(anchors) != 1:
+            # Legacy/custom batches without an explicit anchor retain one
+            # deterministic bootstrap: the smallest view ID.  The fit is shared
+            # by every other camera and therefore cannot rank candidates by giving
+            # each one an independent image-space transform.
+            anchors = [
+                min(scored_views, key=lambda item: str(item[0].get("view_id")))
+            ]
+        anchor_projection = _refine_projection(
+            reference_mask,
+            anchors[0][2],
+            DEFAULT_POLICY,
+        )
+        anchor_affine = np.asarray(
+            anchor_projection["bbox_affine"], dtype=np.float32
+        )
+    for view, ids, foreground in scored_views:
+        calibration = view.get("camera_calibration")
+        if not isinstance(calibration, dict):
+            raise ValueError(
+                f"Calibration candidate {view.get('view_id')!r} has no metadata"
+            )
+        projection = _constrained_frame_projection(
             reference_mask,
             foreground,
-            DEFAULT_POLICY,
+            anchor_affine=anchor_affine,
         )
         matrix = np.asarray(projection["bbox_affine"], dtype=np.float32)
         registered = cv2.warpAffine(
@@ -1154,24 +1740,89 @@ def _score_candidates(
                 "distance_multiplier": view.get("camera_distance_multiplier"),
                 "target_offset_u": view.get("camera_target_offset_u", 0.0),
                 "target_offset_v": view.get("camera_target_offset_v", 0.0),
+                "roll_degrees": view.get("camera_roll_degrees", 0.0),
+                "principal_point_u": view.get("camera_principal_point_u", 0.0),
+                "principal_point_v": view.get("camera_principal_point_v", 0.0),
+                "radial_distortion_k1": view.get(
+                    "camera_radial_distortion_k1", 0.0
+                ),
+                "radial_distortion_k2": view.get(
+                    "camera_radial_distortion_k2", 0.0
+                ),
                 "projection_mode": view.get(
                     "camera_projection_mode", "perspective"
                 ),
                 "orthographic_span_multiplier": view.get(
                     "camera_orthographic_span_multiplier", 2.0
                 ),
-                "calibration": calibration,
+                "calibration": {
+                    **calibration,
+                    "frame_anchor_affine": anchor_affine.tolist(),
+                },
                 "whole_asset_similarity": projection,
             }
         )
     if not records:
         raise ValueError(f"No calibration candidates found for {reference_id}")
     records.sort(key=_alignment_candidate_sort_key)
-    return records[0], records
+    return _select_alignment_candidate(records), records
+
+
+def _select_alignment_candidate(
+    records: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Select within a trust region around the phase incumbent.
+
+    Every generated phase has one exact seed marked as its frame anchor.  A
+    higher composite score may only replace it when whole-object IoU and P95
+    boundary remain locally non-regressive.  This prevents structure terms
+    from walking the sequential physical search away from an already better
+    silhouette.  Rerank/custom batches without one incumbent use the global
+    complete-objective ordering directly.
+    """
+
+    if not records:
+        raise ValueError("Camera alignment selection requires candidates")
+    complete = [
+        item for item in records if bool(item.get("complete_alignment_candidate"))
+    ]
+    if complete:
+        return dict(min(complete, key=_alignment_candidate_sort_key))
+    incumbents = [
+        item
+        for item in records
+        if item.get("calibration", {}).get("frame_anchor") is True
+    ]
+    if len(incumbents) != 1:
+        return dict(min(records, key=_alignment_candidate_sort_key))
+    incumbent = incumbents[0]
+    minimum_iou = (
+        float(incumbent["projection_iou"])
+        - PHASE_INCUMBENT_MAXIMUM_IOU_REGRESSION
+    )
+    maximum_boundary = (
+        float(incumbent["boundary_p95_px"])
+        + PHASE_INCUMBENT_MAXIMUM_BOUNDARY_REGRESSION_PX
+    )
+    trusted = [
+        item
+        for item in records
+        if float(item["projection_iou"]) >= minimum_iou
+        and float(item["boundary_p95_px"]) <= maximum_boundary
+    ]
+    return dict(min(trusted, key=_alignment_candidate_sort_key))
 
 
 def _alignment_candidate_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
-    """Rank by the published alignment gate before the secondary objective."""
+    """Prefer actual gate passes, otherwise use the complete camera objective.
+
+    The published 0.97 IoU / 3 px boundary gate is deliberately strict.  When
+    no candidate passes it, sorting by normalized distance to that unreachable
+    corner lets a modest boundary change dominate every other alignment cue.
+    The composite objective already includes silhouette, boundary, structure,
+    component, and spatial evidence, so it is authoritative for incomplete
+    candidates.
+    """
 
     iou = float(item["projection_iou"])
     boundary_p95 = float(item["boundary_p95_px"])
@@ -1186,8 +1837,6 @@ def _alignment_candidate_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
     complete = iou_deficit <= 0.0 and boundary_deficit <= 0.0
     return (
         0 if complete else 1,
-        max(iou_deficit, boundary_deficit),
-        iou_deficit + boundary_deficit,
         -float(item["score"]),
         -iou,
         boundary_p95,
@@ -1314,8 +1963,24 @@ def _spec_from_score(
     *,
     view_id: str,
     phase: str,
+    bind_frame_anchor: bool = False,
+    mark_phase_incumbent: bool = False,
 ) -> dict[str, Any]:
     reference_id = str(score["calibration"]["reference_view_id"])
+    calibration = {
+        **score["calibration"],
+        "reference_view_id": reference_id,
+        "phase": phase,
+        "frame_anchor": mark_phase_incumbent,
+    }
+    if bind_frame_anchor:
+        audit = score.get("whole_asset_similarity", {}).get(
+            "ecc_transform_audit", {}
+        )
+        anchor_affine = audit.get("anchor_affine")
+        if not isinstance(anchor_affine, list):
+            raise ValueError("Final camera score has no sealed frame anchor")
+        calibration["frame_anchor_affine"] = anchor_affine
     return {
         "view_id": view_id,
         "analysis_direction": score["analysis_direction"],
@@ -1324,15 +1989,16 @@ def _spec_from_score(
         "distance_multiplier": score["distance_multiplier"],
         "target_offset_u": score.get("target_offset_u", 0.0),
         "target_offset_v": score.get("target_offset_v", 0.0),
+        "roll_degrees": score.get("roll_degrees", 0.0),
+        "principal_point_u": score.get("principal_point_u", 0.0),
+        "principal_point_v": score.get("principal_point_v", 0.0),
+        "radial_distortion_k1": score.get("radial_distortion_k1", 0.0),
+        "radial_distortion_k2": score.get("radial_distortion_k2", 0.0),
         "projection_mode": score.get("projection_mode", "perspective"),
         "orthographic_span_multiplier": score.get(
             "orthographic_span_multiplier", 2.0
         ),
-        "calibration": {
-            **score["calibration"],
-            "reference_view_id": reference_id,
-            "phase": phase,
-        },
+        "calibration": calibration,
     }
 
 
@@ -1340,13 +2006,14 @@ def _global_finalists(
     candidates: Sequence[Mapping[str, Any]],
     *,
     count: int,
+    required: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Keep the best distinct cameras across every refinement phase."""
 
     ordered = sorted(candidates, key=_alignment_candidate_sort_key)
     output: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
-    for raw in ordered:
+    for raw in (*required, *ordered):
         direction = tuple(round(float(value), 8) for value in raw["analysis_direction"])
         up_axis = tuple(round(float(value), 8) for value in raw["analysis_up_axis"])
         signature = (
@@ -1356,6 +2023,11 @@ def _global_finalists(
             round(float(raw["distance_multiplier"]), 6),
             round(float(raw.get("target_offset_u", 0.0)), 6),
             round(float(raw.get("target_offset_v", 0.0)), 6),
+            round(float(raw.get("roll_degrees", 0.0)), 6),
+            round(float(raw.get("principal_point_u", 0.0)), 6),
+            round(float(raw.get("principal_point_v", 0.0)), 6),
+            round(float(raw.get("radial_distortion_k1", 0.0)), 6),
+            round(float(raw.get("radial_distortion_k2", 0.0)), 6),
             str(raw.get("projection_mode", "perspective")),
             round(float(raw.get("orthographic_span_multiplier", 2.0)), 6),
         )
@@ -1529,6 +2201,15 @@ def _completed_phase(
     candidates = stored_scores.get("candidates")
     if not isinstance(winner, dict) or not isinstance(candidates, list) or not candidates:
         return None
+    if winner.get("objective_version") not in (
+        CHECKPOINT_COMPATIBLE_OBJECTIVE_VERSIONS
+    ) or any(
+        not isinstance(candidate, Mapping)
+        or candidate.get("objective_version")
+        not in CHECKPOINT_COMPATIBLE_OBJECTIVE_VERSIONS
+        for candidate in candidates
+    ):
+        return None
     expected_ids = {
         str(view.get("view_id"))
         for view in expected_specs.get("views", [])
@@ -1547,7 +2228,12 @@ def _completed_phase(
         or winner_id not in candidate_ids
     ):
         return None
-    return dict(winner), [dict(candidate) for candidate in candidates]
+    upgraded_winner = {**winner, "objective_version": CAMERA_OBJECTIVE_VERSION}
+    upgraded_candidates = [
+        {**candidate, "objective_version": CAMERA_OBJECTIVE_VERSION}
+        for candidate in candidates
+    ]
+    return upgraded_winner, upgraded_candidates
 
 
 def _seed_by_reference(
@@ -1572,6 +2258,11 @@ def _seed_by_reference(
             "distance_multiplier": 2.15,
             "target_offset_u": 0.0,
             "target_offset_v": 0.0,
+            "roll_degrees": 0.0,
+            "principal_point_u": 0.0,
+            "principal_point_v": 0.0,
+            "radial_distortion_k1": 0.0,
+            "radial_distortion_k2": 0.0,
             "projection_mode": "perspective",
             "orthographic_span_multiplier": 2.0,
         }
@@ -1600,9 +2291,25 @@ def _seed_by_view_specs(document: Mapping[str, Any]) -> dict[str, dict[str, Any]
             "distance_multiplier": float(raw.get("distance_multiplier", 2.15)),
             "target_offset_u": float(raw.get("target_offset_u", 0.0)),
             "target_offset_v": float(raw.get("target_offset_v", 0.0)),
+            "roll_degrees": float(raw.get("roll_degrees", 0.0)),
+            "principal_point_u": float(raw.get("principal_point_u", 0.0)),
+            "principal_point_v": float(raw.get("principal_point_v", 0.0)),
+            "radial_distortion_k1": float(raw.get("radial_distortion_k1", 0.0)),
+            "radial_distortion_k2": float(raw.get("radial_distortion_k2", 0.0)),
             "projection_mode": str(raw.get("projection_mode", "perspective")),
             "orthographic_span_multiplier": float(
                 raw.get("orthographic_span_multiplier", 2.0)
+            ),
+            **(
+                {
+                    "frame_anchor_affine": raw.get("calibration", {}).get(
+                        "frame_anchor_affine"
+                    )
+                }
+                if isinstance(raw.get("calibration"), Mapping)
+                and raw.get("calibration", {}).get("frame_anchor_affine")
+                is not None
+                else {}
             ),
         }
     if not output:
@@ -1764,6 +2471,19 @@ def _seed_by_registry(
                         "target_offset_v": float(
                             view.get("camera_target_offset_v") or 0.0
                         ),
+                        "roll_degrees": float(view.get("camera_roll_degrees") or 0.0),
+                        "principal_point_u": float(
+                            view.get("camera_principal_point_u") or 0.0
+                        ),
+                        "principal_point_v": float(
+                            view.get("camera_principal_point_v") or 0.0
+                        ),
+                        "radial_distortion_k1": float(
+                            view.get("camera_radial_distortion_k1") or 0.0
+                        ),
+                        "radial_distortion_k2": float(
+                            view.get("camera_radial_distortion_k2") or 0.0
+                        ),
                         "projection_mode": str(
                             view.get("camera_projection_mode") or "perspective"
                         ),
@@ -1791,6 +2511,11 @@ def _seed_by_registry(
             "distance_multiplier": winner["distance_multiplier"],
             "target_offset_u": winner.get("target_offset_u", 0.0),
             "target_offset_v": winner.get("target_offset_v", 0.0),
+            "roll_degrees": winner.get("roll_degrees", 0.0),
+            "principal_point_u": winner.get("principal_point_u", 0.0),
+            "principal_point_v": winner.get("principal_point_v", 0.0),
+            "radial_distortion_k1": winner.get("radial_distortion_k1", 0.0),
+            "radial_distortion_k2": winner.get("radial_distortion_k2", 0.0),
             "projection_mode": winner.get("projection_mode", "perspective"),
             "orthographic_span_multiplier": winner.get(
                 "orthographic_span_multiplier", 2.0
@@ -1885,12 +2610,20 @@ def _seal_full_resolution_winners(
             raise ValueError(
                 f"Winning finalist {source_view_id!r} belongs to a different reference"
             )
+        anchor_affine = winner.get("whole_asset_similarity", {}).get(
+            "ecc_transform_audit", {}
+        ).get("anchor_affine")
+        if not isinstance(anchor_affine, list):
+            raise ValueError(
+                f"Winning finalist {source_view_id!r} has no sealed frame anchor"
+            )
         view["view_id"] = reference_id
         view["sealed_source_view_id"] = source_view_id
         view["camera_calibration"] = {
             **calibration,
             "phase": "sealed_full_resolution_finalist",
             "sealed_source_view_id": source_view_id,
+            "frame_anchor_affine": anchor_affine,
         }
         sealed_views.append(view)
         source_views[reference_id] = source_view_id
@@ -2068,6 +2801,12 @@ def calibrate(
                     "candidate_count": len(candidates),
                 }
             )
+            # Candidate lists are sorted by the global objective, while the
+            # sequential phase winner is additionally constrained by the
+            # incumbent trust region.  Always retain that physically trusted
+            # winner in the rerank pool; otherwise a high structure score from
+            # a silhouette-regressive candidate can crowd it out entirely.
+            phase_candidate_pool.append(winner)
             phase_candidate_pool.extend(candidates[:FINALIST_COUNT])
             seed = {
                 "analysis_direction": winner["analysis_direction"],
@@ -2076,10 +2815,18 @@ def calibrate(
                 "distance_multiplier": winner["distance_multiplier"],
                 "target_offset_u": winner.get("target_offset_u", 0.0),
                 "target_offset_v": winner.get("target_offset_v", 0.0),
+                "roll_degrees": winner.get("roll_degrees", 0.0),
+                "principal_point_u": winner.get("principal_point_u", 0.0),
+                "principal_point_v": winner.get("principal_point_v", 0.0),
+                "radial_distortion_k1": winner.get("radial_distortion_k1", 0.0),
+                "radial_distortion_k2": winner.get("radial_distortion_k2", 0.0),
                 "projection_mode": winner.get("projection_mode", "perspective"),
                 "orthographic_span_multiplier": winner.get(
                     "orthographic_span_multiplier", 2.0
                 ),
+                "frame_anchor_affine": winner["calibration"][
+                    "frame_anchor_affine"
+                ],
             }
             print(
                 f"[CAMERA] {reference_id}/{phase} "
@@ -2098,11 +2845,21 @@ def calibrate(
                     f"{reference_id}/{phase}",
                     checkpoint=scores_path,
                 )
+        trusted_finalist = min(
+            (record["winner"] for record in phase_records),
+            key=lambda item: (
+                -float(item["projection_iou"]),
+                float(item["boundary_p95_px"]),
+                -float(item["score"]),
+                str(item["view_id"]),
+            ),
+        )
         finalists[reference_id] = _global_finalists(
             phase_candidate_pool,
             count=FINALIST_COUNT,
+            required=(trusted_finalist,),
         )
-        winners[reference_id] = phase_records[-1]["winner"]
+        winners[reference_id] = trusted_finalist
         phases[reference_id] = phase_records
 
     finalist_specs = {
@@ -2112,6 +2869,7 @@ def calibrate(
                 score,
                 view_id=f"rerank_{reference_id}_{rank:02d}",
                 phase="full_resolution_rerank",
+                mark_phase_incumbent=rank == 1,
             )
             for reference_id in requested
             for rank, score in enumerate(finalists[reference_id], start=1)
@@ -2171,6 +2929,7 @@ def calibrate(
                 winners[reference_id],
                 view_id=reference_id,
                 phase="final",
+                bind_frame_anchor=True,
             )
             for reference_id in requested
         ],
@@ -2230,21 +2989,27 @@ def calibrate(
         "camera_intrinsics_optimized": [
             "projection_mode",
             "focal_length_mm",
+            "principal_point_u",
+            "principal_point_v",
+            "radial_distortion_k1",
+            "radial_distortion_k2",
             "orthographic_aperture",
         ],
         "camera_extrinsics_optimized": [
             "orbit_azimuth",
             "orbit_elevation",
+            "camera_roll",
             "camera_distance",
             "optical_axis_target_u",
             "optical_axis_target_v",
         ],
         "image_frame_residual_optimized": [
-            "uniform_scale",
-            "in_plane_rotation",
-            "principal_point_xy",
-            "crop_translation_xy",
+            "bounded_uniform_scale_0.985_to_1.015",
+            "bounded_in_plane_rotation_plus_or_minus_1_degree",
+            "bounded_crop_translation_plus_or_minus_0.02_frame",
         ],
+        "image_frame_residual_shared_anchor_per_batch": True,
+        "image_frame_residual_shared_anchor_per_reference": True,
         "part_balanced_size_strata": ["small", "medium", "large"],
         "search_resolution": search_resolution,
         "final_resolution": final_resolution,

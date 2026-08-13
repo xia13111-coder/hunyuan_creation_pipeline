@@ -19,6 +19,7 @@ from qwen_material_pipeline.evidence.camera_calibration import (
     _boundary_metrics,
     _candidate_specs,
     _component_balanced_reference_metrics,
+    _constrained_frame_projection,
     _direction,
     _deterministic_part_id_foreground,
     _global_finalists,
@@ -26,6 +27,8 @@ from qwen_material_pipeline.evidence.camera_calibration import (
     _part_balanced_structure_metrics,
     _reference_masks,
     _residual_components,
+    _score_candidates,
+    _select_alignment_candidate,
     _seal_full_resolution_winners,
     _seed_by_view_specs,
     _silhouette_coverage_metrics,
@@ -466,8 +469,18 @@ def test_camera_phase_checkpoint_reuse_requires_exact_candidate_specs(
                 "schema_version": camera_calibration.SCHEMA_VERSION,
                 "reference_view_id": "front",
                 "phase": "micro",
-                "winner": {"view_id": "cal_front_micro_000"},
-                "candidates": [{"view_id": "cal_front_micro_000"}],
+                "winner": {
+                    "view_id": "cal_front_micro_000",
+                    "objective_version": camera_calibration.CAMERA_OBJECTIVE_VERSION,
+                },
+                "candidates": [
+                    {
+                        "view_id": "cal_front_micro_000",
+                        "objective_version": (
+                            camera_calibration.CAMERA_OBJECTIVE_VERSION
+                        ),
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -540,6 +553,69 @@ def test_fine_camera_candidates_preserve_one_whole_asset_camera() -> None:
     assert all("part" not in view for view in specs["views"])
 
 
+def test_first_stage_camera_candidates_add_roll_principal_point_and_distortion() -> None:
+    seed = {
+        "analysis_direction": _direction(15.0, 12.0),
+        "analysis_up_axis": [0.0, 0.0, 1.0],
+        "focal_length_mm": 45.0,
+        "distance_multiplier": 2.15,
+    }
+    roll = _candidate_specs(reference_id="side", seed=seed, phase="roll")
+    principal = _candidate_specs(
+        reference_id="side", seed=seed, phase="principal_point"
+    )
+    radial = _candidate_specs(
+        reference_id="side", seed=seed, phase="radial_distortion"
+    )
+
+    assert len(roll["views"]) == 5
+    assert {row["roll_degrees"] for row in roll["views"]} == {
+        -6.0,
+        -3.0,
+        0.0,
+        3.0,
+        6.0,
+    }
+    assert len(principal["views"]) == 25
+    assert {row["principal_point_u"] for row in principal["views"]} == {
+        -0.08,
+        -0.04,
+        0.0,
+        0.04,
+        0.08,
+    }
+    assert len(radial["views"]) == 15
+    assert {row["radial_distortion_k1"] for row in radial["views"]} == {
+        -0.16,
+        -0.08,
+        0.0,
+        0.08,
+        0.16,
+    }
+    assert sum(
+        row["calibration"]["frame_anchor"] is True for row in radial["views"]
+    ) == 1
+
+
+def test_constrained_frame_projection_cannot_hide_large_scale_error() -> None:
+    reference = np.zeros((256, 256), dtype=np.uint8)
+    reference[72:184, 76:180] = 255
+    source = np.zeros_like(reference)
+    source[96:160, 98:158] = 255
+
+    projection = _constrained_frame_projection(
+        reference,
+        source,
+        anchor_affine=np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32),
+    )
+    audit = projection["ecc_transform_audit"]
+
+    assert projection["projection_iou"] < 0.50
+    assert audit["residual_scale"] <= 1.015
+    assert abs(audit["residual_rotation_degrees"]) <= 1.0
+    assert max(abs(value) for value in audit["residual_translation_ratio_xy"]) <= 0.02
+
+
 def test_settle_camera_candidates_expand_distance_and_reduce_angle_step() -> None:
     specs = _candidate_specs(
         reference_id="top",
@@ -607,6 +683,11 @@ def test_micro_camera_candidates_refine_pose_and_distance() -> None:
 
 def test_camera_phases_finish_with_sub_tenth_degree_refinement() -> None:
     assert CAMERA_PHASES.index("fine") < CAMERA_PHASES.index("perspective")
+    assert CAMERA_PHASES.index("fine") < CAMERA_PHASES.index("roll")
+    assert CAMERA_PHASES.index("roll") < CAMERA_PHASES.index("principal_point")
+    assert CAMERA_PHASES.index("principal_point") < CAMERA_PHASES.index(
+        "radial_distortion"
+    )
     assert CAMERA_PHASES.index("perspective") < CAMERA_PHASES.index("component_pose")
     assert CAMERA_PHASES.index("component_pose") < CAMERA_PHASES.index(
         "perspective_recheck"
@@ -625,8 +706,8 @@ def test_camera_phases_finish_with_sub_tenth_degree_refinement() -> None:
     assert CAMERA_PHASES.index("settle") < CAMERA_PHASES.index("micro")
     assert CAMERA_PHASES.index("target") < CAMERA_PHASES.index("lens_micro")
     assert CAMERA_PHASES[-4:] == (
-        "nano",
-        "target_micro",
+        "frame_micro",
+        "radial_distortion_micro",
         "pico",
         "target_pico",
     )
@@ -943,6 +1024,35 @@ def test_full_resolution_finalists_are_global_across_phases() -> None:
     ]
 
 
+def test_phase_winner_can_be_retained_ahead_of_regressive_global_score() -> None:
+    trusted_winner = {
+        "view_id": "trusted_winner",
+        "score": 0.65,
+        "projection_iou": 0.91,
+        "boundary_p95_px": 13.0,
+        "analysis_direction": [1.0, 0.0, 0.0],
+        "analysis_up_axis": [0.0, 0.0, 1.0],
+        "focal_length_mm": 45.0,
+        "distance_multiplier": 2.0,
+    }
+    regressive = {
+        **trusted_winner,
+        "view_id": "regressive_structure_score",
+        "score": 0.80,
+        "projection_iou": 0.80,
+        "boundary_p95_px": 10.0,
+        "distance_multiplier": 3.0,
+    }
+
+    finalists = _global_finalists(
+        [trusted_winner, regressive],
+        count=1,
+        required=(trusted_winner,),
+    )
+
+    assert [item["view_id"] for item in finalists] == ["trusted_winner"]
+
+
 def test_alignment_gate_precedes_weighted_structure_score() -> None:
     candidates = [
         {
@@ -962,6 +1072,61 @@ def test_alignment_gate_precedes_weighted_structure_score() -> None:
     ranked = sorted(candidates, key=_alignment_candidate_sort_key)
 
     assert ranked[0]["view_id"] == "gate_pass"
+
+
+def test_incomplete_alignment_candidates_use_complete_objective() -> None:
+    candidates = [
+        {
+            "view_id": "lower_boundary_but_weaker_complete_evidence",
+            "score": 0.70,
+            "projection_iou": 0.80,
+            "boundary_p95_px": 20.0,
+        },
+        {
+            "view_id": "stronger_complete_evidence",
+            "score": 0.82,
+            "projection_iou": 0.85,
+            "boundary_p95_px": 23.0,
+        },
+    ]
+
+    ranked = sorted(candidates, key=_alignment_candidate_sort_key)
+
+    assert ranked[0]["view_id"] == "stronger_complete_evidence"
+
+
+def test_phase_selection_keeps_incomplete_candidate_inside_incumbent_trust_region(
+) -> None:
+    records = [
+        {
+            "view_id": "incumbent",
+            "score": 0.70,
+            "projection_iou": 0.88,
+            "boundary_p95_px": 17.5,
+            "complete_alignment_candidate": False,
+            "calibration": {"frame_anchor": True},
+        },
+        {
+            "view_id": "tempting_but_drifted",
+            "score": 0.90,
+            "projection_iou": 0.85,
+            "boundary_p95_px": 18.0,
+            "complete_alignment_candidate": False,
+            "calibration": {"frame_anchor": False},
+        },
+        {
+            "view_id": "trusted_improvement",
+            "score": 0.80,
+            "projection_iou": 0.877,
+            "boundary_p95_px": 18.0,
+            "complete_alignment_candidate": False,
+            "calibration": {"frame_anchor": False},
+        },
+    ]
+
+    winner = _select_alignment_candidate(records)
+
+    assert winner["view_id"] == "trusted_improvement"
 
 
 def test_incomplete_foreground_reports_recall_separately_from_precision() -> None:
@@ -1070,6 +1235,63 @@ def test_camera_foreground_depends_only_on_stable_part_ids() -> None:
     assert np.array_equal(first, second)
     assert np.count_nonzero(first) == 16 * 12
     assert np.all(first[:8] == 0)
+
+
+def test_camera_scores_preserve_each_candidates_own_calibration_metadata(
+    tmp_path: Path,
+) -> None:
+    red, green, blue = _part_color("P0001")
+    ids = np.zeros((64, 64, 3), dtype=np.uint8)
+    ids[12:52, 14:50] = (blue, green, red)
+    first_ids = tmp_path / "first.png"
+    second_ids = tmp_path / "second.png"
+    assert cv2.imwrite(str(first_ids), ids)
+    assert cv2.imwrite(str(second_ids), ids)
+    registry = tmp_path / "registry.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "parts": [{"part_id": "P0001"}],
+                "render_set": {
+                    "views": [
+                        {
+                            "view_id": "candidate_a",
+                            "part_ids_raw": str(first_ids),
+                            "camera_calibration": {
+                                "reference_view_id": "side",
+                                "candidate_marker": "a",
+                            },
+                        },
+                        {
+                            "view_id": "candidate_b",
+                            "part_ids_raw": str(second_ids),
+                            "camera_calibration": {
+                                "reference_view_id": "side",
+                                "candidate_marker": "b",
+                            },
+                        },
+                    ]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    reference = np.zeros((64, 64), dtype=np.uint8)
+    reference[12:52, 14:50] = 255
+
+    _winner, candidates = _score_candidates(
+        reference_id="side",
+        reference_mask=reference,
+        reference_image=np.zeros((64, 64, 3), dtype=np.uint8),
+        registry_path=registry,
+    )
+
+    by_id = {candidate["view_id"]: candidate for candidate in candidates}
+    assert by_id["candidate_a"]["calibration"]["candidate_marker"] == "a"
+    assert by_id["candidate_b"]["calibration"]["candidate_marker"] == "b"
+    assert by_id["candidate_a"]["calibration"]["frame_anchor_affine"] == (
+        by_id["candidate_b"]["calibration"]["frame_anchor_affine"]
+    )
 
 
 def test_residual_components_report_largest_regions_first() -> None:
@@ -1202,7 +1424,16 @@ def test_full_resolution_winner_is_sealed_without_rerender(
 
     _seal_full_resolution_winners(
         rendered_path=rendered,
-        winners={"front": {"view_id": "rerank_front_02"}},
+        winners={
+            "front": {
+                "view_id": "rerank_front_02",
+                "whole_asset_similarity": {
+                    "ecc_transform_audit": {
+                        "anchor_affine": [[1.2, 0.0, 3.0], [0.0, 1.2, 4.0]]
+                    }
+                },
+            }
+        },
         output_path=output,
     )
     sealed = json.loads(output.read_text(encoding="utf-8"))
@@ -1214,4 +1445,7 @@ def test_full_resolution_winner_is_sealed_without_rerender(
     assert sealed["render_set"]["views"][0]["sealed_source_view_id"] == (
         "rerank_front_02"
     )
+    assert sealed["render_set"]["views"][0]["camera_calibration"][
+        "frame_anchor_affine"
+    ] == [[1.2, 0.0, 3.0], [0.0, 1.2, 4.0]]
     assert sealed["render_set"]["sealed_full_resolution_winners"] is True

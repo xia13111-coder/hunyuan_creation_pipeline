@@ -6,6 +6,8 @@ import json
 import math
 from collections.abc import Callable
 
+import cv2
+import numpy as np
 import pytest
 
 from qwen_material_pipeline.core.progress import emit_progress_event, parse_progress_line
@@ -19,6 +21,7 @@ from qwen_material_pipeline.usd.render import (
     _analysis_basis,
     _analysis_to_world,
     _camera_up_axis,
+    _apply_radial_distortion,
     _clear_render_evidence,
     _counted_progress_items,
     _cross,
@@ -245,6 +248,11 @@ def test_custom_view_specs_support_continuous_camera_parameters(tmp_path) -> Non
                         "distance_multiplier": 2.8,
                         "target_offset_u": 0.12,
                         "target_offset_v": -0.08,
+                        "roll_degrees": 2.5,
+                        "principal_point_u": 0.03,
+                        "principal_point_v": -0.02,
+                        "radial_distortion_k1": 0.08,
+                        "radial_distortion_k2": -0.01,
                         "projection_mode": "orthographic",
                         "orthographic_span_multiplier": 1.8,
                         "calibration": {"reference_view_id": "iso"},
@@ -266,6 +274,11 @@ def test_custom_view_specs_support_continuous_camera_parameters(tmp_path) -> Non
     assert specs["calibrated_iso"]["distance_multiplier"] == 2.8
     assert specs["calibrated_iso"]["target_offset_u"] == 0.12
     assert specs["calibrated_iso"]["target_offset_v"] == -0.08
+    assert specs["calibrated_iso"]["roll_degrees"] == 2.5
+    assert specs["calibrated_iso"]["principal_point_u"] == 0.03
+    assert specs["calibrated_iso"]["principal_point_v"] == -0.02
+    assert specs["calibrated_iso"]["radial_distortion_k1"] == 0.08
+    assert specs["calibrated_iso"]["radial_distortion_k2"] == -0.01
     assert specs["calibrated_iso"]["projection_mode"] == "orthographic"
     assert specs["calibrated_iso"]["orthographic_span_multiplier"] == 1.8
 
@@ -290,6 +303,43 @@ def test_custom_view_specs_reject_parallel_up_axis(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="parallel"):
         _load_custom_view_specs(path)
+
+
+def test_radial_distortion_is_identity_at_zero_and_moves_outer_pixels() -> None:
+    pixels = np.zeros((101, 101), dtype=np.uint16)
+    pixels[50, 85] = 7
+
+    identity = _apply_radial_distortion(
+        pixels,
+        k1=0.0,
+        k2=0.0,
+        interpolation=cv2.INTER_NEAREST,
+    )
+    distorted = _apply_radial_distortion(
+        pixels,
+        k1=0.20,
+        k2=0.0,
+        interpolation=cv2.INTER_NEAREST,
+    )
+
+    assert np.array_equal(identity, pixels)
+    assert int(np.count_nonzero(distorted == 7)) >= 1
+    assert int(np.where(distorted == 7)[1].max()) > 85
+
+
+def test_radial_distortion_preserves_replicator_uint32_semantic_ids() -> None:
+    pixels = np.zeros((101, 101), dtype=np.uint32)
+    pixels[50, 85] = np.uint32(2_000_000_007)
+
+    distorted = _apply_radial_distortion(
+        pixels,
+        k1=0.20,
+        k2=0.0,
+        interpolation=cv2.INTER_NEAREST,
+    )
+
+    assert distorted.dtype == np.uint32
+    assert 2_000_000_007 in distorted
 
 
 def test_highlighted_crop_preserves_target_and_marks_geometry_only() -> None:

@@ -8,6 +8,7 @@ or changes the source USD.
 from __future__ import annotations
 
 import argparse
+import cv2
 import hashlib
 import json
 import math
@@ -16,6 +17,8 @@ import traceback
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
+
+import numpy as np
 
 from qwen_material_pipeline.core.progress import (
     ProgressCallback,
@@ -462,6 +465,11 @@ def _load_custom_view_specs(
         distance_multiplier = raw.get("distance_multiplier", 2.15)
         target_offset_u = raw.get("target_offset_u", 0.0)
         target_offset_v = raw.get("target_offset_v", 0.0)
+        roll_degrees = raw.get("roll_degrees", 0.0)
+        principal_point_u = raw.get("principal_point_u", 0.0)
+        principal_point_v = raw.get("principal_point_v", 0.0)
+        radial_distortion_k1 = raw.get("radial_distortion_k1", 0.0)
+        radial_distortion_k2 = raw.get("radial_distortion_k2", 0.0)
         projection_mode = raw.get("projection_mode", "perspective")
         orthographic_span_multiplier = raw.get(
             "orthographic_span_multiplier", 2.0
@@ -476,6 +484,11 @@ def _load_custom_view_specs(
             ("distance_multiplier", distance_multiplier, 1.05, 100.0),
             ("target_offset_u", target_offset_u, -1.0, 1.0),
             ("target_offset_v", target_offset_v, -1.0, 1.0),
+            ("roll_degrees", roll_degrees, -15.0, 15.0),
+            ("principal_point_u", principal_point_u, -0.20, 0.20),
+            ("principal_point_v", principal_point_v, -0.20, 0.20),
+            ("radial_distortion_k1", radial_distortion_k1, -0.35, 0.35),
+            ("radial_distortion_k2", radial_distortion_k2, -0.20, 0.20),
             (
                 "orthographic_span_multiplier",
                 orthographic_span_multiplier,
@@ -500,6 +513,11 @@ def _load_custom_view_specs(
             "distance_multiplier": float(distance_multiplier),
             "target_offset_u": float(target_offset_u),
             "target_offset_v": float(target_offset_v),
+            "roll_degrees": float(roll_degrees),
+            "principal_point_u": float(principal_point_u),
+            "principal_point_v": float(principal_point_v),
+            "radial_distortion_k1": float(radial_distortion_k1),
+            "radial_distortion_k2": float(radial_distortion_k2),
             "projection_mode": projection_mode,
             "orthographic_span_multiplier": float(
                 orthographic_span_multiplier
@@ -748,6 +766,80 @@ def _camera_up_axis(
         key=lambda axis: abs(
             sum(normalized_direction[index] * axis[index] for index in range(3))
         ),
+    )
+
+
+def _apply_radial_distortion(
+    pixels: "Any",
+    *,
+    k1: float,
+    k2: float,
+    interpolation: int,
+) -> "Any":
+    """Apply the camera contract's Brown radial warp to one rendered plane."""
+
+    if math.isclose(k1, 0.0, abs_tol=1e-12) and math.isclose(k2, 0.0, abs_tol=1e-12):
+        return pixels
+    height, width = pixels.shape[:2]
+    map_x, map_y = _radial_distortion_maps(
+        height,
+        width,
+        k1=k1,
+        k2=k2,
+    )
+    source = pixels
+    restore_dtype = None
+    # Replicator semantic IDs are commonly uint32, a dtype OpenCV remap does
+    # not accept.  IDs are small deterministic annotator labels, so bridge via
+    # int32 and restore the exact contract dtype after nearest-neighbor remap.
+    if pixels.dtype == np.uint32:
+        if pixels.size and int(np.max(pixels)) > np.iinfo(np.int32).max:
+            raise ValueError("Semantic ID exceeds the radial remap int32 range")
+        source = pixels.astype(np.int32)
+        restore_dtype = pixels.dtype
+    distorted = cv2.remap(
+        source,
+        map_x,
+        map_y,
+        interpolation,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    return (
+        distorted.astype(restore_dtype, copy=False)
+        if restore_dtype is not None
+        else distorted
+    )
+
+
+def _radial_distortion_maps(
+    height: int,
+    width: int,
+    *,
+    k1: float,
+    k2: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return inverse maps for the Brown radial model used by OpenCV remap."""
+
+    x, y = np.meshgrid(
+        np.arange(width, dtype=np.float32),
+        np.arange(height, dtype=np.float32),
+    )
+    scale = 0.5 * float(max(width, height))
+    distorted_x = (x - 0.5 * (width - 1)) / scale
+    distorted_y = (y - 0.5 * (height - 1)) / scale
+    source_x = distorted_x.copy()
+    source_y = distorted_y.copy()
+    # Fixed-point inversion is stable over the deliberately bounded contract.
+    for _ in range(8):
+        radius2 = source_x * source_x + source_y * source_y
+        factor = 1.0 + float(k1) * radius2 + float(k2) * radius2 * radius2
+        valid = np.abs(factor) > 1e-6
+        source_x = np.where(valid, distorted_x / factor, distorted_x)
+        source_y = np.where(valid, distorted_y / factor, distorted_y)
+    return (
+        (0.5 * (width - 1) + source_x * scale).astype(np.float32),
+        (0.5 * (height - 1) + source_y * scale).astype(np.float32),
     )
 
 
@@ -1356,6 +1448,11 @@ def _render_part_views_once(
         camera_up = _normalize(_analysis_to_world(analysis_camera_up, analysis_basis))
         if name.endswith("_r180"):
             camera_up = tuple(-value for value in camera_up)
+        roll_degrees = (
+            float(custom_spec["roll_degrees"])
+            if custom_spec is not None
+            else 0.0
+        )
         effective_distance = (
             diagonal * float(custom_spec["distance_multiplier"])
             if custom_spec is not None
@@ -1392,6 +1489,26 @@ def _render_part_views_once(
         )
         target_offset_v = (
             float(custom_spec["target_offset_v"])
+            if custom_spec is not None
+            else 0.0
+        )
+        principal_point_u = (
+            float(custom_spec["principal_point_u"])
+            if custom_spec is not None
+            else 0.0
+        )
+        principal_point_v = (
+            float(custom_spec["principal_point_v"])
+            if custom_spec is not None
+            else 0.0
+        )
+        radial_distortion_k1 = (
+            float(custom_spec["radial_distortion_k1"])
+            if custom_spec is not None
+            else 0.0
+        )
+        radial_distortion_k2 = (
+            float(custom_spec["radial_distortion_k2"])
             if custom_spec is not None
             else 0.0
         )
@@ -1436,6 +1553,36 @@ def _render_part_views_once(
             usd_camera.GetProjectionAttr().Set(UsdGeom.Tokens.orthographic)
             usd_camera.GetHorizontalApertureAttr().Set(aperture)
             usd_camera.GetVerticalApertureAttr().Set(aperture)
+        else:
+            camera_root = camera.get_output_prims()["prims"][0]
+            camera_prim = (
+                camera_root
+                if camera_root.IsA(UsdGeom.Camera)
+                else next(
+                    (
+                        child
+                        for child in camera_root.GetChildren()
+                        if child.IsA(UsdGeom.Camera)
+                    ),
+                    None,
+                )
+            )
+            if camera_prim is None:
+                raise RuntimeError(
+                    f"Replicator camera {name!r} has no UsdGeom.Camera prim"
+                )
+            usd_camera = UsdGeom.Camera(camera_prim)
+        # USD aperture offsets are the physical principal point for both
+        # perspective and orthographic cameras.  Values in the camera
+        # contract are fractions of half the active sensor gate.
+        horizontal_aperture = float(usd_camera.GetHorizontalApertureAttr().Get())
+        vertical_aperture = float(usd_camera.GetVerticalApertureAttr().Get())
+        usd_camera.GetHorizontalApertureOffsetAttr().Set(
+            principal_point_u * 0.5 * horizontal_aperture
+        )
+        usd_camera.GetVerticalApertureOffsetAttr().Set(
+            principal_point_v * 0.5 * vertical_aperture
+        )
         render_product = rep.create.render_product(
             camera, (resolution, resolution), name=f"Qwen_{name}"
         )
@@ -1458,6 +1605,11 @@ def _render_part_views_once(
                 effective_distance / diagonal,
                 target_offset_u,
                 target_offset_v,
+                roll_degrees,
+                principal_point_u,
+                principal_point_v,
+                radial_distortion_k1,
+                radial_distortion_k2,
                 look_at_target,
                 projection_mode,
                 orthographic_span_multiplier,
@@ -1499,6 +1651,11 @@ def _render_part_views_once(
         distance_multiplier,
         target_offset_u,
         target_offset_v,
+        roll_degrees,
+        principal_point_u,
+        principal_point_v,
+        radial_distortion_k1,
+        radial_distortion_k2,
         look_at_target,
         projection_mode,
         orthographic_span_multiplier,
@@ -1521,6 +1678,21 @@ def _render_part_views_once(
         if raw_ids.ndim == 3:
             raw_ids = raw_ids[:, :, 0]
         id_to_labels = segmentation.get("info", {}).get("idToLabels", {})
+        rgb_pixels = rgb_array[:, :, :3].astype(np.uint8)
+        rgb_pixels = _apply_radial_distortion(
+            rgb_pixels,
+            k1=radial_distortion_k1,
+            k2=radial_distortion_k2,
+            interpolation=cv2.INTER_LINEAR,
+        )
+        raw_ids = _apply_radial_distortion(
+            raw_ids,
+            k1=radial_distortion_k1,
+            k2=radial_distortion_k2,
+            interpolation=cv2.INTER_NEAREST,
+        )
+        # Rebuild masks from the same distorted Part-ID plane that is written
+        # below; RGB and semantic evidence remain pixel-aligned.
         mask_by_part = {}
         for raw_id, labels in id_to_labels.items():
             part_id = _part_from_label(labels)
@@ -1533,8 +1705,6 @@ def _render_part_views_once(
             mask = raw_ids == numeric_id
             if int(mask.sum()) > 0:
                 mask_by_part[part_id] = mask
-
-        rgb_pixels = rgb_array[:, :, :3].astype(np.uint8)
         if lighting_profile == "material-neutral":
             # Physical reference captures use a black viewport background.
             # Keep only labelled asset pixels so background/tone differences
@@ -1635,6 +1805,11 @@ def _render_part_views_once(
                 "camera_distance_multiplier": float(distance_multiplier),
                 "camera_target_offset_u": float(target_offset_u),
                 "camera_target_offset_v": float(target_offset_v),
+                "camera_roll_degrees": float(roll_degrees),
+                "camera_principal_point_u": float(principal_point_u),
+                "camera_principal_point_v": float(principal_point_v),
+                "camera_radial_distortion_k1": float(radial_distortion_k1),
+                "camera_radial_distortion_k2": float(radial_distortion_k2),
                 "camera_look_at_target": list(look_at_target),
                 "camera_projection_mode": projection_mode,
                 "camera_orthographic_span_multiplier": float(
