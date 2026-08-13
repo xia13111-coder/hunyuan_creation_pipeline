@@ -46,10 +46,9 @@ SUPERVISOR_RENDER_BATCH_LIMIT = 2
 SUPERVISOR_ROTATION_SCHEMA_VERSION = "qwen-camera-session-rotation/v1"
 SUPERVISOR_ROTATION_MARKER = ".camera_session_rotation.json"
 MAX_FOCAL_LENGTH_MM = 2000.0
-CAMERA_OBJECTIVE_VERSION = "physical_camera_constrained_silhouette/v13"
+CAMERA_OBJECTIVE_VERSION = "observable_rigid_part_consensus/v15"
 CHECKPOINT_COMPATIBLE_OBJECTIVE_VERSIONS = frozenset(
     {
-        "physical_camera_constrained_silhouette/v12",
         CAMERA_OBJECTIVE_VERSION,
     }
 )
@@ -65,6 +64,14 @@ FRAME_RESIDUAL_MAXIMUM_SCALE = 1.015
 FRAME_RESIDUAL_MAXIMUM_ROTATION_DEGREES = 1.0
 FRAME_RESIDUAL_MAXIMUM_TRANSLATION_RATIO = 0.02
 FRAME_RESIDUAL_OPTIMIZATION_MAXIMUM_SIDE = 256
+RIGID_CONSENSUS_MINIMUM_PART_PIXELS = 24
+RIGID_CONSENSUS_MAXIMUM_PARTS_PER_STRATUM = 16
+RIGID_CONSENSUS_MINIMUM_INLIER_PARTS = 3
+RIGID_CONSENSUS_MINIMUM_INLIER_COVERAGE = 0.35
+RIGID_CONSENSUS_HUBER_CUTOFF = 1.5
+RIGID_CONSENSUS_OUTLIER_CUTOFF = 3.5
+RIGID_CONSENSUS_MINIMUM_EDGE_SUPPORT = 0.25
+RIGID_CONSENSUS_MAXIMUM_INSIDE_RATIO_FOR_SILHOUETTE_EVIDENCE = 0.85
 CAMERA_PHASES = (
     "coarse",
     "lens",
@@ -1338,6 +1345,533 @@ def _part_balanced_structure_metrics(
     }
 
 
+def _assembly_subtree_path(prim_path: Any) -> str | None:
+    """Return a stable assembly subtree without asset-specific names.
+
+    The leaf mesh and its immediate parent identify a Part, not an assembly.
+    Clustering at the grandparent groups siblings that share a local rigid or
+    articulated transform while leaving unrelated branches independent.
+    """
+
+    if not isinstance(prim_path, str) or not prim_path.startswith("/"):
+        return None
+    segments = [segment for segment in prim_path.split("/") if segment]
+    if len(segments) < 3:
+        return "/" + "/".join(segments[:-1]) if len(segments) > 1 else None
+    return "/" + "/".join(segments[:-2])
+
+
+def _robust_part_consensus(
+    *,
+    ids: np.ndarray,
+    parts: Sequence[Mapping[str, Any]],
+    affine: np.ndarray,
+    reference_image: np.ndarray,
+    reference_mask: np.ndarray,
+) -> dict[str, Any]:
+    """Estimate the rigid camera consensus and isolate assembly outliers.
+
+    Each visible Part-ID contributes one observation built from its external
+    boundary distance to the photographed object and the fraction projected
+    inside the human foreground.  A median/MAD M-estimator finds the dominant
+    rigid population without any asset names, hand-authored movable-part list,
+    or per-Part transform.  Size strata and capped pixel weights prevent both
+    one enclosure and a cloud of fasteners from becoming the sole authority.
+    """
+
+    if ids.ndim != 3 or ids.shape[2] < 3:
+        raise ValueError("Rigid consensus requires a three-channel Part-ID image")
+    reference_edges = _reference_structure_edges(reference_image, reference_mask)
+    if not np.any(reference_edges > 0):
+        return _empty_rigid_consensus("reference_has_no_edges")
+    reference_distance, reference_labels = cv2.distanceTransformWithLabels(
+        (reference_edges == 0).astype(np.uint8),
+        cv2.DIST_L2,
+        3,
+        labelType=cv2.DIST_LABEL_PIXEL,
+    )
+    # DIST_LABEL_PIXEL numbers the zero-valued reference edge pixels in
+    # row-major order.  Retaining those coordinates gives every observable
+    # Part a signed 2-D residual vector, which is required to distinguish a
+    # coherent local assembly displacement from unrelated silhouette noise.
+    reference_edge_y, reference_edge_x = np.nonzero(reference_edges > 0)
+    target = reference_mask > 0
+    height, width = reference_mask.shape
+    diagonal = max(1.0, math.hypot(width, height))
+    support = cv2.dilate(
+        target.astype(np.uint8),
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31)),
+        iterations=1,
+    ) > 0
+    packed_ids = (
+        ids[:, :, 0].astype(np.uint32)
+        | (ids[:, :, 1].astype(np.uint32) << 8)
+        | (ids[:, :, 2].astype(np.uint32) << 16)
+    )
+    visible_values, visible_counts = np.unique(packed_ids, return_counts=True)
+    count_by_value = {
+        int(value): int(count) for value, count in zip(visible_values, visible_counts)
+    }
+    observations: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, Mapping) or not isinstance(part.get("part_id"), str):
+            continue
+        part_id = str(part["part_id"])
+        red, green, blue = _part_color(part_id)
+        packed = int(blue) | (int(green) << 8) | (int(red) << 16)
+        raw_pixels = count_by_value.get(packed, 0)
+        if raw_pixels < RIGID_CONSENSUS_MINIMUM_PART_PIXELS:
+            continue
+        projected = cv2.warpAffine(
+            (packed_ids == packed).astype(np.uint8),
+            np.asarray(affine, dtype=np.float32),
+            (width, height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        ) > 0
+        projected_pixels = int(np.count_nonzero(projected))
+        if projected_pixels < RIGID_CONSENSUS_MINIMUM_PART_PIXELS:
+            continue
+        support_ratio = float(np.count_nonzero(projected & support)) / projected_pixels
+        # Geometry with no photographed support is a strong assembly-state or
+        # version-mismatch observation.  Keep it in the robust population: the
+        # median/MAD estimator will reject it, while omitting it would hide the
+        # most important detached-assembly evidence.
+        overlap_pixels = int(np.count_nonzero(projected & target))
+        inside_ratio = float(overlap_pixels / projected_pixels)
+        boundary = cv2.morphologyEx(
+            projected.astype(np.uint8),
+            cv2.MORPH_GRADIENT,
+            np.ones((3, 3), dtype=np.uint8),
+        )
+        distances = reference_distance[boundary > 0]
+        if len(distances) < 8:
+            continue
+        if projected_pixels < 96:
+            stratum = "small"
+        elif projected_pixels < 768:
+            stratum = "medium"
+        else:
+            stratum = "large"
+        median_boundary = float(np.median(distances))
+        p75_boundary = float(np.percentile(distances, 75))
+        edge_support_px = max(3.0, 0.006 * diagonal)
+        edge_support_ratio = float(np.count_nonzero(distances <= edge_support_px)) / len(
+            distances
+        )
+        boundary_y, boundary_x = np.nonzero(boundary > 0)
+        nearest_labels = reference_labels[boundary_y, boundary_x].astype(np.int64)
+        valid_labels = (nearest_labels > 0) & (
+            nearest_labels <= len(reference_edge_x)
+        )
+        if np.any(valid_labels):
+            nearest_indexes = nearest_labels[valid_labels] - 1
+            residual_dx = float(
+                np.median(
+                    reference_edge_x[nearest_indexes]
+                    - boundary_x[valid_labels]
+                )
+            )
+            residual_dy = float(
+                np.median(
+                    reference_edge_y[nearest_indexes]
+                    - boundary_y[valid_labels]
+                )
+            )
+        else:
+            residual_dx = 0.0
+            residual_dy = 0.0
+        # A zero-overlap Part is a decisive outlier even when it lies close to
+        # a different photographed edge.  The bounded inside penalty keeps the
+        # residual in pixel units and avoids large Part area domination.
+        residual_px = median_boundary + min(
+            0.04 * diagonal,
+            (1.0 - inside_ratio) * 0.04 * diagonal,
+        )
+        observations.append(
+            {
+                "part_id": part_id,
+                "prim_path": part.get("prim_path"),
+                "assembly_subtree": _assembly_subtree_path(part.get("prim_path")),
+                "stratum": stratum,
+                "projected_pixels": projected_pixels,
+                "inside_reference_ratio": inside_ratio,
+                "support_ratio": support_ratio,
+                "edge_support_ratio": edge_support_ratio,
+                "boundary_median_px": median_boundary,
+                "boundary_p75_px": p75_boundary,
+                "residual_vector_px": [residual_dx, residual_dy],
+                "residual_px": residual_px,
+            }
+        )
+    if len(observations) < RIGID_CONSENSUS_MINIMUM_INLIER_PARTS:
+        return _empty_rigid_consensus("insufficient_visible_parts", observations)
+
+    # Cap each size stratum deterministically, then fit location/scale with a
+    # median and MAD.  This is the robust IRLS seed; no asset-specific label is
+    # allowed to affect membership.
+    selected: list[dict[str, Any]] = []
+    for stratum in ("small", "medium", "large"):
+        values = [item for item in observations if item["stratum"] == stratum]
+        values.sort(
+            key=lambda item: (
+                -min(int(item["projected_pixels"]), 768),
+                str(item["part_id"]),
+            )
+        )
+        by_support = sorted(
+            values,
+            key=lambda item: (
+                -float(item["support_ratio"]),
+                -min(int(item["projected_pixels"]), 768),
+                str(item["part_id"]),
+            ),
+        )
+        # Half of each bounded stratum preserves large silhouette authority;
+        # the other half preserves well-observed fixed geometry.  This keeps
+        # either a large articulated branch or many tiny fasteners from
+        # crowding the consensus sample.
+        selected_by_id: dict[str, dict[str, Any]] = {}
+        half = RIGID_CONSENSUS_MAXIMUM_PARTS_PER_STRATUM // 2
+        for item in values[:half] + by_support:
+            selected_by_id.setdefault(str(item["part_id"]), item)
+            if len(selected_by_id) >= RIGID_CONSENSUS_MAXIMUM_PARTS_PER_STRATUM:
+                break
+        selected.extend(selected_by_id.values())
+    # A CAD Part wholly inside the foreground but lacking a photographic edge
+    # is not observable enough to vote on camera pose.  It remains in the
+    # audit as an indeterminate observation, but does not become an outlier.
+    # Conversely, a Part that leaves the foreground is observable through the
+    # object silhouette even when it has no internal texture edge.
+    eligible = [
+        item
+        for item in selected
+        if float(item["edge_support_ratio"])
+        >= RIGID_CONSENSUS_MINIMUM_EDGE_SUPPORT
+        or float(item["inside_reference_ratio"])
+        < RIGID_CONSENSUS_MAXIMUM_INSIDE_RATIO_FOR_SILHOUETTE_EVIDENCE
+    ]
+    for item in selected:
+        item["consensus_observable"] = item in eligible
+        item["robust_weight"] = 0.0
+        item["rigid_inlier"] = None
+    if len(eligible) < RIGID_CONSENSUS_MINIMUM_INLIER_PARTS:
+        return _empty_rigid_consensus(
+            "insufficient_observable_parts",
+            observations,
+            selected=selected,
+        )
+    residuals = np.asarray([float(item["residual_px"]) for item in eligible])
+    center = float(np.median(residuals))
+    mad = float(np.median(np.abs(residuals - center)))
+    robust_sigma = max(0.75, 1.4826 * mad)
+    inlier_cutoff = center + RIGID_CONSENSUS_OUTLIER_CUTOFF * robust_sigma
+    huber_cutoff = max(1e-12, RIGID_CONSENSUS_HUBER_CUTOFF * robust_sigma)
+    for item in eligible:
+        deviation = max(0.0, float(item["residual_px"]) - center)
+        item["robust_weight"] = float(
+            1.0 if deviation <= huber_cutoff else huber_cutoff / deviation
+        )
+        item["rigid_inlier"] = bool(float(item["residual_px"]) <= inlier_cutoff)
+
+    inliers = [item for item in eligible if item["rigid_inlier"]]
+    outliers = [item for item in eligible if not item["rigid_inlier"]]
+    indeterminate = [item for item in selected if not item["consensus_observable"]]
+    total_pixels = sum(int(item["projected_pixels"]) for item in eligible)
+    inlier_pixels = sum(int(item["projected_pixels"]) for item in inliers)
+    inlier_coverage = float(inlier_pixels / max(1, total_pixels))
+    if (
+        len(inliers) < RIGID_CONSENSUS_MINIMUM_INLIER_PARTS
+        or inlier_coverage < RIGID_CONSENSUS_MINIMUM_INLIER_COVERAGE
+    ):
+        return _empty_rigid_consensus(
+            "insufficient_rigid_consensus",
+            observations,
+            center=center,
+            sigma=robust_sigma,
+            selected=selected,
+        )
+
+    def balanced_value(key: str) -> float:
+        stratum_values: list[float] = []
+        for stratum in ("small", "medium", "large"):
+            values = [item for item in inliers if item["stratum"] == stratum]
+            if not values:
+                continue
+            weights = np.asarray(
+                [
+                    float(item["robust_weight"])
+                    * math.sqrt(min(int(item["projected_pixels"]), 768))
+                    for item in values
+                ],
+                dtype=np.float64,
+            )
+            observations_for_key = np.asarray(
+                [float(item[key]) for item in values], dtype=np.float64
+            )
+            stratum_values.append(
+                float(np.average(observations_for_key, weights=weights))
+            )
+        return float(np.mean(stratum_values)) if stratum_values else 0.0
+
+    residual_px = balanced_value("residual_px")
+    inside_ratio = balanced_value("inside_reference_ratio")
+    decay = max(3.0, 0.015 * diagonal)
+    consensus_score = float(math.exp(-residual_px / decay) * inside_ratio)
+    clusters: dict[str, list[dict[str, Any]]] = {}
+    for item in outliers:
+        cluster = item.get("assembly_subtree") or f"part:{item['part_id']}"
+        clusters.setdefault(str(cluster), []).append(item)
+    assembly_clusters = []
+    for cluster, items in clusters.items():
+        residual_vectors = np.asarray(
+            [item["residual_vector_px"] for item in items], dtype=np.float64
+        )
+        median_vector = np.median(residual_vectors, axis=0)
+        median_vector_norm = float(np.linalg.norm(median_vector))
+        if len(items) >= 2 and median_vector_norm > 1e-6:
+            unit_vector = median_vector / median_vector_norm
+            directions = residual_vectors / np.maximum(
+                1e-6, np.linalg.norm(residual_vectors, axis=1, keepdims=True)
+            )
+            direction_coherence = float(
+                np.mean(np.maximum(0.0, directions @ unit_vector))
+            )
+        else:
+            direction_coherence = 0.0
+        coherent_assembly = len(items) >= 2 and direction_coherence >= 0.7
+        assembly_clusters.append(
+            {
+                "assembly_subtree": cluster,
+                "part_ids": sorted(str(item["part_id"]) for item in items),
+                "part_count": len(items),
+                "projected_pixels": sum(
+                    int(item["projected_pixels"]) for item in items
+                ),
+                "median_residual_px": float(
+                    np.median([float(item["residual_px"]) for item in items])
+                ),
+                "minimum_inside_reference_ratio": min(
+                    float(item["inside_reference_ratio"]) for item in items
+                ),
+                "median_residual_vector_px": [
+                    float(median_vector[0]),
+                    float(median_vector[1]),
+                ],
+                "residual_direction_coherence": direction_coherence,
+                "classification": (
+                    "assembly_state_or_geometry_mismatch"
+                    if coherent_assembly
+                    else "multi_part_residual_without_coherent_direction"
+                    if len(items) >= 2
+                    else "isolated_part_geometry_or_visibility_mismatch"
+                ),
+            }
+        )
+    assembly_clusters.sort(
+        key=lambda item: (
+            -int(item["projected_pixels"]),
+            str(item["assembly_subtree"]),
+        )
+    )
+    return {
+        "rigid_consensus_valid": True,
+        "rigid_consensus_reason": "robust_part_consensus",
+        "rigid_consensus_score": consensus_score,
+        "rigid_consensus_part_count": len(inliers),
+        "rigid_consensus_candidate_part_count": len(eligible),
+        "rigid_consensus_indeterminate_part_count": len(indeterminate),
+        "rigid_consensus_outlier_part_count": len(outliers),
+        "rigid_consensus_inlier_ratio": float(len(inliers) / len(eligible)),
+        "rigid_consensus_pixel_coverage": inlier_coverage,
+        "rigid_consensus_residual_px": residual_px,
+        "rigid_consensus_inside_reference_ratio": inside_ratio,
+        "rigid_consensus_center_px": center,
+        "rigid_consensus_sigma_px": robust_sigma,
+        "rigid_consensus_inlier_cutoff_px": inlier_cutoff,
+        "rigid_consensus_inlier_part_ids": sorted(
+            str(item["part_id"]) for item in inliers
+        ),
+        "rigid_consensus_outlier_part_ids": sorted(
+            str(item["part_id"]) for item in outliers
+        ),
+        "rigid_consensus_indeterminate_part_ids": sorted(
+            str(item["part_id"]) for item in indeterminate
+        ),
+        "rigid_consensus_size_strata": {
+            stratum: {
+                "candidate_part_count": sum(
+                    item["stratum"] == stratum for item in eligible
+                ),
+                "inlier_part_count": sum(
+                    item["stratum"] == stratum for item in inliers
+                ),
+            }
+            for stratum in ("small", "medium", "large")
+        },
+        "rigid_consensus_part_residuals": sorted(
+            [
+                {
+                    **item,
+                    "inside_reference_ratio": round(
+                        float(item["inside_reference_ratio"]), 8
+                    ),
+                    "support_ratio": round(float(item["support_ratio"]), 8),
+                    "edge_support_ratio": round(
+                        float(item["edge_support_ratio"]), 8
+                    ),
+                    "boundary_median_px": round(
+                        float(item["boundary_median_px"]), 8
+                    ),
+                    "boundary_p75_px": round(
+                        float(item["boundary_p75_px"]), 8
+                    ),
+                    "residual_vector_px": [
+                        round(float(value), 8)
+                        for value in item["residual_vector_px"]
+                    ],
+                    "residual_px": round(float(item["residual_px"]), 8),
+                    "robust_weight": round(float(item["robust_weight"]), 8),
+                }
+                for item in selected
+            ],
+            key=lambda item: (-float(item["residual_px"]), str(item["part_id"])),
+        ),
+        "assembly_residual_clusters": assembly_clusters,
+    }
+
+
+def _classify_multiview_residuals(
+    views: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Fuse per-view residuals into asset-independent Part diagnoses.
+
+    A Part that is rejected in several independently calibrated views is
+    unlikely to be a camera-only failure.  A one-view rejection remains
+    ambiguous because self-occlusion, segmentation, and view-local geometry
+    can produce the same 2-D pattern.
+    """
+
+    observations: dict[str, list[dict[str, Any]]] = {}
+    for reference_id, score in views.items():
+        if not isinstance(score, Mapping):
+            continue
+        inliers = {
+            str(value) for value in score.get("rigid_consensus_inlier_part_ids", [])
+        }
+        for raw in score.get("rigid_consensus_part_residuals", []):
+            if not isinstance(raw, Mapping) or not isinstance(raw.get("part_id"), str):
+                continue
+            observations.setdefault(str(raw["part_id"]), []).append(
+                {
+                    "reference_view_id": str(reference_id),
+                    "consensus_observable": bool(
+                        raw.get("consensus_observable", True)
+                    ),
+                    "rigid_inlier": (
+                        str(raw["part_id"]) in inliers
+                        if bool(raw.get("consensus_observable", True))
+                        else None
+                    ),
+                    "residual_px": raw.get("residual_px"),
+                    "inside_reference_ratio": raw.get("inside_reference_ratio"),
+                    "assembly_subtree": raw.get("assembly_subtree"),
+                }
+            )
+    part_diagnoses: list[dict[str, Any]] = []
+    for part_id, items in observations.items():
+        observable = [item for item in items if item["consensus_observable"]]
+        rejected = [item for item in observable if item["rigid_inlier"] is False]
+        visible_view_count = len(observable)
+        indeterminate_view_count = len(items) - visible_view_count
+        rejected_view_count = len(rejected)
+        if rejected_view_count >= 2:
+            classification = "persistent_assembly_or_geometry_mismatch"
+        elif rejected_view_count == 1 and visible_view_count >= 2:
+            classification = "view_local_occlusion_geometry_or_mask_mismatch"
+        elif rejected_view_count == 1:
+            classification = "single_view_unresolved"
+        elif visible_view_count:
+            classification = "rigid_consensus_inlier"
+        else:
+            classification = "insufficient_observable_edge_evidence"
+        part_diagnoses.append(
+            {
+                "part_id": part_id,
+                "assembly_subtree": next(
+                    (
+                        item["assembly_subtree"]
+                        for item in items
+                        if item.get("assembly_subtree") is not None
+                    ),
+                    None,
+                ),
+                "visible_view_count": visible_view_count,
+                "indeterminate_view_count": indeterminate_view_count,
+                "rejected_view_count": rejected_view_count,
+                "classification": classification,
+                "views": sorted(items, key=lambda item: item["reference_view_id"]),
+            }
+        )
+    part_diagnoses.sort(
+        key=lambda item: (
+            -int(item["rejected_view_count"]),
+            -int(item["visible_view_count"]),
+            str(item["part_id"]),
+        )
+    )
+    return {
+        "schema_version": "qwen-camera-multiview-rigid-consensus/v1",
+        "reference_view_count": len(views),
+        "part_diagnoses": part_diagnoses,
+        "persistent_mismatch_part_ids": [
+            item["part_id"]
+            for item in part_diagnoses
+            if item["classification"]
+            == "persistent_assembly_or_geometry_mismatch"
+        ],
+        "view_local_mismatch_part_ids": [
+            item["part_id"]
+            for item in part_diagnoses
+            if item["classification"]
+            == "view_local_occlusion_geometry_or_mask_mismatch"
+        ],
+    }
+
+
+def _empty_rigid_consensus(
+    reason: str,
+    observations: Sequence[Mapping[str, Any]] = (),
+    *,
+    center: float | None = None,
+    sigma: float | None = None,
+    selected: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    return {
+        "rigid_consensus_valid": False,
+        "rigid_consensus_reason": reason,
+        "rigid_consensus_score": 0.0,
+        "rigid_consensus_part_count": 0,
+        "rigid_consensus_candidate_part_count": len(selected or observations),
+        "rigid_consensus_indeterminate_part_count": 0,
+        "rigid_consensus_outlier_part_count": 0,
+        "rigid_consensus_inlier_ratio": 0.0,
+        "rigid_consensus_pixel_coverage": 0.0,
+        "rigid_consensus_residual_px": None,
+        "rigid_consensus_inside_reference_ratio": 0.0,
+        "rigid_consensus_center_px": center,
+        "rigid_consensus_sigma_px": sigma,
+        "rigid_consensus_inlier_cutoff_px": None,
+        "rigid_consensus_inlier_part_ids": [],
+        "rigid_consensus_outlier_part_ids": [],
+        "rigid_consensus_indeterminate_part_ids": [],
+        "rigid_consensus_size_strata": {},
+        "rigid_consensus_part_residuals": [],
+        "assembly_residual_clusters": [],
+    }
+
+
 def _silhouette_coverage_metrics(
     reference_mask: np.ndarray,
     registered_mask: np.ndarray,
@@ -1686,6 +2220,13 @@ def _score_candidates(
             reference_image=reference_image,
             reference_mask=reference_mask,
         )
+        rigid_consensus = _robust_part_consensus(
+            ids=ids,
+            parts=parts,
+            affine=matrix,
+            reference_image=reference_image,
+            reference_mask=reference_mask,
+        )
         iou = float(projection["projection_iou"])
         diagonal = math.hypot(reference_mask.shape[1], reference_mask.shape[0])
         boundary_decay = max(3.0, 0.02 * diagonal)
@@ -1694,17 +2235,43 @@ def _score_candidates(
         # covered, then the outer boundary and equal-weight size strata select
         # the camera.  IoU remains bounded evidence but can no longer let one
         # large enclosure hide small-part displacement.
-        score = (
-            0.12 * iou
-            + 0.12 * float(coverage["target_recall"])
-            + 0.08 * float(coverage["rendered_precision"])
-            + 0.13 * boundary_score
-            + 0.18 * float(structure["structure_score"])
-            + 0.10 * float(component_coverage["reference_component_macro_recall"])
-            + 0.05 * float(component_coverage["reference_component_min_recall"])
-            + 0.14 * float(spatial_coverage["reference_spatial_macro_recall"])
-            + 0.08 * float(spatial_coverage["reference_spatial_min_recall"])
-        )
+        if bool(rigid_consensus["rigid_consensus_valid"]):
+            # Global silhouette terms remain bounded evidence, but the robust
+            # Part-ID consensus is the plurality authority for the physical
+            # camera.  Outlier attachments are audited rather than allowed to
+            # pull the camera away from the rigid population.
+            score = (
+                0.10 * iou
+                + 0.10 * float(coverage["target_recall"])
+                + 0.07 * float(coverage["rendered_precision"])
+                + 0.10 * boundary_score
+                + 0.12 * float(structure["structure_score"])
+                + 0.08
+                * float(component_coverage["reference_component_macro_recall"])
+                + 0.03
+                * float(component_coverage["reference_component_min_recall"])
+                + 0.10
+                * float(spatial_coverage["reference_spatial_macro_recall"])
+                + 0.05 * float(spatial_coverage["reference_spatial_min_recall"])
+                + 0.25 * float(rigid_consensus["rigid_consensus_score"])
+            )
+        else:
+            # Sparse assets without enough visible Parts retain the Phase-1
+            # objective instead of manufacturing a weak consensus.
+            score = (
+                0.12 * iou
+                + 0.12 * float(coverage["target_recall"])
+                + 0.08 * float(coverage["rendered_precision"])
+                + 0.13 * boundary_score
+                + 0.18 * float(structure["structure_score"])
+                + 0.10
+                * float(component_coverage["reference_component_macro_recall"])
+                + 0.05
+                * float(component_coverage["reference_component_min_recall"])
+                + 0.14
+                * float(spatial_coverage["reference_spatial_macro_recall"])
+                + 0.08 * float(spatial_coverage["reference_spatial_min_recall"])
+            )
         complete_alignment_candidate = (
             iou >= COMPLETE_ALIGNMENT_MINIMUM_IOU
             and float(boundary["boundary_p95_px"])
@@ -1731,6 +2298,10 @@ def _score_candidates(
                 **{
                     key: (round(float(value), 8) if isinstance(value, float) else value)
                     for key, value in structure.items()
+                },
+                **{
+                    key: (round(float(value), 8) if isinstance(value, float) else value)
+                    for key, value in rigid_consensus.items()
                 },
                 "analysis_direction": view.get("analysis_direction"),
                 "analysis_up_axis": (
@@ -1796,6 +2367,7 @@ def _select_alignment_candidate(
     if len(incumbents) != 1:
         return dict(min(records, key=_alignment_candidate_sort_key))
     incumbent = incumbents[0]
+    incumbent_has_consensus = bool(incumbent.get("rigid_consensus_valid"))
     minimum_iou = (
         float(incumbent["projection_iou"])
         - PHASE_INCUMBENT_MAXIMUM_IOU_REGRESSION
@@ -1809,6 +2381,10 @@ def _select_alignment_candidate(
         for item in records
         if float(item["projection_iou"]) >= minimum_iou
         and float(item["boundary_p95_px"]) <= maximum_boundary
+        and (
+            not incumbent_has_consensus
+            or bool(item.get("rigid_consensus_valid"))
+        )
     ]
     return dict(min(trusted, key=_alignment_candidate_sort_key))
 
@@ -1837,7 +2413,9 @@ def _alignment_candidate_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
     complete = iou_deficit <= 0.0 and boundary_deficit <= 0.0
     return (
         0 if complete else 1,
+        0 if bool(item.get("rigid_consensus_valid")) else 1,
         -float(item["score"]),
+        -float(item.get("rigid_consensus_score", 0.0)),
         -iou,
         boundary_p95,
         str(item["view_id"]),
@@ -2985,6 +3563,20 @@ def calibrate(
         "seed_search": seed_audit,
         "whole_asset_only": True,
         "per_part_geometric_warp_applied": False,
+        "robust_rigid_part_consensus": {
+            "enabled": True,
+            "asset_specific_part_rules": False,
+            "camera_consensus_is_plurality_objective": True,
+            "outlier_part_transforms_applied": False,
+            "assembly_clustering": "prim_path_grandparent_subtree",
+            "assembly_cluster_requires_coherent_2d_residual_direction": True,
+            "unobservable_internal_parts_are_indeterminate": True,
+            "minimum_part_pixels": RIGID_CONSENSUS_MINIMUM_PART_PIXELS,
+            "minimum_inlier_parts": RIGID_CONSENSUS_MINIMUM_INLIER_PARTS,
+            "minimum_inlier_pixel_coverage": (
+                RIGID_CONSENSUS_MINIMUM_INLIER_COVERAGE
+            ),
+        },
         "camera_objective_version": CAMERA_OBJECTIVE_VERSION,
         "camera_intrinsics_optimized": [
             "projection_mode",
@@ -3011,6 +3603,9 @@ def calibrate(
         "image_frame_residual_shared_anchor_per_batch": True,
         "image_frame_residual_shared_anchor_per_reference": True,
         "part_balanced_size_strata": ["small", "medium", "large"],
+        "multiview_residual_diagnosis": _classify_multiview_residuals(
+            final_scores
+        ),
         "search_resolution": search_resolution,
         "final_resolution": final_resolution,
         "views": [

@@ -18,6 +18,7 @@ from qwen_material_pipeline.evidence.camera_calibration import (
     _alignment_candidate_sort_key,
     _boundary_metrics,
     _candidate_specs,
+    _classify_multiview_residuals,
     _component_balanced_reference_metrics,
     _constrained_frame_projection,
     _direction,
@@ -25,6 +26,7 @@ from qwen_material_pipeline.evidence.camera_calibration import (
     _global_finalists,
     _merge_registry,
     _part_balanced_structure_metrics,
+    _robust_part_consensus,
     _reference_masks,
     _residual_components,
     _score_candidates,
@@ -1129,6 +1131,36 @@ def test_phase_selection_keeps_incomplete_candidate_inside_incumbent_trust_regio
     assert winner["view_id"] == "trusted_improvement"
 
 
+def test_phase_selection_does_not_replace_valid_rigid_consensus_with_invalid_one(
+) -> None:
+    records = [
+        {
+            "view_id": "incumbent",
+            "score": 0.70,
+            "projection_iou": 0.90,
+            "boundary_p95_px": 12.0,
+            "complete_alignment_candidate": False,
+            "rigid_consensus_valid": True,
+            "rigid_consensus_score": 0.80,
+            "calibration": {"frame_anchor": True},
+        },
+        {
+            "view_id": "invalid_consensus_but_high_score",
+            "score": 0.99,
+            "projection_iou": 0.901,
+            "boundary_p95_px": 12.0,
+            "complete_alignment_candidate": False,
+            "rigid_consensus_valid": False,
+            "rigid_consensus_score": 0.0,
+            "calibration": {"frame_anchor": False},
+        },
+    ]
+
+    winner = _select_alignment_candidate(records)
+
+    assert winner["view_id"] == "incumbent"
+
+
 def test_incomplete_foreground_reports_recall_separately_from_precision() -> None:
     reference = np.zeros((64, 64), dtype=np.uint8)
     reference[16:48, 16:40] = 255
@@ -1208,6 +1240,169 @@ def test_part_structure_objective_balances_small_medium_and_large_parts() -> Non
         for name, values in metrics["structure_size_strata"].items()
     } == {"small": 1, "medium": 1, "large": 1}
     assert metrics["structure_score"] > 0.7
+
+
+def test_robust_rigid_consensus_rejects_detached_assembly_without_part_rules() -> None:
+    reference = np.zeros((180, 180), dtype=np.uint8)
+    image = np.zeros((180, 180, 3), dtype=np.uint8)
+    ids = np.zeros_like(image)
+    parts = []
+    rectangles = {
+        "P0001": (50, 30, 95, 150),
+        "P0002": (95, 30, 130, 150),
+        "P0003": (60, 20, 85, 30),
+        # Two sibling Parts are rendered at the wrong assembly state.  Their
+        # photographed counterpart is 35 pixels lower.
+        "P0004": (18, 112, 38, 132),
+        "P0005": (38, 118, 50, 126),
+    }
+    for part_id, (left, top, right, bottom) in rectangles.items():
+        red, green, blue = _part_color(part_id)
+        ids[top:bottom, left:right] = (blue, green, red)
+        parts.append(
+            {
+                "part_id": part_id,
+                "prim_path": (
+                    f"/Asset/Rigid/{part_id}/Mesh"
+                    if part_id <= "P0003"
+                    else f"/Asset/Accessory/Joint/{part_id}/Mesh"
+                ),
+            }
+        )
+    reference[30:150, 50:130] = 255
+    reference[20:30, 60:85] = 255
+    reference[147:167, 18:38] = 255
+    reference[153:161, 38:50] = 255
+    image[reference > 0] = 255
+
+    consensus = _robust_part_consensus(
+        ids=ids,
+        parts=parts,
+        affine=np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], np.float32),
+        reference_image=image,
+        reference_mask=reference,
+    )
+
+    assert consensus["rigid_consensus_valid"] is True
+    assert {"P0001", "P0002", "P0003"}.issubset(
+        consensus["rigid_consensus_inlier_part_ids"]
+    )
+    assert {"P0004", "P0005"}.issubset(
+        consensus["rigid_consensus_outlier_part_ids"]
+    )
+    cluster = next(
+        item
+        for item in consensus["assembly_residual_clusters"]
+        if item["part_ids"] == ["P0004", "P0005"]
+    )
+    assert cluster["classification"] == "assembly_state_or_geometry_mismatch"
+    assert cluster["residual_direction_coherence"] >= 0.7
+    assert np.linalg.norm(cluster["median_residual_vector_px"]) > 5.0
+
+
+def test_robust_rigid_consensus_marks_edge_free_internal_part_indeterminate() -> None:
+    reference = np.zeros((160, 160), dtype=np.uint8)
+    reference[20:140, 20:140] = 255
+    image = np.dstack([reference] * 3)
+    ids = np.zeros_like(image)
+    parts = []
+    rectangles = {
+        "P0001": (20, 20, 70, 140),
+        "P0002": (70, 20, 140, 80),
+        "P0003": (70, 80, 140, 140),
+        # This internal panel has no corresponding edge in the photograph.
+        # It must not be called a rigid outlier merely because its CAD boundary
+        # crosses a uniform photographed surface.
+        "P0004": (80, 50, 120, 110),
+    }
+    for part_id, (left, top, right, bottom) in rectangles.items():
+        red, green, blue = _part_color(part_id)
+        ids[top:bottom, left:right] = (blue, green, red)
+        parts.append(
+            {
+                "part_id": part_id,
+                "prim_path": f"/Asset/Assembly/{part_id}/Mesh",
+            }
+        )
+
+    consensus = _robust_part_consensus(
+        ids=ids,
+        parts=parts,
+        affine=np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], np.float32),
+        reference_image=image,
+        reference_mask=reference,
+    )
+
+    assert consensus["rigid_consensus_valid"] is True
+    assert "P0004" in consensus["rigid_consensus_indeterminate_part_ids"]
+    assert "P0004" not in consensus["rigid_consensus_outlier_part_ids"]
+    row = next(
+        item
+        for item in consensus["rigid_consensus_part_residuals"]
+        if item["part_id"] == "P0004"
+    )
+    assert row["consensus_observable"] is False
+    assert row["rigid_inlier"] is None
+
+
+def test_robust_rigid_consensus_fails_open_to_phase1_for_sparse_assets() -> None:
+    reference = np.zeros((80, 80), dtype=np.uint8)
+    reference[20:60, 20:60] = 255
+    image = np.dstack([reference] * 3)
+    ids = np.zeros_like(image)
+    red, green, blue = _part_color("P0001")
+    ids[20:60, 20:60] = (blue, green, red)
+
+    consensus = _robust_part_consensus(
+        ids=ids,
+        parts=[{"part_id": "P0001", "prim_path": "/Asset/Part/Mesh"}],
+        affine=np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], np.float32),
+        reference_image=image,
+        reference_mask=reference,
+    )
+
+    assert consensus["rigid_consensus_valid"] is False
+    assert consensus["rigid_consensus_reason"] == "insufficient_visible_parts"
+
+
+def test_multiview_residual_classification_requires_repeated_rejection() -> None:
+    def score(*, inliers: list[str], rows: list[tuple[str, str]]) -> dict:
+        return {
+            "rigid_consensus_inlier_part_ids": inliers,
+            "rigid_consensus_part_residuals": [
+                {
+                    "part_id": part_id,
+                    "assembly_subtree": subtree,
+                    "residual_px": 12.0,
+                    "inside_reference_ratio": 0.4,
+                }
+                for part_id, subtree in rows
+            ],
+        }
+
+    diagnosis = _classify_multiview_residuals(
+        {
+            "front": score(
+                inliers=["P0001", "P0003"],
+                rows=[
+                    ("P0001", "/Asset/Rigid"),
+                    ("P0002", "/Asset/Accessory"),
+                    ("P0003", "/Asset/Rigid"),
+                ],
+            ),
+            "side": score(
+                inliers=["P0001"],
+                rows=[
+                    ("P0001", "/Asset/Rigid"),
+                    ("P0002", "/Asset/Accessory"),
+                    ("P0003", "/Asset/Rigid"),
+                ],
+            ),
+        }
+    )
+
+    assert diagnosis["persistent_mismatch_part_ids"] == ["P0002"]
+    assert diagnosis["view_local_mismatch_part_ids"] == ["P0003"]
 
 
 def test_boundary_metric_detects_pixel_shift() -> None:
