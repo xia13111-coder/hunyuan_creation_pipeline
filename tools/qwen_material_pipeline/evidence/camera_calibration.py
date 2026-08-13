@@ -1368,6 +1368,7 @@ def _robust_part_consensus(
     affine: np.ndarray,
     reference_image: np.ndarray,
     reference_mask: np.ndarray,
+    fixed_anchor_part_ids: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Estimate the rigid camera consensus and isolate assembly outliers.
 
@@ -1505,8 +1506,16 @@ def _robust_part_consensus(
                 "residual_px": residual_px,
             }
         )
+    fixed_anchor = _fixed_rigid_anchor_metrics(
+        observations=observations,
+        expected_part_ids=fixed_anchor_part_ids,
+        image_shape=reference_mask.shape,
+    )
     if len(observations) < RIGID_CONSENSUS_MINIMUM_INLIER_PARTS:
-        return _empty_rigid_consensus("insufficient_visible_parts", observations)
+        return {
+            **_empty_rigid_consensus("insufficient_visible_parts", observations),
+            **fixed_anchor,
+        }
 
     # Cap each size stratum deterministically, then fit location/scale with a
     # median and MAD.  This is the robust IRLS seed; no asset-specific label is
@@ -1557,11 +1566,14 @@ def _robust_part_consensus(
         item["robust_weight"] = 0.0
         item["rigid_inlier"] = None
     if len(eligible) < RIGID_CONSENSUS_MINIMUM_INLIER_PARTS:
-        return _empty_rigid_consensus(
-            "insufficient_observable_parts",
-            observations,
-            selected=selected,
-        )
+        return {
+            **_empty_rigid_consensus(
+                "insufficient_observable_parts",
+                observations,
+                selected=selected,
+            ),
+            **fixed_anchor,
+        }
     residuals = np.asarray([float(item["residual_px"]) for item in eligible])
     center = float(np.median(residuals))
     mad = float(np.median(np.abs(residuals - center)))
@@ -1585,13 +1597,16 @@ def _robust_part_consensus(
         len(inliers) < RIGID_CONSENSUS_MINIMUM_INLIER_PARTS
         or inlier_coverage < RIGID_CONSENSUS_MINIMUM_INLIER_COVERAGE
     ):
-        return _empty_rigid_consensus(
-            "insufficient_rigid_consensus",
-            observations,
-            center=center,
-            sigma=robust_sigma,
-            selected=selected,
-        )
+        return {
+            **_empty_rigid_consensus(
+                "insufficient_rigid_consensus",
+                observations,
+                center=center,
+                sigma=robust_sigma,
+                selected=selected,
+            ),
+            **fixed_anchor,
+        }
 
     def balanced_value(key: str) -> float:
         stratum_values: list[float] = []
@@ -1739,6 +1754,104 @@ def _robust_part_consensus(
             key=lambda item: (-float(item["residual_px"]), str(item["part_id"])),
         ),
         "assembly_residual_clusters": assembly_clusters,
+        **fixed_anchor,
+    }
+
+
+def _fixed_rigid_anchor_metrics(
+    *,
+    observations: Sequence[Mapping[str, Any]],
+    expected_part_ids: Sequence[str],
+    image_shape: Sequence[int],
+) -> dict[str, Any]:
+    """Score one sealed Part-ID set without candidate-wise reselection."""
+
+    raw_ids = [str(value) for value in expected_part_ids]
+    if not raw_ids:
+        return {
+            "fixed_anchor_enabled": False,
+            "fixed_anchor_valid": False,
+            "fixed_anchor_expected_part_ids": [],
+            "fixed_anchor_observed_part_ids": [],
+            "fixed_anchor_missing_part_ids": [],
+            "fixed_anchor_expected_part_count": 0,
+            "fixed_anchor_observed_part_count": 0,
+            "fixed_anchor_coverage": 0.0,
+            "fixed_anchor_residual_px": None,
+            "fixed_anchor_inside_reference_ratio": 0.0,
+            "fixed_anchor_score": 0.0,
+            "fixed_anchor_size_strata": {},
+        }
+    if raw_ids != sorted(set(raw_ids)) or any(not value for value in raw_ids):
+        raise ValueError("Fixed rigid anchor Part IDs must be sorted and unique")
+    by_id = {
+        str(item["part_id"]): item
+        for item in observations
+        if isinstance(item, Mapping) and isinstance(item.get("part_id"), str)
+    }
+    selected = [by_id[part_id] for part_id in raw_ids if part_id in by_id]
+    missing = [part_id for part_id in raw_ids if part_id not in by_id]
+    coverage = float(len(selected) / len(raw_ids))
+    residuals: list[float] = []
+    inside_ratios: list[float] = []
+    strata_audit: dict[str, Any] = {}
+    for stratum in ("small", "medium", "large"):
+        items = [item for item in selected if item.get("stratum") == stratum]
+        if not items:
+            strata_audit[stratum] = {"part_count": 0}
+            continue
+        weights = np.asarray(
+            [math.sqrt(min(int(item["projected_pixels"]), 768)) for item in items],
+            dtype=np.float64,
+        )
+        residual = float(
+            np.average(
+                np.asarray([float(item["residual_px"]) for item in items]),
+                weights=weights,
+            )
+        )
+        inside = float(
+            np.average(
+                np.asarray(
+                    [float(item["inside_reference_ratio"]) for item in items]
+                ),
+                weights=weights,
+            )
+        )
+        residuals.append(residual)
+        inside_ratios.append(inside)
+        strata_audit[stratum] = {
+            "part_count": len(items),
+            "residual_px": round(residual, 8),
+            "inside_reference_ratio": round(inside, 8),
+        }
+    residual_px = float(np.mean(residuals)) if residuals else None
+    inside_ratio = float(np.mean(inside_ratios)) if inside_ratios else 0.0
+    diagonal = max(1.0, math.hypot(int(image_shape[1]), int(image_shape[0])))
+    decay = max(3.0, 0.015 * diagonal)
+    score = (
+        math.exp(-residual_px / decay) * inside_ratio * coverage
+        if residual_px is not None
+        else 0.0
+    )
+    minimum_observed = max(3, math.ceil(0.60 * len(raw_ids)))
+    return {
+        "fixed_anchor_enabled": True,
+        "fixed_anchor_valid": len(raw_ids) >= 3 and len(selected) >= minimum_observed,
+        "fixed_anchor_expected_part_ids": raw_ids,
+        "fixed_anchor_observed_part_ids": sorted(
+            str(item["part_id"]) for item in selected
+        ),
+        "fixed_anchor_missing_part_ids": missing,
+        "fixed_anchor_expected_part_count": len(raw_ids),
+        "fixed_anchor_observed_part_count": len(selected),
+        "fixed_anchor_coverage": round(coverage, 8),
+        "fixed_anchor_residual_px": (
+            round(residual_px, 8) if residual_px is not None else None
+        ),
+        "fixed_anchor_inside_reference_ratio": round(inside_ratio, 8),
+        "fixed_anchor_score": round(float(score), 8),
+        "fixed_anchor_size_strata": strata_audit,
     }
 
 
@@ -2106,6 +2219,7 @@ def _score_candidates(
     reference_mask: np.ndarray,
     reference_image: np.ndarray,
     registry_path: Path,
+    fixed_anchor_part_ids: Sequence[str] = (),
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     registry = _read_object(registry_path)
     parts = registry.get("parts", [])
@@ -2226,6 +2340,7 @@ def _score_candidates(
             affine=matrix,
             reference_image=reference_image,
             reference_mask=reference_mask,
+            fixed_anchor_part_ids=fixed_anchor_part_ids,
         )
         iou = float(projection["projection_iou"])
         diagonal = math.hypot(reference_mask.shape[1], reference_mask.shape[0])
@@ -2235,7 +2350,26 @@ def _score_candidates(
         # covered, then the outer boundary and equal-weight size strata select
         # the camera.  IoU remains bounded evidence but can no longer let one
         # large enclosure hide small-part displacement.
-        if bool(rigid_consensus["rigid_consensus_valid"]):
+        if fixed_anchor_part_ids:
+            # This anchor set was sealed from independent multi-view baseline
+            # evidence.  It is the pose authority; whole-object silhouette and
+            # boundary remain non-regression evidence at final selection.
+            score = (
+                0.08 * iou
+                + 0.08 * float(coverage["target_recall"])
+                + 0.07 * float(coverage["rendered_precision"])
+                + 0.10 * boundary_score
+                + 0.08 * float(structure["structure_score"])
+                + 0.07
+                * float(component_coverage["reference_component_macro_recall"])
+                + 0.03
+                * float(component_coverage["reference_component_min_recall"])
+                + 0.08
+                * float(spatial_coverage["reference_spatial_macro_recall"])
+                + 0.04 * float(spatial_coverage["reference_spatial_min_recall"])
+                + 0.37 * float(rigid_consensus["fixed_anchor_score"])
+            )
+        elif bool(rigid_consensus["rigid_consensus_valid"]):
             # Global silhouette terms remain bounded evidence, but the robust
             # Part-ID consensus is the plurality authority for the physical
             # camera.  Outlier attachments are audited rather than allowed to

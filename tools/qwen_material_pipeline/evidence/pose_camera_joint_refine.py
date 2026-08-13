@@ -36,6 +36,7 @@ from qwen_material_pipeline.evidence.camera_calibration import (
     _spec_from_score,
     _transport_up_axis,
     _write_object,
+    _classify_multiview_residuals,
 )
 from qwen_material_pipeline.evidence.pose_model_camera_seed import (
     MODEL_NAME,
@@ -50,8 +51,8 @@ from qwen_material_pipeline.evidence.pose_model_camera_seed import (
 )
 
 
-REPORT_SCHEMA_VERSION = "qwen-rigid-pose-camera-joint-refinement/v1"
-OPTIMIZER_NAME = "deterministic-multistart-antithetic-trust-region"
+REPORT_SCHEMA_VERSION = "qwen-rigid-pose-camera-joint-refinement/v2"
+OPTIMIZER_NAME = "sealed-multiview-anchor-multistart-trust-region"
 PARAMETER_NAMES = (
     "azimuth_degrees",
     "elevation_degrees",
@@ -313,6 +314,7 @@ def select_final_candidate(
     maximum_iou_regression: float = 0.002,
     maximum_boundary_regression_px: float = 0.5,
     minimum_score_improvement: float = 0.001,
+    require_fixed_anchor: bool = False,
 ) -> tuple[str, dict[str, Any]]:
     baselines = [
         raw
@@ -324,6 +326,7 @@ def select_final_candidate(
         raise ValueError("Joint refinement requires exactly one sealed baseline anchor")
     baseline = dict(baselines[0])
     baseline_consensus = bool(baseline.get("rigid_consensus_valid"))
+    baseline_anchor_score = float(baseline.get("fixed_anchor_score", 0.0))
     eligible = [
         dict(raw)
         for raw in records
@@ -335,6 +338,14 @@ def select_final_candidate(
         and float(raw["score"])
         >= float(baseline["score"]) + minimum_score_improvement
         and (not baseline_consensus or bool(raw.get("rigid_consensus_valid")))
+        and (
+            not require_fixed_anchor
+            or (
+                bool(raw.get("fixed_anchor_valid"))
+                and float(raw.get("fixed_anchor_score", 0.0))
+                >= baseline_anchor_score + minimum_score_improvement
+            )
+        )
     ]
     if not eligible:
         return "BASELINE_RETAINED", baseline
@@ -352,6 +363,7 @@ def _score_round(
     specs: Sequence[Mapping[str, Any]],
     output: Path,
     round_name: str,
+    fixed_anchor_part_ids: Sequence[str] = (),
 ) -> tuple[list[dict[str, Any]], Path]:
     specs_path = _write_object(
         output / reference_id / f"{round_name}_view_specs.json",
@@ -375,6 +387,7 @@ def _score_round(
         reference_mask=mask,
         reference_image=image,
         registry_path=rendered,
+        fixed_anchor_part_ids=fixed_anchor_part_ids,
     )
     _write_object(
         output / reference_id / f"{round_name}_scores.json",
@@ -537,6 +550,143 @@ def _polish_specs(
     return output
 
 
+def _interpolate_camera_seed(
+    baseline: Mapping[str, Any],
+    center: Mapping[str, Any],
+    *,
+    fraction: float,
+) -> dict[str, Any]:
+    """Interpolate one complete camera without changing any CAD transform."""
+
+    if not 0.0 <= fraction <= 1.0:
+        raise ValueError("Camera interpolation fraction must be in [0, 1]")
+    baseline_direction = _normalize(baseline["analysis_direction"])
+    center_direction = _normalize(center["analysis_direction"])
+    direction = _normalize(
+        (1.0 - fraction) * baseline_direction + fraction * center_direction
+    )
+    baseline_up = np.asarray(
+        _transport_up_axis(
+            baseline_direction,
+            _normalize(baseline["analysis_up_axis"]),
+            direction,
+        ),
+        dtype=np.float64,
+    )
+    center_up = np.asarray(
+        _transport_up_axis(
+            center_direction,
+            _normalize(center["analysis_up_axis"]),
+            direction,
+        ),
+        dtype=np.float64,
+    )
+    if float(np.dot(baseline_up, center_up)) < 0.0:
+        center_up = -np.asarray(center_up, dtype=np.float64)
+    up = _normalize((1.0 - fraction) * baseline_up + fraction * center_up)
+
+    def linear(key: str, default: float = 0.0) -> float:
+        return (1.0 - fraction) * _float(baseline, key, default) + fraction * _float(
+            center, key, default
+        )
+
+    def geometric(key: str, default: float) -> float:
+        first = _float(baseline, key, default)
+        second = _float(center, key, default)
+        return math.exp((1.0 - fraction) * math.log(first) + fraction * math.log(second))
+
+    return {
+        "analysis_direction": direction.tolist(),
+        "analysis_up_axis": up.tolist(),
+        "focal_length_mm": geometric("focal_length_mm", 45.0),
+        "distance_multiplier": geometric("distance_multiplier", 2.15),
+        "target_offset_u": linear("target_offset_u"),
+        "target_offset_v": linear("target_offset_v"),
+        "principal_point_u": linear("principal_point_u"),
+        "principal_point_v": linear("principal_point_v"),
+        "radial_distortion_k1": linear("radial_distortion_k1"),
+        "radial_distortion_k2": linear("radial_distortion_k2"),
+        "projection_mode": str(baseline.get("projection_mode", "perspective")),
+        "orthographic_span_multiplier": linear(
+            "orthographic_span_multiplier", 2.0
+        ),
+    }
+
+
+def _anchor_line_center(
+    scores: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    baselines = [
+        dict(raw)
+        for raw in scores
+        if _lineage(raw).get("kind") == "sealed_baseline"
+        and bool(raw.get("calibration", {}).get("frame_anchor"))
+    ]
+    if not baselines:
+        raise ValueError("Anchor line search lost its sealed baseline")
+    baseline = min(baselines, key=_alignment_candidate_sort_key)
+    eligible = [
+        dict(raw)
+        for raw in scores
+        if bool(raw.get("fixed_anchor_valid"))
+        and float(raw["projection_iou"]) >= float(baseline["projection_iou"]) - 0.05
+        and float(raw["boundary_p95_px"])
+        <= float(baseline["boundary_p95_px"]) + 6.0
+    ]
+    center = min(
+        eligible or [baseline],
+        key=lambda raw: (
+            -float(raw.get("fixed_anchor_score", 0.0)),
+            -float(raw["projection_iou"]),
+            float(raw["boundary_p95_px"]),
+            str(raw["view_id"]),
+        ),
+    )
+    return baseline, center
+
+
+def _line_search_specs(
+    *,
+    reference_id: str,
+    baseline: Mapping[str, Any],
+    center: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    output = [
+        _baseline_anchor(
+            baseline,
+            reference_id=reference_id,
+            candidate_id=f"joint_{reference_id}_r4_baseline",
+            round_index=4,
+        )
+    ]
+    baseline_seed = dict(baseline)
+    center_seed = _seed_from_score(center)
+    for index, fraction in enumerate(
+        (0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0), start=1
+    ):
+        seed = _interpolate_camera_seed(
+            baseline_seed,
+            center_seed,
+            fraction=fraction,
+        )
+        output.append(
+            joint_candidate_spec(
+                seed=seed,
+                reference_id=reference_id,
+                candidate_id=f"joint_{reference_id}_r4_line_{index:02d}",
+                vector=None,
+                scales=BASELINE_SCALES * 0.1,
+                round_index=4,
+                lineage={
+                    "kind": "sealed_anchor_line_search",
+                    "source_view_id": str(center["view_id"]),
+                    "fraction": fraction,
+                },
+            )
+        )
+    return output
+
+
 def _candidate_public(score: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "view_id": score["view_id"],
@@ -545,6 +695,10 @@ def _candidate_public(score: Mapping[str, Any]) -> dict[str, Any]:
         "boundary_p95_px": score["boundary_p95_px"],
         "score": score["score"],
         "rigid_consensus_valid": bool(score.get("rigid_consensus_valid")),
+        "fixed_anchor_valid": bool(score.get("fixed_anchor_valid")),
+        "fixed_anchor_score": score.get("fixed_anchor_score"),
+        "fixed_anchor_residual_px": score.get("fixed_anchor_residual_px"),
+        "fixed_anchor_coverage": score.get("fixed_anchor_coverage"),
         "focal_length_mm": score["focal_length_mm"],
         "distance_multiplier": score["distance_multiplier"],
         "principal_point_u": score.get("principal_point_u", 0.0),
@@ -552,6 +706,66 @@ def _candidate_public(score: Mapping[str, Any]) -> dict[str, Any]:
         "radial_distortion_k1": score.get("radial_distortion_k1", 0.0),
         "radial_distortion_k2": score.get("radial_distortion_k2", 0.0),
     }
+
+
+def seal_multiview_rigid_anchors(
+    baseline_scores: Mapping[str, Mapping[str, Any]],
+    *,
+    minimum_observed_views: int = 2,
+) -> dict[str, Any]:
+    """Seal Parts accepted by every baseline view in which they are observable."""
+
+    if minimum_observed_views < 2:
+        raise ValueError("A multi-view rigid anchor needs at least two views")
+    diagnosis = _classify_multiview_residuals(baseline_scores)
+    stable: list[str] = []
+    for row in diagnosis["part_diagnoses"]:
+        if (
+            row["classification"] == "rigid_consensus_inlier"
+            and int(row["visible_view_count"]) >= minimum_observed_views
+        ):
+            stable.append(str(row["part_id"]))
+    stable.sort()
+    if len(stable) < 3:
+        raise RuntimeError("Baseline views do not establish three stable rigid anchors")
+    return {
+        "schema_version": "qwen-sealed-multiview-rigid-anchors/v1",
+        "selection_authority": "baseline_multiview_robust_consensus_intersection",
+        "minimum_observed_views": minimum_observed_views,
+        "part_ids": stable,
+        "part_count": len(stable),
+        "diagnosis": diagnosis,
+        "per_mesh_or_subtree_transform_applied": False,
+    }
+
+
+def _baseline_scores_from_seed_render(
+    *,
+    manifest: Path,
+    registry: Path,
+    requested: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    references = _reference_masks(manifest)
+    output: dict[str, dict[str, Any]] = {}
+    for view_id in requested:
+        mask, row = references[view_id]
+        image = _reference_image(row, manifest, mask.shape)
+        _, records = _score_candidates(
+            reference_id=view_id,
+            reference_mask=mask,
+            reference_image=image,
+            registry_path=registry,
+        )
+        baseline = [
+            raw
+            for raw in records
+            if raw.get("calibration", {}).get("frame_anchor") is True
+            and int(raw.get("calibration", {}).get("proposal_rank", 0)) == 0
+        ]
+        if len(baseline) != 1:
+            raise ValueError(f"Seed render does not have one baseline for {view_id}")
+        output[view_id] = dict(baseline[0])
+    return output
 
 
 def full_resolution_spec(
@@ -654,6 +868,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     proposals_path = _resolved_bound_path(
         seed_report_path, seed_report, "proposals", "proposals_sha256"
     )
+    seed_rendered = Path(str(seed_report.get("rendered_registry", ""))).expanduser().resolve(
+        strict=True
+    )
     baseline_by_view = _seed_by_view(_read_object(baseline_path))
     requested = [value.strip() for value in args.views.split(",") if value.strip()]
     if len(requested) != len(set(requested)) or set(requested) != set(baseline_by_view):
@@ -661,6 +878,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     proposals = validate_proposals(
         _read_object(proposals_path), expected_view_ids=requested
     )
+    sealed_anchor = seal_multiview_rigid_anchors(
+        _baseline_scores_from_seed_render(
+            manifest=manifest,
+            registry=seed_rendered,
+            requested=requested,
+        )
+    )
+    fixed_anchor_part_ids = list(sealed_anchor["part_ids"])
+    _write_object(output / "sealed_multiview_rigid_anchors.json", sealed_anchor)
     model_starts = {
         view_id: [
             pose_to_camera_spec(
@@ -689,6 +915,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             output=output,
             round_name="round_1_multistart",
+            fixed_anchor_part_ids=fixed_anchor_part_ids,
         )
         best_global = min(first, key=_alignment_candidate_sort_key)
         model_rows = [raw for raw in first if _lineage(raw).get("kind") == "gigapose"]
@@ -706,6 +933,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             output=output,
             round_name="round_2_branch_refine",
+            fixed_anchor_part_ids=fixed_anchor_part_ids,
         )
         center = min((*first, *second), key=_alignment_candidate_sort_key)
         third, _ = _score_round(
@@ -720,8 +948,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             ),
             output=output,
             round_name="round_3_joint_polish",
+            fixed_anchor_part_ids=fixed_anchor_part_ids,
         )
-        search_records[view_id] = [*first, *second, *third]
+        line_baseline, line_center = _anchor_line_center((*first, *second, *third))
+        fourth, _ = _score_round(
+            args=args,
+            registry=registry,
+            manifest=manifest,
+            reference_id=view_id,
+            specs=_line_search_specs(
+                reference_id=view_id,
+                baseline=baseline,
+                center=line_center,
+            ),
+            output=output,
+            round_name="round_4_nonregressive_line_search",
+            fixed_anchor_part_ids=fixed_anchor_part_ids,
+        )
+        search_records[view_id] = [*first, *second, *third, *fourth]
         round_audits[view_id] = [
             {
                 "round": 1,
@@ -741,6 +985,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "candidate_count": len(third),
                 "winner": _candidate_public(
                     min(third, key=_alignment_candidate_sort_key)
+                ),
+            },
+            {
+                "round": 4,
+                "candidate_count": len(fourth),
+                "source_baseline": _candidate_public(line_baseline),
+                "source_anchor_center": _candidate_public(line_center),
+                "winner": _candidate_public(
+                    min(fourth, key=_alignment_candidate_sort_key)
                 ),
             },
         ]
@@ -811,8 +1064,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             reference_mask=mask,
             reference_image=image,
             registry_path=final_rendered,
+            fixed_anchor_part_ids=fixed_anchor_part_ids,
         )
-        decision, winner = select_final_candidate(records)
+        decision, winner = select_final_candidate(
+            records,
+            require_fixed_anchor=True,
+        )
         baseline_score = next(
             raw
             for raw in records
@@ -888,6 +1145,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "per_mesh_or_subtree_transform_applied": False,
         "camera_intrinsics_jointly_optimized": True,
         "shared_baseline_frame_anchor_per_view": True,
+        "sealed_multiview_rigid_anchors": sealed_anchor,
+        "candidate_wise_anchor_reselection": False,
         "learned_pose_is_initialization_only": True,
         "isaac_full_resolution_render_is_selection_authority": True,
         "views": public_views,
