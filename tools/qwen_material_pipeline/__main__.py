@@ -128,6 +128,10 @@ COMMANDS: dict[str, CommandSpec] = {
         "qwen_material_pipeline.evidence.whole_asset_pose",
         "optimize one complete workpiece SE(3) pose across sealed cameras",
     ),
+    "pose-model-camera-seed": CommandSpec(
+        "qwen_material_pipeline.evidence.pose_model_camera_seed",
+        "verify learned whole-object 6D poses as physical camera seeds",
+    ),
     "appearance-components": CommandSpec(
         "qwen_material_pipeline.evidence.appearance_components",
         "derive conservative photo-supported visual coating components for CAD Part IDs",
