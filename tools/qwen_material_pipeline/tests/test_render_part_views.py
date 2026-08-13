@@ -27,6 +27,7 @@ from qwen_material_pipeline.usd.render import (
     _cross,
     _highlighted_context_crop,
     _isolated_target_crop,
+    _load_assembly_pose_overrides,
     _load_custom_view_specs,
     _normalize,
     _RenderCleanupError,
@@ -36,6 +37,53 @@ from qwen_material_pipeline.usd.render import (
     _simulation_app_launch_config,
     render_part_views,
 )
+
+
+def test_assembly_pose_overrides_require_rigid_subtree_translation(tmp_path) -> None:
+    path = tmp_path / "overrides.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "qwen-assembly-pose-overrides/v1",
+                "overrides": [
+                    {
+                        "prim_path": "/Asset/Accessory",
+                        "world_translation": [0.1, -0.2, 0.3],
+                    }
+                ],
+            }
+        )
+    )
+
+    assert _load_assembly_pose_overrides(path) == [
+        {
+            "prim_path": "/Asset/Accessory",
+            "world_translation": [0.1, -0.2, 0.3],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"prim_path": "relative", "world_translation": [0.0, 0.0, 0.0]},
+        {"prim_path": "/Asset", "world_translation": [0.0, float("nan"), 0.0]},
+        {"prim_path": "/Asset", "world_translation": [0.0, 0.0]},
+    ],
+)
+def test_assembly_pose_overrides_fail_closed(tmp_path, override) -> None:
+    path = tmp_path / "invalid.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "qwen-assembly-pose-overrides/v1",
+                "overrides": [override],
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="Assembly pose override"):
+        _load_assembly_pose_overrides(path)
 
 
 class _FakeContext:

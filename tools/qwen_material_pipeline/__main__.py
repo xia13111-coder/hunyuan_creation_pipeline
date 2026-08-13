@@ -116,6 +116,10 @@ COMMANDS: dict[str, CommandSpec] = {
         "qwen_material_pipeline.evidence.camera_calibration",
         "continuously calibrate whole-asset cameras against confirmed silhouettes",
     ),
+    "optimize-assembly-pose": CommandSpec(
+        "qwen_material_pipeline.evidence.assembly_pose",
+        "repair coherent local assembly displacement with bounded rigid motion",
+    ),
     "appearance-components": CommandSpec(
         "qwen_material_pipeline.evidence.appearance_components",
         "derive conservative photo-supported visual coating components for CAD Part IDs",

@@ -527,6 +527,131 @@ def _load_custom_view_specs(
     return output
 
 
+def _load_assembly_pose_overrides(path: str | Path) -> list[dict[str, Any]]:
+    """Load bounded world-space rigid transforms for assembly subtrees.
+
+    The contract deliberately targets Xform subtrees rather than Mesh Parts.
+    One transform therefore preserves the internal CAD assembly exactly and
+    cannot become a per-Part image warp.
+    """
+
+    source = Path(path).expanduser().resolve(strict=True)
+    document = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(document, dict) or document.get("schema_version") != (
+        "qwen-assembly-pose-overrides/v1"
+    ):
+        raise ValueError("Assembly pose overrides have an unsupported schema")
+    raw_overrides = document.get("overrides")
+    if not isinstance(raw_overrides, list) or not raw_overrides:
+        raise ValueError("Assembly pose overrides require non-empty overrides")
+    output: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_overrides):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Assembly pose override {index} must be an object")
+        prim_path = raw.get("prim_path")
+        translation = raw.get("world_translation")
+        if (
+            not isinstance(prim_path, str)
+            or not prim_path.startswith("/")
+            or prim_path in seen
+        ):
+            raise ValueError(f"Assembly pose override {index} has invalid prim_path")
+        if (
+            not isinstance(translation, list)
+            or len(translation) != 3
+            or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for value in translation
+            )
+        ):
+            raise ValueError(
+                f"Assembly pose override {prim_path} requires finite translation"
+            )
+        seen.add(prim_path)
+        output.append(
+            {
+                "prim_path": prim_path,
+                "world_translation": [float(value) for value in translation],
+            }
+        )
+    return output
+
+
+def _apply_assembly_pose_overrides(
+    *, stage: Any, overrides: Sequence[dict[str, Any]], maximum_translation: float
+) -> None:
+    """Apply unsaved assembly translations while preserving authored ops."""
+
+    from pxr import Gf, Usd, UsdGeom
+
+    for override in overrides:
+        prim_path = str(override["prim_path"])
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or prim.GetTypeName() != "Xform" or prim.IsInstanceProxy():
+            raise ValueError(
+                f"Assembly pose override must target a writable Xform: {prim_path}"
+            )
+        translation = tuple(float(value) for value in override["world_translation"])
+        length = math.sqrt(sum(value * value for value in translation))
+        if length > maximum_translation:
+            raise ValueError(
+                f"Assembly pose override exceeds bounded asset-relative motion: "
+                f"{prim_path} ({length:.6f} > {maximum_translation:.6f})"
+            )
+        xform = UsdGeom.Xformable(prim)
+        op = xform.AddTranslateOp(
+            UsdGeom.XformOp.PrecisionDouble,
+            "qwenAssemblyPose",
+        )
+        # An appended xformOp can be composed before or after authored rotate/
+        # scale ops.  Solving its actual three world-space basis responses is
+        # therefore safer than assuming a particular authored op order.  This
+        # keeps the public contract a true world translation for arbitrary
+        # assembly hierarchies, not only translation-only CAD nodes.
+        op.Set(Gf.Vec3d(0.0))
+        base = xform.ComputeLocalToWorldTransform(
+            Usd.TimeCode.Default()
+        ).ExtractTranslation()
+        columns: list[list[float]] = []
+        for axis in range(3):
+            unit = [0.0, 0.0, 0.0]
+            unit[axis] = 1.0
+            op.Set(Gf.Vec3d(*unit))
+            moved = xform.ComputeLocalToWorldTransform(
+                Usd.TimeCode.Default()
+            ).ExtractTranslation()
+            columns.append([float(moved[i] - base[i]) for i in range(3)])
+        response = np.asarray(columns, dtype=np.float64).T
+        if (
+            not np.isfinite(response).all()
+            or abs(float(np.linalg.det(response))) < 1e-9
+        ):
+            raise ValueError(
+                f"Assembly pose override has a singular transform basis: {prim_path}"
+            )
+        local_delta = np.linalg.solve(
+            response,
+            np.asarray(translation, dtype=np.float64),
+        )
+        op.Set(Gf.Vec3d(*(float(value) for value in local_delta)))
+        achieved = (
+            xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            .ExtractTranslation()
+            - base
+        )
+        error = math.sqrt(
+            sum((float(achieved[i]) - translation[i]) ** 2 for i in range(3))
+        )
+        if error > 1e-6:
+            raise ValueError(
+                f"Assembly pose override could not realize world translation: "
+                f"{prim_path} (error={error:.9f})"
+            )
+
+
 def _dot(left: tuple[float, float, float], right: tuple[float, float, float]) -> float:
     return sum(left[index] * right[index] for index in range(3))
 
@@ -1258,6 +1383,7 @@ def _render_part_views_once(
     showcase: bool = False,
     generate_part_evidence: bool = True,
     custom_view_specs_path: str | Path | None = None,
+    assembly_pose_overrides_path: str | Path | None = None,
     progress_callback: ProgressCallback | None = None,
     _lifecycle: _RenderLifecycle,
 ) -> dict[str, Any]:
@@ -1299,6 +1425,11 @@ def _render_part_views_once(
         _load_custom_view_specs(custom_view_specs_path)
         if custom_view_specs_path is not None
         else None
+    )
+    assembly_pose_overrides = (
+        _load_assembly_pose_overrides(assembly_pose_overrides_path)
+        if assembly_pose_overrides_path is not None
+        else []
     )
     if custom_view_specs is None:
         view_directions, view_presets = _resolve_view_directions(view_names)
@@ -1387,6 +1518,14 @@ def _render_part_views_once(
     extents = tuple(float(maximum[i] - minimum[i]) for i in range(3))
     diagonal = max(math.sqrt(sum(value * value for value in extents)), 1e-3)
     camera_distance = diagonal * 2.15
+    if assembly_pose_overrides:
+        _apply_assembly_pose_overrides(
+            stage=stage,
+            overrides=assembly_pose_overrides,
+            maximum_translation=0.20 * diagonal,
+        )
+        for _ in range(3):
+            omni.kit.app.get_app().update()
 
     showcase_runtime = None
     if showcase:
@@ -1872,6 +2011,12 @@ def _render_part_views_once(
             if custom_view_specs_path is not None
             else None
         ),
+        "assembly_pose_overrides": (
+            str(Path(assembly_pose_overrides_path).expanduser().resolve(strict=True))
+            if assembly_pose_overrides_path is not None
+            else None
+        ),
+        "assembly_pose_override_count": len(assembly_pose_overrides),
         "rt_subframes": rt_subframes,
         "expanded_view_count": len(names),
         "view_presets": view_presets,
@@ -1940,6 +2085,7 @@ def render_part_views(
     showcase: bool = False,
     generate_part_evidence: bool = True,
     custom_view_specs_path: str | Path | None = None,
+    assembly_pose_overrides_path: str | Path | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Render one evidence set and synchronously release all Kit resources."""
@@ -1958,6 +2104,7 @@ def render_part_views(
             showcase=showcase,
             generate_part_evidence=generate_part_evidence,
             custom_view_specs_path=custom_view_specs_path,
+            assembly_pose_overrides_path=assembly_pose_overrides_path,
             progress_callback=progress_callback,
             _lifecycle=lifecycle,
         )
@@ -1984,6 +2131,13 @@ def parse_args() -> argparse.Namespace:
             "JSON qwen-camera-view-specs/v1 containing arbitrary analysis-space "
             "camera directions, up axes, focal lengths and distance multipliers; "
             "when supplied it replaces --views"
+        ),
+    )
+    parser.add_argument(
+        "--assembly-pose-overrides",
+        help=(
+            "optional qwen-assembly-pose-overrides/v1 document; applies "
+            "bounded rigid transforms to whole Xform subtrees in memory only"
         ),
     )
     parser.add_argument("--rt-subframes", type=int, default=8)
@@ -2089,6 +2243,7 @@ def main() -> int:
             showcase=args.showcase,
             generate_part_evidence=not args.rgb_only,
             custom_view_specs_path=args.view_specs,
+            assembly_pose_overrides_path=args.assembly_pose_overrides,
             progress_callback=emit_progress_event,
         )
     except Exception:
