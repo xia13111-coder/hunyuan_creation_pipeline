@@ -945,19 +945,14 @@ def test_live_camera_provenance_accepts_only_current_run_two_pass_seed(
                 "seed_search": {"mode": "existing_continuous_camera_specs"},
                 "whole_asset_only": True,
                 "per_part_geometric_warp_applied": False,
-                    "camera_intrinsics_optimized": [
-                        "projection_mode",
-                        "focal_length_mm",
-                        "principal_point_u",
-                        "principal_point_v",
-                        "radial_distortion_k1",
-                        "radial_distortion_k2",
-                    ],
-                    "camera_extrinsics_optimized": [
-                        "orbit_azimuth",
-                        "orbit_elevation",
-                        "camera_roll",
-                        "optical_axis_target_u",
+                "camera_intrinsics_optimized": [
+                    "projection_mode",
+                    "focal_length_mm",
+                ],
+                "camera_extrinsics_optimized": [
+                    "orbit_azimuth",
+                    "orbit_elevation",
+                    "optical_axis_target_u",
                     "optical_axis_target_v",
                 ],
             }

@@ -8,7 +8,7 @@ runtimes.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Sequence
+from typing import TYPE_CHECKING, Sequence
 
 if TYPE_CHECKING:
     from .config import VisualMaterialConfig
@@ -106,13 +106,9 @@ def camera_registration_command(
     analysis_front_axis: str,
     initial_view_specs: Path | None = None,
     search_phases: Sequence[str] = (),
-    render_backend: Literal["supervisor", "inprocess", "subprocess"] = "supervisor",
 ) -> list[str]:
-    if render_backend not in {"supervisor", "inprocess", "subprocess"}:
-        raise ValueError(f"Unsupported camera render backend: {render_backend!r}")
-    executable = isaac_python if render_backend == "inprocess" else python
     command = [
-        str(executable),
+        str(python),
         "-m",
         "qwen_material_pipeline",
         "calibrate-cameras",
@@ -129,8 +125,6 @@ def camera_registration_command(
         [
             "--isaac-python",
             str(isaac_python),
-            "--render-backend",
-            render_backend,
             "--output-dir",
             str(output_dir),
             "--search-resolution",

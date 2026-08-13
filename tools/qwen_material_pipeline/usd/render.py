@@ -8,7 +8,6 @@ or changes the source USD.
 from __future__ import annotations
 
 import argparse
-import cv2
 import hashlib
 import json
 import math
@@ -17,8 +16,6 @@ import traceback
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any, TypeVar
-
-import numpy as np
 
 from qwen_material_pipeline.core.progress import (
     ProgressCallback,
@@ -146,155 +143,8 @@ ISAAC_STARTUP_PROGRESS_STAGE = "isaac_startup"
 RENDER_BUSINESS_PROGRESS_STAGE = "render_business"
 RENDER_CAPTURE_PROGRESS_STAGE = "render_capture"
 RENDER_VIEWS_PROGRESS_STAGE = "render_views"
-POST_CLOSE_MIN_KIT_UPDATES = 2
-POST_CLOSE_MAX_KIT_UPDATES = 120
 
 _ProgressItem = TypeVar("_ProgressItem")
-
-
-class _RenderCleanupError(RuntimeError):
-    """Report one or more failures while releasing a render invocation."""
-
-    def __init__(self, failures: Sequence[tuple[str, BaseException]]) -> None:
-        self.failures = tuple(failures)
-        details = "; ".join(
-            f"{operation}: {type(error).__name__}: {error}"
-            for operation, error in self.failures
-        )
-        super().__init__(f"Render resource cleanup failed ({details})")
-
-
-def _get_kit_app() -> Any:
-    """Return Kit's application interface after SimulationApp has started."""
-
-    import omni.kit.app
-
-    return omni.kit.app.get_app()
-
-
-def _wait_for_stage_to_close(context: Any, app: Any) -> None:
-    """Pump Kit until stage-close hooks retire renderer resources.
-
-    Replicator owns RenderProduct and HydraTexture teardown through its USD
-    stage-closing/stage-closed hooks.  Those hooks and the renderer retire work
-    over Kit updates, so opening another stage immediately after close_stage()
-    can otherwise race resources from the previous render batch.
-    """
-
-    updates = 0
-    while updates < POST_CLOSE_MIN_KIT_UPDATES or context.get_stage() is not None:
-        if updates >= POST_CLOSE_MAX_KIT_UPDATES:
-            raise RuntimeError(
-                "USD stage remained open after "
-                f"{POST_CLOSE_MAX_KIT_UPDATES} post-close Kit updates"
-            )
-        app.update()
-        updates += 1
-
-
-class _RenderLifecycle:
-    """Own every Kit/Replicator resource created by one render invocation.
-
-    Camera calibration can call :func:`render_part_views` repeatedly inside a
-    single SimulationApp.  Replicator shutdown is asynchronous, so merely
-    calling ``stop`` leaves the next invocation racing an orchestrator in the
-    STOPPING state.  Annotators are detached explicitly, while Replicator's
-    stage-close hooks remain the sole owner of RenderProduct and HydraTexture
-    destruction.  Cleanup attempts every independent operation even when an
-    earlier one raises.
-    """
-
-    def __init__(self) -> None:
-        self._context: Any | None = None
-        self._stage_opened = False
-        self._annotators: list[tuple[Any, Any]] = []
-        self._orchestrator: Any | None = None
-        self._orchestrator_step_attempted = False
-        self._cleaned = False
-
-    def register_open_stage(self, context: Any) -> None:
-        """Record a successfully opened stage for unconditional closing."""
-
-        if self._stage_opened:
-            raise RuntimeError("Render lifecycle already owns an open USD stage")
-        self._context = context
-        self._stage_opened = True
-
-    def attach_annotator(self, annotator: Any, render_product: Any) -> None:
-        """Record an annotator before attach so partial attaches are releasable."""
-
-        self._annotators.append((annotator, render_product))
-        annotator.attach(render_product)
-
-    def step(self, orchestrator: Any, **kwargs: Any) -> Any:
-        """Mark a Replicator step as attempted before entering Replicator."""
-
-        if self._orchestrator is not None and self._orchestrator is not orchestrator:
-            raise RuntimeError("Render lifecycle cannot own multiple orchestrators")
-        self._orchestrator = orchestrator
-        self._orchestrator_step_attempted = True
-        return orchestrator.step(**kwargs)
-
-    def cleanup(self) -> None:
-        """Synchronously release all owned resources, collecting every failure."""
-
-        if self._cleaned:
-            return
-        self._cleaned = True
-        failures: list[tuple[str, BaseException]] = []
-
-        def attempt(operation: str, callback: Callable[[], Any]) -> None:
-            try:
-                callback()
-            except BaseException as error:
-                failures.append((operation, error))
-
-        if self._orchestrator_step_attempted:
-            assert self._orchestrator is not None
-            attempt("orchestrator.stop", self._orchestrator.stop)
-            # stop() is non-blocking in supported Replicator releases.  Waiting
-            # is mandatory before a later render_part_views call may step.
-            attempt(
-                "orchestrator.wait_until_complete",
-                self._orchestrator.wait_until_complete,
-            )
-
-        for index, (annotator, render_product) in enumerate(
-            reversed(self._annotators), start=1
-        ):
-            attempt(
-                f"annotator.detach[{index}]",
-                lambda annotator=annotator, render_product=render_product: (
-                    annotator.detach(render_product)
-                ),
-            )
-
-        if self._stage_opened:
-            assert self._context is not None
-            stage_close_requested = False
-
-            def close_stage() -> None:
-                nonlocal stage_close_requested
-                result = self._context.close_stage()
-                if result is not True:
-                    raise RuntimeError(
-                        "omni.usd context.close_stage() did not return True"
-                    )
-                stage_close_requested = True
-
-            attempt("usd_context.close_stage", close_stage)
-            if stage_close_requested:
-                attempt(
-                    "usd_context.await_stage_closed",
-                    lambda: _wait_for_stage_to_close(
-                        self._context,
-                        _get_kit_app(),
-                    ),
-                )
-
-        if failures:
-            error = _RenderCleanupError(failures)
-            raise error from failures[0][1]
 
 
 def _counted_progress_items(
@@ -465,11 +315,6 @@ def _load_custom_view_specs(
         distance_multiplier = raw.get("distance_multiplier", 2.15)
         target_offset_u = raw.get("target_offset_u", 0.0)
         target_offset_v = raw.get("target_offset_v", 0.0)
-        roll_degrees = raw.get("roll_degrees", 0.0)
-        principal_point_u = raw.get("principal_point_u", 0.0)
-        principal_point_v = raw.get("principal_point_v", 0.0)
-        radial_distortion_k1 = raw.get("radial_distortion_k1", 0.0)
-        radial_distortion_k2 = raw.get("radial_distortion_k2", 0.0)
         projection_mode = raw.get("projection_mode", "perspective")
         orthographic_span_multiplier = raw.get(
             "orthographic_span_multiplier", 2.0
@@ -484,11 +329,6 @@ def _load_custom_view_specs(
             ("distance_multiplier", distance_multiplier, 1.05, 100.0),
             ("target_offset_u", target_offset_u, -1.0, 1.0),
             ("target_offset_v", target_offset_v, -1.0, 1.0),
-            ("roll_degrees", roll_degrees, -15.0, 15.0),
-            ("principal_point_u", principal_point_u, -0.20, 0.20),
-            ("principal_point_v", principal_point_v, -0.20, 0.20),
-            ("radial_distortion_k1", radial_distortion_k1, -0.35, 0.35),
-            ("radial_distortion_k2", radial_distortion_k2, -0.20, 0.20),
             (
                 "orthographic_span_multiplier",
                 orthographic_span_multiplier,
@@ -513,11 +353,6 @@ def _load_custom_view_specs(
             "distance_multiplier": float(distance_multiplier),
             "target_offset_u": float(target_offset_u),
             "target_offset_v": float(target_offset_v),
-            "roll_degrees": float(roll_degrees),
-            "principal_point_u": float(principal_point_u),
-            "principal_point_v": float(principal_point_v),
-            "radial_distortion_k1": float(radial_distortion_k1),
-            "radial_distortion_k2": float(radial_distortion_k2),
             "projection_mode": projection_mode,
             "orthographic_span_multiplier": float(
                 orthographic_span_multiplier
@@ -525,296 +360,6 @@ def _load_custom_view_specs(
             "calibration": raw.get("calibration"),
         }
     return output
-
-
-def _load_assembly_pose_overrides(path: str | Path) -> list[dict[str, Any]]:
-    """Load bounded world-space rigid transforms for assembly subtrees.
-
-    The contract deliberately targets Xform subtrees rather than Mesh Parts.
-    One transform therefore preserves the internal CAD assembly exactly and
-    cannot become a per-Part image warp.
-    """
-
-    source = Path(path).expanduser().resolve(strict=True)
-    document = json.loads(source.read_text(encoding="utf-8"))
-    if not isinstance(document, dict) or document.get("schema_version") != (
-        "qwen-assembly-pose-overrides/v1"
-    ):
-        raise ValueError("Assembly pose overrides have an unsupported schema")
-    raw_overrides = document.get("overrides")
-    if not isinstance(raw_overrides, list) or not raw_overrides:
-        raise ValueError("Assembly pose overrides require non-empty overrides")
-    output: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for index, raw in enumerate(raw_overrides):
-        if not isinstance(raw, dict):
-            raise ValueError(f"Assembly pose override {index} must be an object")
-        prim_path = raw.get("prim_path")
-        translation = raw.get("world_translation")
-        if (
-            not isinstance(prim_path, str)
-            or not prim_path.startswith("/")
-            or prim_path in seen
-        ):
-            raise ValueError(f"Assembly pose override {index} has invalid prim_path")
-        if (
-            not isinstance(translation, list)
-            or len(translation) != 3
-            or any(
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(float(value))
-                for value in translation
-            )
-        ):
-            raise ValueError(
-                f"Assembly pose override {prim_path} requires finite translation"
-            )
-        seen.add(prim_path)
-        output.append(
-            {
-                "prim_path": prim_path,
-                "world_translation": [float(value) for value in translation],
-            }
-        )
-    return output
-
-
-def _lowest_common_part_xform_path(
-    *, stage: Any, part_paths: Sequence[str]
-) -> str:
-    """Return the lowest authored Xform containing every registered Mesh."""
-
-    if not part_paths or len(set(part_paths)) != len(part_paths):
-        raise ValueError("Whole-asset pose requires unique registered Part paths")
-    components = [str(path).strip("/").split("/") for path in part_paths]
-    if any(not raw or raw == [""] for raw in components):
-        raise ValueError("Whole-asset pose requires absolute registered Part paths")
-    common_length = 0
-    while all(
-        len(raw) > common_length
-        and raw[common_length] == components[0][common_length]
-        for raw in components
-    ):
-        common_length += 1
-    if common_length <= 0:
-        raise ValueError("Registered Parts do not share an authored asset root")
-    while common_length > 0:
-        candidate = "/" + "/".join(components[0][:common_length])
-        prim = stage.GetPrimAtPath(candidate)
-        if prim and prim.GetTypeName() == "Xform" and not prim.IsInstanceProxy():
-            prefix = candidate.rstrip("/") + "/"
-            if all(str(path).startswith(prefix) for path in part_paths):
-                return candidate
-        common_length -= 1
-    raise ValueError("Registered Parts have no common writable Xform root")
-
-
-def _load_whole_asset_pose_override(path: str | Path) -> dict[str, Any]:
-    """Load one bounded SE(3) transform for the complete registered asset."""
-
-    source = Path(path).expanduser().resolve(strict=True)
-    document = json.loads(source.read_text(encoding="utf-8"))
-    if not isinstance(document, dict) or document.get("schema_version") != (
-        "qwen-whole-asset-pose-override/v1"
-    ):
-        raise ValueError("Whole-asset pose override has an unsupported schema")
-    root = document.get("asset_root_prim_path")
-    translation = document.get("world_translation")
-    rotation = document.get("world_rotation_rotvec_degrees")
-    if not isinstance(root, str) or not root.startswith("/"):
-        raise ValueError("Whole-asset pose override requires an absolute asset root")
-    for label, value in (
-        ("translation", translation),
-        ("rotation vector", rotation),
-    ):
-        if (
-            not isinstance(value, list)
-            or len(value) != 3
-            or any(
-                isinstance(item, bool)
-                or not isinstance(item, (int, float))
-                or not math.isfinite(float(item))
-                for item in value
-            )
-        ):
-            raise ValueError(
-                f"Whole-asset pose override requires a finite {label}"
-            )
-    if document.get("pivot") != "asset_bounds_center":
-        raise ValueError("Whole-asset pose rotation must use the asset bounds center")
-    return {
-        "asset_root_prim_path": root,
-        "world_translation": [float(item) for item in translation],
-        "world_rotation_rotvec_degrees": [float(item) for item in rotation],
-        "pivot": "asset_bounds_center",
-    }
-
-
-def _apply_whole_asset_pose_override(
-    *,
-    stage: Any,
-    override: Mapping[str, Any],
-    registered_part_paths: Sequence[str],
-    asset_center: Sequence[float],
-    maximum_translation: float,
-    maximum_rotation_degrees: float = 20.0,
-) -> dict[str, Any]:
-    """Apply one world-space SE(3) delta to the complete registered asset."""
-
-    from pxr import Gf, Usd, UsdGeom
-
-    expected_root = _lowest_common_part_xform_path(
-        stage=stage, part_paths=registered_part_paths
-    )
-    root = str(override["asset_root_prim_path"])
-    if root != expected_root:
-        raise ValueError(
-            "Whole-asset pose must target the lowest common registered Xform: "
-            f"{root!r} != {expected_root!r}"
-        )
-    prim = stage.GetPrimAtPath(root)
-    if not prim or prim.GetTypeName() != "Xform" or prim.IsInstanceProxy():
-        raise ValueError(f"Whole-asset pose root is not a writable Xform: {root}")
-    translation = np.asarray(override["world_translation"], dtype=np.float64)
-    translation_norm = float(np.linalg.norm(translation))
-    if translation_norm > maximum_translation:
-        raise ValueError(
-            "Whole-asset pose exceeds bounded asset-relative translation: "
-            f"{translation_norm:.6f} > {maximum_translation:.6f}"
-        )
-    rotvec = np.asarray(
-        override["world_rotation_rotvec_degrees"], dtype=np.float64
-    )
-    angle = float(np.linalg.norm(rotvec))
-    if angle > maximum_rotation_degrees:
-        raise ValueError(
-            "Whole-asset pose exceeds bounded rotation: "
-            f"{angle:.6f} > {maximum_rotation_degrees:.6f} degrees"
-        )
-    center = Gf.Vec3d(*(float(value) for value in asset_center))
-    delta = Gf.Matrix4d(1.0)
-    delta.SetTranslate(-center)
-    if angle > 1e-12:
-        axis = Gf.Vec3d(*(float(value / angle) for value in rotvec))
-        rotation = Gf.Matrix4d(1.0)
-        rotation.SetRotate(Gf.Rotation(axis, angle))
-        delta = delta * rotation
-    restore = Gf.Matrix4d(1.0)
-    restore.SetTranslate(center + Gf.Vec3d(*(float(value) for value in translation)))
-    delta = delta * restore
-
-    xform = UsdGeom.Xformable(prim)
-    local_before = xform.GetLocalTransformation(Usd.TimeCode.Default())
-    world_before = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-    parent = prim.GetParent()
-    parent_world = (
-        UsdGeom.Xformable(parent).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-        if parent and not parent.IsPseudoRoot() and UsdGeom.Xformable(parent)
-        else Gf.Matrix4d(1.0)
-    )
-    desired_world = world_before * delta
-    desired_local = desired_world * parent_world.GetInverse()
-    # USD composes an appended op on the left in its row-vector convention:
-    # local_after = compensation * local_before.
-    compensation = desired_local * local_before.GetInverse()
-    op = xform.AddTransformOp(
-        UsdGeom.XformOp.PrecisionDouble,
-        "qwenWholeAssetPose",
-    )
-    op.Set(compensation)
-    achieved_world = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-    maximum_error = max(
-        abs(float(achieved_world[row][column] - desired_world[row][column]))
-        for row in range(4)
-        for column in range(4)
-    )
-    if maximum_error > 1e-7:
-        raise ValueError(
-            "Whole-asset pose could not realize the requested world transform: "
-            f"max matrix error={maximum_error:.9f}"
-        )
-    return {
-        "asset_root_prim_path": root,
-        "registered_part_count": len(registered_part_paths),
-        "registered_part_coverage": 1.0,
-        "world_translation": translation.tolist(),
-        "world_rotation_rotvec_degrees": rotvec.tolist(),
-        "rotation_angle_degrees": angle,
-        "pivot_world": [float(center[index]) for index in range(3)],
-    }
-
-
-def _apply_assembly_pose_overrides(
-    *, stage: Any, overrides: Sequence[dict[str, Any]], maximum_translation: float
-) -> None:
-    """Apply unsaved assembly translations while preserving authored ops."""
-
-    from pxr import Gf, Usd, UsdGeom
-
-    for override in overrides:
-        prim_path = str(override["prim_path"])
-        prim = stage.GetPrimAtPath(prim_path)
-        if not prim or prim.GetTypeName() != "Xform" or prim.IsInstanceProxy():
-            raise ValueError(
-                f"Assembly pose override must target a writable Xform: {prim_path}"
-            )
-        translation = tuple(float(value) for value in override["world_translation"])
-        length = math.sqrt(sum(value * value for value in translation))
-        if length > maximum_translation:
-            raise ValueError(
-                f"Assembly pose override exceeds bounded asset-relative motion: "
-                f"{prim_path} ({length:.6f} > {maximum_translation:.6f})"
-            )
-        xform = UsdGeom.Xformable(prim)
-        op = xform.AddTranslateOp(
-            UsdGeom.XformOp.PrecisionDouble,
-            "qwenAssemblyPose",
-        )
-        # An appended xformOp can be composed before or after authored rotate/
-        # scale ops.  Solving its actual three world-space basis responses is
-        # therefore safer than assuming a particular authored op order.  This
-        # keeps the public contract a true world translation for arbitrary
-        # assembly hierarchies, not only translation-only CAD nodes.
-        op.Set(Gf.Vec3d(0.0))
-        base = xform.ComputeLocalToWorldTransform(
-            Usd.TimeCode.Default()
-        ).ExtractTranslation()
-        columns: list[list[float]] = []
-        for axis in range(3):
-            unit = [0.0, 0.0, 0.0]
-            unit[axis] = 1.0
-            op.Set(Gf.Vec3d(*unit))
-            moved = xform.ComputeLocalToWorldTransform(
-                Usd.TimeCode.Default()
-            ).ExtractTranslation()
-            columns.append([float(moved[i] - base[i]) for i in range(3)])
-        response = np.asarray(columns, dtype=np.float64).T
-        if (
-            not np.isfinite(response).all()
-            or abs(float(np.linalg.det(response))) < 1e-9
-        ):
-            raise ValueError(
-                f"Assembly pose override has a singular transform basis: {prim_path}"
-            )
-        local_delta = np.linalg.solve(
-            response,
-            np.asarray(translation, dtype=np.float64),
-        )
-        op.Set(Gf.Vec3d(*(float(value) for value in local_delta)))
-        achieved = (
-            xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-            .ExtractTranslation()
-            - base
-        )
-        error = math.sqrt(
-            sum((float(achieved[i]) - translation[i]) ** 2 for i in range(3))
-        )
-        if error > 1e-6:
-            raise ValueError(
-                f"Assembly pose override could not realize world translation: "
-                f"{prim_path} (error={error:.9f})"
-            )
 
 
 def _dot(left: tuple[float, float, float], right: tuple[float, float, float]) -> float:
@@ -1056,80 +601,6 @@ def _camera_up_axis(
         key=lambda axis: abs(
             sum(normalized_direction[index] * axis[index] for index in range(3))
         ),
-    )
-
-
-def _apply_radial_distortion(
-    pixels: "Any",
-    *,
-    k1: float,
-    k2: float,
-    interpolation: int,
-) -> "Any":
-    """Apply the camera contract's Brown radial warp to one rendered plane."""
-
-    if math.isclose(k1, 0.0, abs_tol=1e-12) and math.isclose(k2, 0.0, abs_tol=1e-12):
-        return pixels
-    height, width = pixels.shape[:2]
-    map_x, map_y = _radial_distortion_maps(
-        height,
-        width,
-        k1=k1,
-        k2=k2,
-    )
-    source = pixels
-    restore_dtype = None
-    # Replicator semantic IDs are commonly uint32, a dtype OpenCV remap does
-    # not accept.  IDs are small deterministic annotator labels, so bridge via
-    # int32 and restore the exact contract dtype after nearest-neighbor remap.
-    if pixels.dtype == np.uint32:
-        if pixels.size and int(np.max(pixels)) > np.iinfo(np.int32).max:
-            raise ValueError("Semantic ID exceeds the radial remap int32 range")
-        source = pixels.astype(np.int32)
-        restore_dtype = pixels.dtype
-    distorted = cv2.remap(
-        source,
-        map_x,
-        map_y,
-        interpolation,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    )
-    return (
-        distorted.astype(restore_dtype, copy=False)
-        if restore_dtype is not None
-        else distorted
-    )
-
-
-def _radial_distortion_maps(
-    height: int,
-    width: int,
-    *,
-    k1: float,
-    k2: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Return inverse maps for the Brown radial model used by OpenCV remap."""
-
-    x, y = np.meshgrid(
-        np.arange(width, dtype=np.float32),
-        np.arange(height, dtype=np.float32),
-    )
-    scale = 0.5 * float(max(width, height))
-    distorted_x = (x - 0.5 * (width - 1)) / scale
-    distorted_y = (y - 0.5 * (height - 1)) / scale
-    source_x = distorted_x.copy()
-    source_y = distorted_y.copy()
-    # Fixed-point inversion is stable over the deliberately bounded contract.
-    for _ in range(8):
-        radius2 = source_x * source_x + source_y * source_y
-        factor = 1.0 + float(k1) * radius2 + float(k2) * radius2 * radius2
-        valid = np.abs(factor) > 1e-6
-        source_x = np.where(valid, distorted_x / factor, distorted_x)
-        source_y = np.where(valid, distorted_y / factor, distorted_y)
-    return (
-        (0.5 * (width - 1) + source_x * scale).astype(np.float32),
-        (0.5 * (height - 1) + source_y * scale).astype(np.float32),
     )
 
 
@@ -1535,7 +1006,7 @@ def _make_contact_sheets(crops_by_part, output_dir: Path, cell_size: int = 220):
     return sheet_paths
 
 
-def _render_part_views_once(
+def render_part_views(
     *,
     registry_path: str | Path,
     output_dir: str | Path,
@@ -1548,10 +1019,7 @@ def _render_part_views_once(
     showcase: bool = False,
     generate_part_evidence: bool = True,
     custom_view_specs_path: str | Path | None = None,
-    assembly_pose_overrides_path: str | Path | None = None,
-    whole_asset_pose_override_path: str | Path | None = None,
     progress_callback: ProgressCallback | None = None,
-    _lifecycle: _RenderLifecycle,
 ) -> dict[str, Any]:
     if (
         isinstance(rt_subframes, bool)
@@ -1592,20 +1060,6 @@ def _render_part_views_once(
         if custom_view_specs_path is not None
         else None
     )
-    assembly_pose_overrides = (
-        _load_assembly_pose_overrides(assembly_pose_overrides_path)
-        if assembly_pose_overrides_path is not None
-        else []
-    )
-    whole_asset_pose_override = (
-        _load_whole_asset_pose_override(whole_asset_pose_override_path)
-        if whole_asset_pose_override_path is not None
-        else None
-    )
-    if assembly_pose_overrides and whole_asset_pose_override is not None:
-        raise ValueError(
-            "Local assembly overrides and a whole-asset pose are mutually exclusive"
-        )
     if custom_view_specs is None:
         view_directions, view_presets = _resolve_view_directions(view_names)
     else:
@@ -1644,7 +1098,6 @@ def _render_part_views_once(
     context = omni.usd.get_context()
     if not context.open_stage(str(asset_path)):
         raise RuntimeError(f"Unable to open USD stage in Kit: {asset_path}")
-    _lifecycle.register_open_stage(context)
     stage = context.get_stage()
     if stage is None:
         raise RuntimeError("Kit did not return an open stage")
@@ -1693,25 +1146,6 @@ def _render_part_views_once(
     extents = tuple(float(maximum[i] - minimum[i]) for i in range(3))
     diagonal = max(math.sqrt(sum(value * value for value in extents)), 1e-3)
     camera_distance = diagonal * 2.15
-    whole_asset_pose_runtime = None
-    if assembly_pose_overrides:
-        _apply_assembly_pose_overrides(
-            stage=stage,
-            overrides=assembly_pose_overrides,
-            maximum_translation=0.20 * diagonal,
-        )
-        for _ in range(3):
-            omni.kit.app.get_app().update()
-    elif whole_asset_pose_override is not None:
-        whole_asset_pose_runtime = _apply_whole_asset_pose_override(
-            stage=stage,
-            override=whole_asset_pose_override,
-            registered_part_paths=list(part_by_path),
-            asset_center=center,
-            maximum_translation=0.20 * diagonal,
-        )
-        for _ in range(3):
-            omni.kit.app.get_app().update()
 
     showcase_runtime = None
     if showcase:
@@ -1773,11 +1207,6 @@ def _render_part_views_once(
         camera_up = _normalize(_analysis_to_world(analysis_camera_up, analysis_basis))
         if name.endswith("_r180"):
             camera_up = tuple(-value for value in camera_up)
-        roll_degrees = (
-            float(custom_spec["roll_degrees"])
-            if custom_spec is not None
-            else 0.0
-        )
         effective_distance = (
             diagonal * float(custom_spec["distance_multiplier"])
             if custom_spec is not None
@@ -1814,26 +1243,6 @@ def _render_part_views_once(
         )
         target_offset_v = (
             float(custom_spec["target_offset_v"])
-            if custom_spec is not None
-            else 0.0
-        )
-        principal_point_u = (
-            float(custom_spec["principal_point_u"])
-            if custom_spec is not None
-            else 0.0
-        )
-        principal_point_v = (
-            float(custom_spec["principal_point_v"])
-            if custom_spec is not None
-            else 0.0
-        )
-        radial_distortion_k1 = (
-            float(custom_spec["radial_distortion_k1"])
-            if custom_spec is not None
-            else 0.0
-        )
-        radial_distortion_k2 = (
-            float(custom_spec["radial_distortion_k2"])
             if custom_spec is not None
             else 0.0
         )
@@ -1878,46 +1287,16 @@ def _render_part_views_once(
             usd_camera.GetProjectionAttr().Set(UsdGeom.Tokens.orthographic)
             usd_camera.GetHorizontalApertureAttr().Set(aperture)
             usd_camera.GetVerticalApertureAttr().Set(aperture)
-        else:
-            camera_root = camera.get_output_prims()["prims"][0]
-            camera_prim = (
-                camera_root
-                if camera_root.IsA(UsdGeom.Camera)
-                else next(
-                    (
-                        child
-                        for child in camera_root.GetChildren()
-                        if child.IsA(UsdGeom.Camera)
-                    ),
-                    None,
-                )
-            )
-            if camera_prim is None:
-                raise RuntimeError(
-                    f"Replicator camera {name!r} has no UsdGeom.Camera prim"
-                )
-            usd_camera = UsdGeom.Camera(camera_prim)
-        # USD aperture offsets are the physical principal point for both
-        # perspective and orthographic cameras.  Values in the camera
-        # contract are fractions of half the active sensor gate.
-        horizontal_aperture = float(usd_camera.GetHorizontalApertureAttr().Get())
-        vertical_aperture = float(usd_camera.GetVerticalApertureAttr().Get())
-        usd_camera.GetHorizontalApertureOffsetAttr().Set(
-            principal_point_u * 0.5 * horizontal_aperture
-        )
-        usd_camera.GetVerticalApertureOffsetAttr().Set(
-            principal_point_v * 0.5 * vertical_aperture
-        )
         render_product = rep.create.render_product(
             camera, (resolution, resolution), name=f"Qwen_{name}"
         )
         rgb = rep.AnnotatorRegistry.get_annotator("rgb")
-        _lifecycle.attach_annotator(rgb, render_product)
+        rgb.attach(render_product)
         segmentation = rep.AnnotatorRegistry.get_annotator(
             "semantic_segmentation",
             init_params={"semanticTypes": ["part"], "colorize": False},
         )
-        _lifecycle.attach_annotator(segmentation, render_product)
+        segmentation.attach(render_product)
         captures.append(
             (
                 name,
@@ -1930,11 +1309,6 @@ def _render_part_views_once(
                 effective_distance / diagonal,
                 target_offset_u,
                 target_offset_v,
-                roll_degrees,
-                principal_point_u,
-                principal_point_v,
-                radial_distortion_k1,
-                radial_distortion_k2,
                 look_at_target,
                 projection_mode,
                 orthographic_span_multiplier,
@@ -1954,11 +1328,7 @@ def _render_part_views_once(
         unit="steps",
         detail=lambda step: f"Replicator capture step {step}/2",
     ):
-        _lifecycle.step(
-            rep.orchestrator,
-            rt_subframes=rt_subframes,
-            delta_time=0.0,
-        )
+        rep.orchestrator.step(rt_subframes=rt_subframes, delta_time=0.0)
 
     crop_candidates: dict[str, tuple[int, str]] = {}
     highlight_candidates: dict[str, tuple[int, str]] = {}
@@ -1976,11 +1346,6 @@ def _render_part_views_once(
         distance_multiplier,
         target_offset_u,
         target_offset_v,
-        roll_degrees,
-        principal_point_u,
-        principal_point_v,
-        radial_distortion_k1,
-        radial_distortion_k2,
         look_at_target,
         projection_mode,
         orthographic_span_multiplier,
@@ -2003,21 +1368,6 @@ def _render_part_views_once(
         if raw_ids.ndim == 3:
             raw_ids = raw_ids[:, :, 0]
         id_to_labels = segmentation.get("info", {}).get("idToLabels", {})
-        rgb_pixels = rgb_array[:, :, :3].astype(np.uint8)
-        rgb_pixels = _apply_radial_distortion(
-            rgb_pixels,
-            k1=radial_distortion_k1,
-            k2=radial_distortion_k2,
-            interpolation=cv2.INTER_LINEAR,
-        )
-        raw_ids = _apply_radial_distortion(
-            raw_ids,
-            k1=radial_distortion_k1,
-            k2=radial_distortion_k2,
-            interpolation=cv2.INTER_NEAREST,
-        )
-        # Rebuild masks from the same distorted Part-ID plane that is written
-        # below; RGB and semantic evidence remain pixel-aligned.
         mask_by_part = {}
         for raw_id, labels in id_to_labels.items():
             part_id = _part_from_label(labels)
@@ -2030,6 +1380,8 @@ def _render_part_views_once(
             mask = raw_ids == numeric_id
             if int(mask.sum()) > 0:
                 mask_by_part[part_id] = mask
+
+        rgb_pixels = rgb_array[:, :, :3].astype(np.uint8)
         if lighting_profile == "material-neutral":
             # Physical reference captures use a black viewport background.
             # Keep only labelled asset pixels so background/tone differences
@@ -2130,11 +1482,6 @@ def _render_part_views_once(
                 "camera_distance_multiplier": float(distance_multiplier),
                 "camera_target_offset_u": float(target_offset_u),
                 "camera_target_offset_v": float(target_offset_v),
-                "camera_roll_degrees": float(roll_degrees),
-                "camera_principal_point_u": float(principal_point_u),
-                "camera_principal_point_v": float(principal_point_v),
-                "camera_radial_distortion_k1": float(radial_distortion_k1),
-                "camera_radial_distortion_k2": float(radial_distortion_k2),
                 "camera_look_at_target": list(look_at_target),
                 "camera_projection_mode": projection_mode,
                 "camera_orthographic_span_multiplier": float(
@@ -2197,22 +1544,6 @@ def _render_part_views_once(
             if custom_view_specs_path is not None
             else None
         ),
-        "assembly_pose_overrides": (
-            str(Path(assembly_pose_overrides_path).expanduser().resolve(strict=True))
-            if assembly_pose_overrides_path is not None
-            else None
-        ),
-        "assembly_pose_override_count": len(assembly_pose_overrides),
-        "whole_asset_pose_override": (
-            str(
-                Path(whole_asset_pose_override_path)
-                .expanduser()
-                .resolve(strict=True)
-            )
-            if whole_asset_pose_override_path is not None
-            else None
-        ),
-        "whole_asset_pose_runtime": whole_asset_pose_runtime,
         "rt_subframes": rt_subframes,
         "expanded_view_count": len(names),
         "view_presets": view_presets,
@@ -2268,48 +1599,6 @@ def _render_part_views_once(
     return report
 
 
-def render_part_views(
-    *,
-    registry_path: str | Path,
-    output_dir: str | Path,
-    resolution: int = 768,
-    view_names: list[str] | None = None,
-    rt_subframes: int = 8,
-    analysis_up_axis: tuple[float, float, float] = (0.0, 0.0, 1.0),
-    analysis_front_axis: tuple[float, float, float] = (0.0, -1.0, 0.0),
-    lighting_profile: str = "geometry",
-    showcase: bool = False,
-    generate_part_evidence: bool = True,
-    custom_view_specs_path: str | Path | None = None,
-    assembly_pose_overrides_path: str | Path | None = None,
-    whole_asset_pose_override_path: str | Path | None = None,
-    progress_callback: ProgressCallback | None = None,
-) -> dict[str, Any]:
-    """Render one evidence set and synchronously release all Kit resources."""
-
-    lifecycle = _RenderLifecycle()
-    try:
-        return _render_part_views_once(
-            registry_path=registry_path,
-            output_dir=output_dir,
-            resolution=resolution,
-            view_names=view_names,
-            rt_subframes=rt_subframes,
-            analysis_up_axis=analysis_up_axis,
-            analysis_front_axis=analysis_front_axis,
-            lighting_profile=lighting_profile,
-            showcase=showcase,
-            generate_part_evidence=generate_part_evidence,
-            custom_view_specs_path=custom_view_specs_path,
-            assembly_pose_overrides_path=assembly_pose_overrides_path,
-            whole_asset_pose_override_path=whole_asset_pose_override_path,
-            progress_callback=progress_callback,
-            _lifecycle=lifecycle,
-        )
-    finally:
-        lifecycle.cleanup()
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render RGB and labelled part views")
     parser.add_argument("--registry", required=True)
@@ -2329,20 +1618,6 @@ def parse_args() -> argparse.Namespace:
             "JSON qwen-camera-view-specs/v1 containing arbitrary analysis-space "
             "camera directions, up axes, focal lengths and distance multipliers; "
             "when supplied it replaces --views"
-        ),
-    )
-    parser.add_argument(
-        "--assembly-pose-overrides",
-        help=(
-            "optional qwen-assembly-pose-overrides/v1 document; applies "
-            "bounded rigid transforms to whole Xform subtrees in memory only"
-        ),
-    )
-    parser.add_argument(
-        "--whole-asset-pose",
-        help=(
-            "optional qwen-whole-asset-pose-override/v1 document; moves and "
-            "rotates the lowest common Xform containing every registered Part"
         ),
     )
     parser.add_argument("--rt-subframes", type=int, default=8)
@@ -2448,8 +1723,6 @@ def main() -> int:
             showcase=args.showcase,
             generate_part_evidence=not args.rgb_only,
             custom_view_specs_path=args.view_specs,
-            assembly_pose_overrides_path=args.assembly_pose_overrides,
-            whole_asset_pose_override_path=args.whole_asset_pose,
             progress_callback=emit_progress_event,
         )
     except Exception:

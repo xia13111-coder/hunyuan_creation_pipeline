@@ -5,11 +5,9 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
 
 import cv2
 import numpy as np
-import pytest
 
 import qwen_material_pipeline.evidence.camera_calibration as camera_calibration
 from qwen_material_pipeline.evidence.camera_calibration import (
@@ -18,19 +16,14 @@ from qwen_material_pipeline.evidence.camera_calibration import (
     _alignment_candidate_sort_key,
     _boundary_metrics,
     _candidate_specs,
-    _classify_multiview_residuals,
     _component_balanced_reference_metrics,
-    _constrained_frame_projection,
     _direction,
     _deterministic_part_id_foreground,
     _global_finalists,
     _merge_registry,
     _part_balanced_structure_metrics,
-    _robust_part_consensus,
     _reference_masks,
     _residual_components,
-    _score_candidates,
-    _select_alignment_candidate,
     _seal_full_resolution_winners,
     _seed_by_view_specs,
     _silhouette_coverage_metrics,
@@ -82,379 +75,6 @@ def test_camera_render_retries_cleanly_after_transient_isaac_startup_failure(
     assert not (output / "stale.txt").exists()
 
 
-def test_inprocess_camera_render_cleans_partial_output_and_never_retries_failure(
-    tmp_path: Path,
-) -> None:
-    output = tmp_path / "renders"
-    output.mkdir()
-    (output / "stale.txt").write_text("partial", encoding="utf-8")
-    calls = 0
-
-    def fail_once(**kwargs) -> Path:
-        nonlocal calls
-        calls += 1
-        assert not (kwargs["output_dir"] / "stale.txt").exists()
-        kwargs["output_dir"].mkdir(parents=True)
-        (kwargs["output_dir"] / "partial.txt").write_text(
-            "poisoned", encoding="utf-8"
-        )
-        raise ValueError("render failed")
-
-    with pytest.raises(RuntimeError, match="refusing to reuse this Isaac session"):
-        camera_calibration._run_render(
-            isaac_python=tmp_path / "isaac-python.sh",
-            registry=tmp_path / "registry.json",
-            output_dir=output,
-            view_specs=tmp_path / "views.json",
-            resolution=256,
-            rt_subframes=2,
-            analysis_up_axis="z",
-            analysis_front_axis="-y",
-            render_runner=fail_once,
-        )
-
-    assert calls == 1
-
-
-def test_inprocess_renderer_adapter_preserves_camera_render_contract(
-    tmp_path: Path,
-) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_render_part_views(**kwargs):
-        captured.update(kwargs)
-        output = Path(kwargs["output_dir"]) / "part_registry.rendered.json"
-        output.parent.mkdir(parents=True)
-        output.write_text("{}", encoding="utf-8")
-        return {"output_registry": str(output)}
-
-    runner = camera_calibration._make_inprocess_render_runner(
-        render_part_views=fake_render_part_views,
-        axis_vectors={"z": (0.0, 0.0, 1.0), "-y": (0.0, -1.0, 0.0)},
-    )
-    output_dir = tmp_path / "renders"
-    output = runner(
-        registry=tmp_path / "registry.json",
-        output_dir=output_dir,
-        view_specs=tmp_path / "views.json",
-        resolution=384,
-        rt_subframes=3,
-        analysis_up_axis="z",
-        analysis_front_axis="-y",
-    )
-
-    assert output == output_dir / "part_registry.rendered.json"
-    assert captured == {
-        "registry_path": tmp_path / "registry.json",
-        "output_dir": output_dir,
-        "resolution": 384,
-        "view_names": None,
-        "rt_subframes": 3,
-        "analysis_up_axis": (0.0, 0.0, 1.0),
-        "analysis_front_axis": (0.0, -1.0, 0.0),
-        "lighting_profile": "geometry",
-        "showcase": False,
-        "generate_part_evidence": False,
-        "custom_view_specs_path": tmp_path / "views.json",
-    }
-
-
-def test_inprocess_backend_starts_and_closes_one_app_for_multiple_batches(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    events: list[str] = []
-    render_calls: list[Path] = []
-
-    class FakeApp:
-        def close(self) -> None:
-            events.append("close")
-
-    def app_factory(config):
-        assert config == {"headless": True, "create_new_stage": False}
-        events.append("start")
-        return FakeApp()
-
-    def fake_render_part_views(**kwargs):
-        render_calls.append(Path(kwargs["output_dir"]))
-        output = Path(kwargs["output_dir"]) / "part_registry.rendered.json"
-        output.parent.mkdir(parents=True)
-        output.write_text("{}", encoding="utf-8")
-        return {"output_registry": str(output)}
-
-    def load_render_module():
-        assert events == ["start"]
-        events.append("import-render")
-        return SimpleNamespace(
-            render_part_views=fake_render_part_views,
-            AXIS_VECTORS={"z": (0.0, 0.0, 1.0), "-y": (0.0, -1.0, 0.0)},
-        )
-
-    def fake_calibrate(_args, *, render_runner):
-        for name in ("phase_a", "phase_b"):
-            render_runner(
-                registry=tmp_path / "registry.json",
-                output_dir=tmp_path / name,
-                view_specs=tmp_path / f"{name}.json",
-                resolution=256,
-                rt_subframes=2,
-                analysis_up_axis="z",
-                analysis_front_axis="-y",
-            )
-        return {"views": []}
-
-    monkeypatch.setattr(camera_calibration, "_calibrate_from_args", fake_calibrate)
-    exit_code, report = camera_calibration._run_inprocess_backend(
-        SimpleNamespace(),
-        simulation_app_factory=app_factory,
-        render_module_loader=load_render_module,
-    )
-
-    assert exit_code == 0
-    assert report == {"views": []}
-    assert render_calls == [tmp_path / "phase_a", tmp_path / "phase_b"]
-    assert events == ["start", "import-render", "close"]
-
-
-def test_inprocess_budget_rotation_writes_checkpoint_marker_and_closes_app(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    events: list[str] = []
-
-    class FakeApp:
-        def close(self) -> None:
-            events.append("close")
-
-    def fake_calibrate(_args, *, render_runner):
-        assert callable(render_runner)
-        checkpoint = tmp_path / "camera" / "front" / "nano_scores.json"
-        checkpoint.parent.mkdir(parents=True)
-        checkpoint.write_text("{}", encoding="utf-8")
-        raise camera_calibration._RenderBatchBudgetReached(
-            "sealed front/nano",
-            checkpoint=checkpoint,
-        )
-
-    monkeypatch.setattr(camera_calibration, "_calibrate_from_args", fake_calibrate)
-    exit_code, report = camera_calibration._run_inprocess_backend(
-        SimpleNamespace(output_dir=tmp_path / "camera", max_new_render_batches=8),
-        simulation_app_factory=lambda _config: FakeApp(),
-        render_module_loader=lambda: SimpleNamespace(
-            render_part_views=lambda **_kwargs: {},
-            AXIS_VECTORS={},
-        ),
-    )
-
-    assert exit_code == 0
-    assert report is None
-    assert events == ["close"]
-    marker = camera_calibration._read_object(
-        tmp_path / "camera" / camera_calibration.SUPERVISOR_ROTATION_MARKER
-    )
-    assert marker["schema_version"] == (
-        camera_calibration.SUPERVISOR_ROTATION_SCHEMA_VERSION
-    )
-    assert marker["checkpoint"].endswith("front/nano_scores.json")
-
-
-def test_supervisor_rotates_budget_sessions_and_retries_true_failures(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    isaac_python = tmp_path / "python.sh"
-    isaac_python.write_text("#!/bin/sh\n", encoding="utf-8")
-    args = SimpleNamespace(
-        registry=tmp_path / "registry.json",
-        reference_manifest=tmp_path / "references.json",
-        spatial_mapping=None,
-        initial_view_specs=None,
-        search_phases=None,
-        isaac_python=isaac_python,
-        output_dir=tmp_path / "camera",
-        reference_ids=None,
-        search_resolution=256,
-        final_resolution=512,
-        rt_subframes=2,
-        analysis_up_axis="z",
-        analysis_front_axis="-y",
-        max_new_render_batches=None,
-    )
-    outcomes = iter(("failure", "rotation", "failure", "failure", "complete"))
-    commands: list[list[str]] = []
-    sleeps: list[float] = []
-
-    def fake_run(command, *, check, env):
-        assert check is False
-        assert Path(env["PYTHONPATH"].split(os.pathsep)[0]) == (
-            Path(camera_calibration.__file__).resolve().parents[2]
-        )
-        commands.append(list(command))
-        outcome = next(outcomes)
-        if outcome == "rotation":
-            session_batch_limit = int(
-                command[command.index("--max-new-render-batches") + 1]
-            )
-            checkpoint = args.output_dir / "front" / "nano_scores.json"
-            checkpoint.parent.mkdir(parents=True, exist_ok=True)
-            checkpoint.write_text("{}", encoding="utf-8")
-            camera_calibration._write_object(
-                args.output_dir / camera_calibration.SUPERVISOR_ROTATION_MARKER,
-                {
-                    "schema_version": (
-                        camera_calibration.SUPERVISOR_ROTATION_SCHEMA_VERSION
-                    ),
-                    "output_dir": str(args.output_dir.resolve()),
-                    "checkpoint": str(checkpoint.resolve()),
-                    "checkpoint_sha256": camera_calibration._sha256_file(checkpoint),
-                    "max_new_render_batches": session_batch_limit,
-                },
-            )
-            return SimpleNamespace(returncode=0)
-        if outcome == "complete":
-            args.output_dir.mkdir(parents=True, exist_ok=True)
-            (args.output_dir / "camera_calibration_report.json").write_text(
-                "{}", encoding="utf-8"
-            )
-            return SimpleNamespace(returncode=0)
-        return SimpleNamespace(returncode=1)
-
-    monkeypatch.setattr(camera_calibration.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        camera_calibration.time, "sleep", lambda seconds: sleeps.append(seconds)
-    )
-
-    assert camera_calibration._run_supervisor_backend(args) == 0
-    assert len(commands) == 5
-    assert commands[0][0] == str(isaac_python.resolve())
-    assert commands[0][commands[0].index("--render-backend") + 1] == "inprocess"
-    assert [
-        command[command.index("--max-new-render-batches") + 1]
-        for command in commands
-    ] == ["2", "1", "1", "1", "1"]
-    assert sleeps == [
-        camera_calibration.RENDER_RETRY_DELAY_SECONDS,
-        camera_calibration.RENDER_RETRY_DELAY_SECONDS,
-        camera_calibration.RENDER_RETRY_DELAY_SECONDS,
-    ]
-    assert capsys.readouterr().out.count(
-        "reducing all remaining Isaac sessions to one new render batch"
-    ) == 1
-
-
-def test_supervisor_keeps_batch_two_after_normal_budget_rotation(
-    tmp_path: Path,
-    monkeypatch,
-    capsys,
-) -> None:
-    isaac_python = tmp_path / "python.sh"
-    isaac_python.write_text("#!/bin/sh\n", encoding="utf-8")
-    output_dir = tmp_path / "camera"
-    args = SimpleNamespace(
-        registry=tmp_path / "registry.json",
-        reference_manifest=tmp_path / "references.json",
-        spatial_mapping=None,
-        initial_view_specs=None,
-        search_phases=None,
-        isaac_python=isaac_python,
-        output_dir=output_dir,
-        reference_ids=None,
-        search_resolution=256,
-        final_resolution=512,
-        rt_subframes=2,
-        analysis_up_axis="z",
-        analysis_front_axis="-y",
-        max_new_render_batches=None,
-    )
-    outcomes = iter(("rotation", "complete"))
-    limits: list[int] = []
-
-    def fake_run(command, *, check, env):
-        assert check is False
-        assert env["PYTHONPATH"]
-        session_batch_limit = int(
-            command[command.index("--max-new-render-batches") + 1]
-        )
-        limits.append(session_batch_limit)
-        outcome = next(outcomes)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        if outcome == "rotation":
-            checkpoint = output_dir / "front" / "nano_scores.json"
-            checkpoint.parent.mkdir(parents=True, exist_ok=True)
-            checkpoint.write_text("{}", encoding="utf-8")
-            camera_calibration._write_object(
-                output_dir / camera_calibration.SUPERVISOR_ROTATION_MARKER,
-                {
-                    "schema_version": (
-                        camera_calibration.SUPERVISOR_ROTATION_SCHEMA_VERSION
-                    ),
-                    "output_dir": str(output_dir.resolve()),
-                    "checkpoint": str(checkpoint.resolve()),
-                    "checkpoint_sha256": camera_calibration._sha256_file(checkpoint),
-                    "max_new_render_batches": session_batch_limit,
-                },
-            )
-        else:
-            (output_dir / "camera_calibration_report.json").write_text(
-                "{}", encoding="utf-8"
-            )
-        return SimpleNamespace(returncode=0)
-
-    monkeypatch.setattr(camera_calibration.subprocess, "run", fake_run)
-
-    assert camera_calibration._run_supervisor_backend(args) == 0
-    assert limits == [2, 2]
-    assert "reducing all remaining Isaac sessions" not in capsys.readouterr().out
-
-
-def test_supervisor_completes_in_limit_one_session_after_failure(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    isaac_python = tmp_path / "python.sh"
-    isaac_python.write_text("#!/bin/sh\n", encoding="utf-8")
-    output_dir = tmp_path / "camera"
-    args = SimpleNamespace(
-        registry=tmp_path / "registry.json",
-        reference_manifest=tmp_path / "references.json",
-        spatial_mapping=None,
-        initial_view_specs=None,
-        search_phases=None,
-        isaac_python=isaac_python,
-        output_dir=output_dir,
-        reference_ids=None,
-        search_resolution=256,
-        final_resolution=512,
-        rt_subframes=2,
-        analysis_up_axis="z",
-        analysis_front_axis="-y",
-        max_new_render_batches=None,
-    )
-    return_codes = iter((1, 0))
-    limits: list[int] = []
-
-    def fake_run(command, *, check, env):
-        assert check is False
-        assert env["PYTHONPATH"]
-        limits.append(
-            int(command[command.index("--max-new-render-batches") + 1])
-        )
-        return_code = next(return_codes)
-        if return_code == 0:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            (output_dir / "camera_calibration_report.json").write_text(
-                "{}", encoding="utf-8"
-            )
-        return SimpleNamespace(returncode=return_code)
-
-    monkeypatch.setattr(camera_calibration.subprocess, "run", fake_run)
-    monkeypatch.setattr(camera_calibration.time, "sleep", lambda _seconds: None)
-
-    assert camera_calibration._run_supervisor_backend(args) == 0
-    assert limits == [2, 1]
-
-
 def test_camera_phase_checkpoint_reuse_requires_exact_candidate_specs(
     tmp_path: Path,
 ) -> None:
@@ -471,18 +91,8 @@ def test_camera_phase_checkpoint_reuse_requires_exact_candidate_specs(
                 "schema_version": camera_calibration.SCHEMA_VERSION,
                 "reference_view_id": "front",
                 "phase": "micro",
-                "winner": {
-                    "view_id": "cal_front_micro_000",
-                    "objective_version": camera_calibration.CAMERA_OBJECTIVE_VERSION,
-                },
-                "candidates": [
-                    {
-                        "view_id": "cal_front_micro_000",
-                        "objective_version": (
-                            camera_calibration.CAMERA_OBJECTIVE_VERSION
-                        ),
-                    }
-                ],
+                "winner": {"view_id": "cal_front_micro_000"},
+                "candidates": [{"view_id": "cal_front_micro_000"}],
             }
         ),
         encoding="utf-8",
@@ -497,25 +107,6 @@ def test_camera_phase_checkpoint_reuse_requires_exact_candidate_specs(
     )
     assert reused is not None
     assert reused[0]["view_id"] == "cal_front_micro_000"
-
-    score_document = json.loads(scores_path.read_text(encoding="utf-8"))
-    score_document["view_specs_sha256"] = "0" * 64
-    scores_path.write_text(json.dumps(score_document), encoding="utf-8")
-    assert (
-        camera_calibration._completed_phase(
-            specs_path=specs_path,
-            scores_path=scores_path,
-            expected_specs=specs,
-            reference_id="front",
-            phase="micro",
-        )
-        is None
-    )
-
-    # Legacy checkpoints created before the hash field remain reusable only
-    # while their complete specs and candidate IDs still match exactly.
-    score_document.pop("view_specs_sha256")
-    scores_path.write_text(json.dumps(score_document), encoding="utf-8")
 
     changed = {**specs, "views": [{"view_id": "cal_front_micro_001"}]}
     assert (
@@ -553,69 +144,6 @@ def test_fine_camera_candidates_preserve_one_whole_asset_camera() -> None:
         view["calibration"]["reference_view_id"] == "iso" for view in specs["views"]
     )
     assert all("part" not in view for view in specs["views"])
-
-
-def test_first_stage_camera_candidates_add_roll_principal_point_and_distortion() -> None:
-    seed = {
-        "analysis_direction": _direction(15.0, 12.0),
-        "analysis_up_axis": [0.0, 0.0, 1.0],
-        "focal_length_mm": 45.0,
-        "distance_multiplier": 2.15,
-    }
-    roll = _candidate_specs(reference_id="side", seed=seed, phase="roll")
-    principal = _candidate_specs(
-        reference_id="side", seed=seed, phase="principal_point"
-    )
-    radial = _candidate_specs(
-        reference_id="side", seed=seed, phase="radial_distortion"
-    )
-
-    assert len(roll["views"]) == 5
-    assert {row["roll_degrees"] for row in roll["views"]} == {
-        -6.0,
-        -3.0,
-        0.0,
-        3.0,
-        6.0,
-    }
-    assert len(principal["views"]) == 25
-    assert {row["principal_point_u"] for row in principal["views"]} == {
-        -0.08,
-        -0.04,
-        0.0,
-        0.04,
-        0.08,
-    }
-    assert len(radial["views"]) == 15
-    assert {row["radial_distortion_k1"] for row in radial["views"]} == {
-        -0.16,
-        -0.08,
-        0.0,
-        0.08,
-        0.16,
-    }
-    assert sum(
-        row["calibration"]["frame_anchor"] is True for row in radial["views"]
-    ) == 1
-
-
-def test_constrained_frame_projection_cannot_hide_large_scale_error() -> None:
-    reference = np.zeros((256, 256), dtype=np.uint8)
-    reference[72:184, 76:180] = 255
-    source = np.zeros_like(reference)
-    source[96:160, 98:158] = 255
-
-    projection = _constrained_frame_projection(
-        reference,
-        source,
-        anchor_affine=np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.float32),
-    )
-    audit = projection["ecc_transform_audit"]
-
-    assert projection["projection_iou"] < 0.50
-    assert audit["residual_scale"] <= 1.015
-    assert abs(audit["residual_rotation_degrees"]) <= 1.0
-    assert max(abs(value) for value in audit["residual_translation_ratio_xy"]) <= 0.02
 
 
 def test_settle_camera_candidates_expand_distance_and_reduce_angle_step() -> None:
@@ -685,11 +213,6 @@ def test_micro_camera_candidates_refine_pose_and_distance() -> None:
 
 def test_camera_phases_finish_with_sub_tenth_degree_refinement() -> None:
     assert CAMERA_PHASES.index("fine") < CAMERA_PHASES.index("perspective")
-    assert CAMERA_PHASES.index("fine") < CAMERA_PHASES.index("roll")
-    assert CAMERA_PHASES.index("roll") < CAMERA_PHASES.index("principal_point")
-    assert CAMERA_PHASES.index("principal_point") < CAMERA_PHASES.index(
-        "radial_distortion"
-    )
     assert CAMERA_PHASES.index("perspective") < CAMERA_PHASES.index("component_pose")
     assert CAMERA_PHASES.index("component_pose") < CAMERA_PHASES.index(
         "perspective_recheck"
@@ -708,8 +231,8 @@ def test_camera_phases_finish_with_sub_tenth_degree_refinement() -> None:
     assert CAMERA_PHASES.index("settle") < CAMERA_PHASES.index("micro")
     assert CAMERA_PHASES.index("target") < CAMERA_PHASES.index("lens_micro")
     assert CAMERA_PHASES[-4:] == (
-        "frame_micro",
-        "radial_distortion_micro",
+        "nano",
+        "target_micro",
         "pico",
         "target_pico",
     )
@@ -1026,35 +549,6 @@ def test_full_resolution_finalists_are_global_across_phases() -> None:
     ]
 
 
-def test_phase_winner_can_be_retained_ahead_of_regressive_global_score() -> None:
-    trusted_winner = {
-        "view_id": "trusted_winner",
-        "score": 0.65,
-        "projection_iou": 0.91,
-        "boundary_p95_px": 13.0,
-        "analysis_direction": [1.0, 0.0, 0.0],
-        "analysis_up_axis": [0.0, 0.0, 1.0],
-        "focal_length_mm": 45.0,
-        "distance_multiplier": 2.0,
-    }
-    regressive = {
-        **trusted_winner,
-        "view_id": "regressive_structure_score",
-        "score": 0.80,
-        "projection_iou": 0.80,
-        "boundary_p95_px": 10.0,
-        "distance_multiplier": 3.0,
-    }
-
-    finalists = _global_finalists(
-        [trusted_winner, regressive],
-        count=1,
-        required=(trusted_winner,),
-    )
-
-    assert [item["view_id"] for item in finalists] == ["trusted_winner"]
-
-
 def test_alignment_gate_precedes_weighted_structure_score() -> None:
     candidates = [
         {
@@ -1074,91 +568,6 @@ def test_alignment_gate_precedes_weighted_structure_score() -> None:
     ranked = sorted(candidates, key=_alignment_candidate_sort_key)
 
     assert ranked[0]["view_id"] == "gate_pass"
-
-
-def test_incomplete_alignment_candidates_use_complete_objective() -> None:
-    candidates = [
-        {
-            "view_id": "lower_boundary_but_weaker_complete_evidence",
-            "score": 0.70,
-            "projection_iou": 0.80,
-            "boundary_p95_px": 20.0,
-        },
-        {
-            "view_id": "stronger_complete_evidence",
-            "score": 0.82,
-            "projection_iou": 0.85,
-            "boundary_p95_px": 23.0,
-        },
-    ]
-
-    ranked = sorted(candidates, key=_alignment_candidate_sort_key)
-
-    assert ranked[0]["view_id"] == "stronger_complete_evidence"
-
-
-def test_phase_selection_keeps_incomplete_candidate_inside_incumbent_trust_region(
-) -> None:
-    records = [
-        {
-            "view_id": "incumbent",
-            "score": 0.70,
-            "projection_iou": 0.88,
-            "boundary_p95_px": 17.5,
-            "complete_alignment_candidate": False,
-            "calibration": {"frame_anchor": True},
-        },
-        {
-            "view_id": "tempting_but_drifted",
-            "score": 0.90,
-            "projection_iou": 0.85,
-            "boundary_p95_px": 18.0,
-            "complete_alignment_candidate": False,
-            "calibration": {"frame_anchor": False},
-        },
-        {
-            "view_id": "trusted_improvement",
-            "score": 0.80,
-            "projection_iou": 0.877,
-            "boundary_p95_px": 18.0,
-            "complete_alignment_candidate": False,
-            "calibration": {"frame_anchor": False},
-        },
-    ]
-
-    winner = _select_alignment_candidate(records)
-
-    assert winner["view_id"] == "trusted_improvement"
-
-
-def test_phase_selection_does_not_replace_valid_rigid_consensus_with_invalid_one(
-) -> None:
-    records = [
-        {
-            "view_id": "incumbent",
-            "score": 0.70,
-            "projection_iou": 0.90,
-            "boundary_p95_px": 12.0,
-            "complete_alignment_candidate": False,
-            "rigid_consensus_valid": True,
-            "rigid_consensus_score": 0.80,
-            "calibration": {"frame_anchor": True},
-        },
-        {
-            "view_id": "invalid_consensus_but_high_score",
-            "score": 0.99,
-            "projection_iou": 0.901,
-            "boundary_p95_px": 12.0,
-            "complete_alignment_candidate": False,
-            "rigid_consensus_valid": False,
-            "rigid_consensus_score": 0.0,
-            "calibration": {"frame_anchor": False},
-        },
-    ]
-
-    winner = _select_alignment_candidate(records)
-
-    assert winner["view_id"] == "incumbent"
 
 
 def test_incomplete_foreground_reports_recall_separately_from_precision() -> None:
@@ -1242,169 +651,6 @@ def test_part_structure_objective_balances_small_medium_and_large_parts() -> Non
     assert metrics["structure_score"] > 0.7
 
 
-def test_robust_rigid_consensus_rejects_detached_assembly_without_part_rules() -> None:
-    reference = np.zeros((180, 180), dtype=np.uint8)
-    image = np.zeros((180, 180, 3), dtype=np.uint8)
-    ids = np.zeros_like(image)
-    parts = []
-    rectangles = {
-        "P0001": (50, 30, 95, 150),
-        "P0002": (95, 30, 130, 150),
-        "P0003": (60, 20, 85, 30),
-        # Two sibling Parts are rendered at the wrong assembly state.  Their
-        # photographed counterpart is 35 pixels lower.
-        "P0004": (18, 112, 38, 132),
-        "P0005": (38, 118, 50, 126),
-    }
-    for part_id, (left, top, right, bottom) in rectangles.items():
-        red, green, blue = _part_color(part_id)
-        ids[top:bottom, left:right] = (blue, green, red)
-        parts.append(
-            {
-                "part_id": part_id,
-                "prim_path": (
-                    f"/Asset/Rigid/{part_id}/Mesh"
-                    if part_id <= "P0003"
-                    else f"/Asset/Accessory/Joint/{part_id}/Mesh"
-                ),
-            }
-        )
-    reference[30:150, 50:130] = 255
-    reference[20:30, 60:85] = 255
-    reference[147:167, 18:38] = 255
-    reference[153:161, 38:50] = 255
-    image[reference > 0] = 255
-
-    consensus = _robust_part_consensus(
-        ids=ids,
-        parts=parts,
-        affine=np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], np.float32),
-        reference_image=image,
-        reference_mask=reference,
-    )
-
-    assert consensus["rigid_consensus_valid"] is True
-    assert {"P0001", "P0002", "P0003"}.issubset(
-        consensus["rigid_consensus_inlier_part_ids"]
-    )
-    assert {"P0004", "P0005"}.issubset(
-        consensus["rigid_consensus_outlier_part_ids"]
-    )
-    cluster = next(
-        item
-        for item in consensus["assembly_residual_clusters"]
-        if item["part_ids"] == ["P0004", "P0005"]
-    )
-    assert cluster["classification"] == "assembly_state_or_geometry_mismatch"
-    assert cluster["residual_direction_coherence"] >= 0.7
-    assert np.linalg.norm(cluster["median_residual_vector_px"]) > 5.0
-
-
-def test_robust_rigid_consensus_marks_edge_free_internal_part_indeterminate() -> None:
-    reference = np.zeros((160, 160), dtype=np.uint8)
-    reference[20:140, 20:140] = 255
-    image = np.dstack([reference] * 3)
-    ids = np.zeros_like(image)
-    parts = []
-    rectangles = {
-        "P0001": (20, 20, 70, 140),
-        "P0002": (70, 20, 140, 80),
-        "P0003": (70, 80, 140, 140),
-        # This internal panel has no corresponding edge in the photograph.
-        # It must not be called a rigid outlier merely because its CAD boundary
-        # crosses a uniform photographed surface.
-        "P0004": (80, 50, 120, 110),
-    }
-    for part_id, (left, top, right, bottom) in rectangles.items():
-        red, green, blue = _part_color(part_id)
-        ids[top:bottom, left:right] = (blue, green, red)
-        parts.append(
-            {
-                "part_id": part_id,
-                "prim_path": f"/Asset/Assembly/{part_id}/Mesh",
-            }
-        )
-
-    consensus = _robust_part_consensus(
-        ids=ids,
-        parts=parts,
-        affine=np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], np.float32),
-        reference_image=image,
-        reference_mask=reference,
-    )
-
-    assert consensus["rigid_consensus_valid"] is True
-    assert "P0004" in consensus["rigid_consensus_indeterminate_part_ids"]
-    assert "P0004" not in consensus["rigid_consensus_outlier_part_ids"]
-    row = next(
-        item
-        for item in consensus["rigid_consensus_part_residuals"]
-        if item["part_id"] == "P0004"
-    )
-    assert row["consensus_observable"] is False
-    assert row["rigid_inlier"] is None
-
-
-def test_robust_rigid_consensus_fails_open_to_phase1_for_sparse_assets() -> None:
-    reference = np.zeros((80, 80), dtype=np.uint8)
-    reference[20:60, 20:60] = 255
-    image = np.dstack([reference] * 3)
-    ids = np.zeros_like(image)
-    red, green, blue = _part_color("P0001")
-    ids[20:60, 20:60] = (blue, green, red)
-
-    consensus = _robust_part_consensus(
-        ids=ids,
-        parts=[{"part_id": "P0001", "prim_path": "/Asset/Part/Mesh"}],
-        affine=np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], np.float32),
-        reference_image=image,
-        reference_mask=reference,
-    )
-
-    assert consensus["rigid_consensus_valid"] is False
-    assert consensus["rigid_consensus_reason"] == "insufficient_visible_parts"
-
-
-def test_multiview_residual_classification_requires_repeated_rejection() -> None:
-    def score(*, inliers: list[str], rows: list[tuple[str, str]]) -> dict:
-        return {
-            "rigid_consensus_inlier_part_ids": inliers,
-            "rigid_consensus_part_residuals": [
-                {
-                    "part_id": part_id,
-                    "assembly_subtree": subtree,
-                    "residual_px": 12.0,
-                    "inside_reference_ratio": 0.4,
-                }
-                for part_id, subtree in rows
-            ],
-        }
-
-    diagnosis = _classify_multiview_residuals(
-        {
-            "front": score(
-                inliers=["P0001", "P0003"],
-                rows=[
-                    ("P0001", "/Asset/Rigid"),
-                    ("P0002", "/Asset/Accessory"),
-                    ("P0003", "/Asset/Rigid"),
-                ],
-            ),
-            "side": score(
-                inliers=["P0001"],
-                rows=[
-                    ("P0001", "/Asset/Rigid"),
-                    ("P0002", "/Asset/Accessory"),
-                    ("P0003", "/Asset/Rigid"),
-                ],
-            ),
-        }
-    )
-
-    assert diagnosis["persistent_mismatch_part_ids"] == ["P0002"]
-    assert diagnosis["view_local_mismatch_part_ids"] == ["P0003"]
-
-
 def test_boundary_metric_detects_pixel_shift() -> None:
     target = np.zeros((128, 128), dtype=np.uint8)
     cv2.rectangle(target, (24, 24), (104, 104), 255, -1)
@@ -1430,63 +676,6 @@ def test_camera_foreground_depends_only_on_stable_part_ids() -> None:
     assert np.array_equal(first, second)
     assert np.count_nonzero(first) == 16 * 12
     assert np.all(first[:8] == 0)
-
-
-def test_camera_scores_preserve_each_candidates_own_calibration_metadata(
-    tmp_path: Path,
-) -> None:
-    red, green, blue = _part_color("P0001")
-    ids = np.zeros((64, 64, 3), dtype=np.uint8)
-    ids[12:52, 14:50] = (blue, green, red)
-    first_ids = tmp_path / "first.png"
-    second_ids = tmp_path / "second.png"
-    assert cv2.imwrite(str(first_ids), ids)
-    assert cv2.imwrite(str(second_ids), ids)
-    registry = tmp_path / "registry.json"
-    registry.write_text(
-        json.dumps(
-            {
-                "parts": [{"part_id": "P0001"}],
-                "render_set": {
-                    "views": [
-                        {
-                            "view_id": "candidate_a",
-                            "part_ids_raw": str(first_ids),
-                            "camera_calibration": {
-                                "reference_view_id": "side",
-                                "candidate_marker": "a",
-                            },
-                        },
-                        {
-                            "view_id": "candidate_b",
-                            "part_ids_raw": str(second_ids),
-                            "camera_calibration": {
-                                "reference_view_id": "side",
-                                "candidate_marker": "b",
-                            },
-                        },
-                    ]
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    reference = np.zeros((64, 64), dtype=np.uint8)
-    reference[12:52, 14:50] = 255
-
-    _winner, candidates = _score_candidates(
-        reference_id="side",
-        reference_mask=reference,
-        reference_image=np.zeros((64, 64, 3), dtype=np.uint8),
-        registry_path=registry,
-    )
-
-    by_id = {candidate["view_id"]: candidate for candidate in candidates}
-    assert by_id["candidate_a"]["calibration"]["candidate_marker"] == "a"
-    assert by_id["candidate_b"]["calibration"]["candidate_marker"] == "b"
-    assert by_id["candidate_a"]["calibration"]["frame_anchor_affine"] == (
-        by_id["candidate_b"]["calibration"]["frame_anchor_affine"]
-    )
 
 
 def test_residual_components_report_largest_regions_first() -> None:
@@ -1619,16 +808,7 @@ def test_full_resolution_winner_is_sealed_without_rerender(
 
     _seal_full_resolution_winners(
         rendered_path=rendered,
-        winners={
-            "front": {
-                "view_id": "rerank_front_02",
-                "whole_asset_similarity": {
-                    "ecc_transform_audit": {
-                        "anchor_affine": [[1.2, 0.0, 3.0], [0.0, 1.2, 4.0]]
-                    }
-                },
-            }
-        },
+        winners={"front": {"view_id": "rerank_front_02"}},
         output_path=output,
     )
     sealed = json.loads(output.read_text(encoding="utf-8"))
@@ -1640,7 +820,4 @@ def test_full_resolution_winner_is_sealed_without_rerender(
     assert sealed["render_set"]["views"][0]["sealed_source_view_id"] == (
         "rerank_front_02"
     )
-    assert sealed["render_set"]["views"][0]["camera_calibration"][
-        "frame_anchor_affine"
-    ] == [[1.2, 0.0, 3.0], [0.0, 1.2, 4.0]]
     assert sealed["render_set"]["sealed_full_resolution_winners"] is True

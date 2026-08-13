@@ -74,36 +74,6 @@ def continuous_camera_view_specs(
             if isinstance(calibration, Mapping)
             else 0.0,
         )
-        roll_degrees = view.get(
-            "camera_roll_degrees",
-            calibration.get("roll_degrees", 0.0)
-            if isinstance(calibration, Mapping)
-            else 0.0,
-        )
-        principal_point_u = view.get(
-            "camera_principal_point_u",
-            calibration.get("principal_point_u", 0.0)
-            if isinstance(calibration, Mapping)
-            else 0.0,
-        )
-        principal_point_v = view.get(
-            "camera_principal_point_v",
-            calibration.get("principal_point_v", 0.0)
-            if isinstance(calibration, Mapping)
-            else 0.0,
-        )
-        radial_distortion_k1 = view.get(
-            "camera_radial_distortion_k1",
-            calibration.get("radial_distortion_k1", 0.0)
-            if isinstance(calibration, Mapping)
-            else 0.0,
-        )
-        radial_distortion_k2 = view.get(
-            "camera_radial_distortion_k2",
-            calibration.get("radial_distortion_k2", 0.0)
-            if isinstance(calibration, Mapping)
-            else 0.0,
-        )
         projection_mode = view.get(
             "camera_projection_mode",
             calibration.get("projection_mode", "perspective")
@@ -135,16 +105,6 @@ def continuous_camera_view_specs(
             or isinstance(target_offset_v, bool)
             or not isinstance(target_offset_v, (int, float))
             or projection_mode not in {"perspective", "orthographic"}
-            or any(
-                isinstance(value, bool) or not isinstance(value, (int, float))
-                for value in (
-                    roll_degrees,
-                    principal_point_u,
-                    principal_point_v,
-                    radial_distortion_k1,
-                    radial_distortion_k2,
-                )
-            )
             or isinstance(orthographic_span_multiplier, bool)
             or not isinstance(orthographic_span_multiplier, (int, float))
         ):
@@ -161,11 +121,6 @@ def continuous_camera_view_specs(
                 "distance_multiplier": float(distance_multiplier),
                 "target_offset_u": float(target_offset_u),
                 "target_offset_v": float(target_offset_v),
-                "roll_degrees": float(roll_degrees),
-                "principal_point_u": float(principal_point_u),
-                "principal_point_v": float(principal_point_v),
-                "radial_distortion_k1": float(radial_distortion_k1),
-                "radial_distortion_k2": float(radial_distortion_k2),
                 "projection_mode": str(projection_mode),
                 "orthographic_span_multiplier": float(orthographic_span_multiplier),
                 "calibration": dict(calibration),
@@ -229,14 +184,9 @@ def validate_live_camera_registration_provenance(
         not isinstance(intrinsics, list)
         or "projection_mode" not in intrinsics
         or "focal_length_mm" not in intrinsics
-        or "principal_point_u" not in intrinsics
-        or "principal_point_v" not in intrinsics
-        or "radial_distortion_k1" not in intrinsics
-        or "radial_distortion_k2" not in intrinsics
         or not isinstance(extrinsics, list)
         or "orbit_azimuth" not in extrinsics
         or "orbit_elevation" not in extrinsics
-        or "camera_roll" not in extrinsics
         or "optical_axis_target_u" not in extrinsics
         or "optical_axis_target_v" not in extrinsics
     ):

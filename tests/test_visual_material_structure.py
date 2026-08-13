@@ -129,40 +129,7 @@ def test_render_and_camera_builders_handle_optional_arguments() -> None:
         "/run/camera/search/final_view_specs.json"
     )
     assert camera[camera.index("--search-phases") + 1] == ("orthographic,micro,pico")
-    assert camera[camera.index("--render-backend") + 1] == "supervisor"
     assert camera[-1] == "--analysis-front-axis=-y"
-
-    inprocess = camera_registration_command(
-        python=Path("/models/python"),
-        registry=Path("/run/registry.json"),
-        reference_manifest=Path("/run/annotations.json"),
-        isaac_python=Path("/runtime/python.sh"),
-        output_dir=Path("/run/camera"),
-        search_resolution=256,
-        final_resolution=512,
-        rt_subframes=4,
-        analysis_up_axis="z",
-        analysis_front_axis="-y",
-        render_backend="inprocess",
-    )
-    assert inprocess[0] == "/runtime/python.sh"
-    assert inprocess[inprocess.index("--render-backend") + 1] == "inprocess"
-
-    legacy = camera_registration_command(
-        python=Path("/models/python"),
-        registry=Path("/run/registry.json"),
-        reference_manifest=Path("/run/annotations.json"),
-        isaac_python=Path("/runtime/python.sh"),
-        output_dir=Path("/run/camera"),
-        search_resolution=256,
-        final_resolution=512,
-        rt_subframes=4,
-        analysis_up_axis="z",
-        analysis_front_axis="-y",
-        render_backend="subprocess",
-    )
-    assert legacy[0] == "/models/python"
-    assert legacy[legacy.index("--render-backend") + 1] == "subprocess"
 
 
 def test_staged_material_command_owns_the_model_runtime_contract() -> None:
