@@ -28,6 +28,8 @@ from qwen_material_pipeline.usd.render import (
     _highlighted_context_crop,
     _isolated_target_crop,
     _load_assembly_pose_overrides,
+    _load_whole_asset_pose_override,
+    _lowest_common_part_xform_path,
     _load_custom_view_specs,
     _normalize,
     _RenderCleanupError,
@@ -37,6 +39,29 @@ from qwen_material_pipeline.usd.render import (
     _simulation_app_launch_config,
     render_part_views,
 )
+
+
+class _FakePrim:
+    def __init__(self, type_name: str, *, instance_proxy: bool = False) -> None:
+        self._type_name = type_name
+        self._instance_proxy = instance_proxy
+
+    def __bool__(self) -> bool:
+        return bool(self._type_name)
+
+    def GetTypeName(self) -> str:
+        return self._type_name
+
+    def IsInstanceProxy(self) -> bool:
+        return self._instance_proxy
+
+
+class _FakeStage:
+    def __init__(self, prims: dict[str, _FakePrim]) -> None:
+        self._prims = prims
+
+    def GetPrimAtPath(self, path: str) -> _FakePrim:
+        return self._prims.get(path, _FakePrim(""))
 
 
 def test_assembly_pose_overrides_require_rigid_subtree_translation(tmp_path) -> None:
@@ -84,6 +109,92 @@ def test_assembly_pose_overrides_fail_closed(tmp_path, override) -> None:
 
     with pytest.raises(ValueError, match="Assembly pose override"):
         _load_assembly_pose_overrides(path)
+
+
+def test_whole_asset_pose_requires_one_finite_se3_about_asset_center(
+    tmp_path,
+) -> None:
+    path = tmp_path / "whole_asset_pose.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": "qwen-whole-asset-pose-override/v1",
+                "asset_root_prim_path": "/Asset/RegisteredRoot",
+                "world_translation": [0.1, -0.2, 0.3],
+                "world_rotation_rotvec_degrees": [1.0, 2.0, -3.0],
+                "pivot": "asset_bounds_center",
+            }
+        )
+    )
+
+    assert _load_whole_asset_pose_override(path) == {
+        "asset_root_prim_path": "/Asset/RegisteredRoot",
+        "world_translation": [0.1, -0.2, 0.3],
+        "world_rotation_rotvec_degrees": [1.0, 2.0, -3.0],
+        "pivot": "asset_bounds_center",
+    }
+
+
+@pytest.mark.parametrize(
+    "update, message",
+    [
+        ({"asset_root_prim_path": "Asset/Part"}, "absolute asset root"),
+        ({"world_translation": [0.0, 0.0]}, "finite translation"),
+        (
+            {"world_rotation_rotvec_degrees": [0.0, float("nan"), 0.0]},
+            "finite rotation vector",
+        ),
+        ({"pivot": "world_origin"}, "asset bounds center"),
+    ],
+)
+def test_whole_asset_pose_fails_closed(tmp_path, update, message) -> None:
+    document = {
+        "schema_version": "qwen-whole-asset-pose-override/v1",
+        "asset_root_prim_path": "/Asset",
+        "world_translation": [0.0, 0.0, 0.0],
+        "world_rotation_rotvec_degrees": [0.0, 0.0, 0.0],
+        "pivot": "asset_bounds_center",
+    }
+    document.update(update)
+    path = tmp_path / "invalid_whole_asset_pose.json"
+    path.write_text(json.dumps(document))
+
+    with pytest.raises(ValueError, match=message):
+        _load_whole_asset_pose_override(path)
+
+
+def test_whole_asset_pose_root_is_lowest_common_registered_xform() -> None:
+    stage = _FakeStage(
+        {
+            "/Wrapper": _FakePrim("Xform"),
+            "/Wrapper/Asset": _FakePrim("Xform"),
+            "/Wrapper/Asset/BranchA": _FakePrim("Xform"),
+            "/Wrapper/Asset/BranchA/Mesh": _FakePrim("Mesh"),
+            "/Wrapper/Asset/BranchB": _FakePrim("Xform"),
+            "/Wrapper/Asset/BranchB/Mesh": _FakePrim("Mesh"),
+        }
+    )
+
+    assert _lowest_common_part_xform_path(
+        stage=stage,
+        part_paths=[
+            "/Wrapper/Asset/BranchA/Mesh",
+            "/Wrapper/Asset/BranchB/Mesh",
+        ],
+    ) == "/Wrapper/Asset"
+
+
+def test_whole_asset_pose_root_rejects_duplicate_or_unrooted_parts() -> None:
+    stage = _FakeStage({"/Asset": _FakePrim("Xform")})
+
+    with pytest.raises(ValueError, match="unique"):
+        _lowest_common_part_xform_path(
+            stage=stage, part_paths=["/Asset/Mesh", "/Asset/Mesh"]
+        )
+    with pytest.raises(ValueError, match="share"):
+        _lowest_common_part_xform_path(
+            stage=stage, part_paths=["/Asset/Mesh", "/Other/Mesh"]
+        )
 
 
 class _FakeContext:

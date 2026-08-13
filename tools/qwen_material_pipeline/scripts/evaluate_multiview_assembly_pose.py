@@ -129,6 +129,7 @@ def _render(
     resolution: int,
     rt_subframes: int,
     override: Path | None,
+    whole_asset_pose: Path | None = None,
 ) -> Path:
     command = [
         str(python_sh),
@@ -151,9 +152,12 @@ def _render(
         "--analysis-up-axis",
         "z",
         "--analysis-front-axis=-y",
+        "--rgb-only",
     ]
     if override is not None:
         command.extend(("--assembly-pose-overrides", str(override)))
+    if whole_asset_pose is not None:
+        command.extend(("--whole-asset-pose", str(whole_asset_pose)))
     environment = dict(os.environ)
     tools_path = str(repository_root / "tools")
     environment["PYTHONPATH"] = (
@@ -264,6 +268,12 @@ def _viewer(*, output: Path, report: Mapping[str, Any]) -> None:
         conclusion = (
             "同一组 3D 装配变换在主视角产生改善，并通过其余视角非退化门禁。"
         )
+    elif report["status"] == "PASS_NO_OP":
+        conclusion = (
+            "联合搜索未找到同时改善全部视角的共享 3D 变换，因此安全保留"
+            "工件原始根位姿。所有候选都只移动整件工件，没有局部 Mesh 或"
+            "子装配变换。"
+        )
     else:
         conclusion = (
             "联合拒绝：主视角 IoU 改善 "
@@ -328,6 +338,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         resolution=args.resolution,
         rt_subframes=args.rt_subframes,
         override=None,
+        whole_asset_pose=None,
     )
     after_registry = _render(
         python_sh=args.python_sh.resolve(strict=True),
@@ -338,6 +349,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         resolution=args.resolution,
         rt_subframes=args.rt_subframes,
         override=output / "assembly_pose_overrides.json",
+        whole_asset_pose=None,
     )
     references = _reference_masks(manifest_path)
     rows: list[dict[str, Any]] = []

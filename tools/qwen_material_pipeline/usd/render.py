@@ -580,6 +580,171 @@ def _load_assembly_pose_overrides(path: str | Path) -> list[dict[str, Any]]:
     return output
 
 
+def _lowest_common_part_xform_path(
+    *, stage: Any, part_paths: Sequence[str]
+) -> str:
+    """Return the lowest authored Xform containing every registered Mesh."""
+
+    if not part_paths or len(set(part_paths)) != len(part_paths):
+        raise ValueError("Whole-asset pose requires unique registered Part paths")
+    components = [str(path).strip("/").split("/") for path in part_paths]
+    if any(not raw or raw == [""] for raw in components):
+        raise ValueError("Whole-asset pose requires absolute registered Part paths")
+    common_length = 0
+    while all(
+        len(raw) > common_length
+        and raw[common_length] == components[0][common_length]
+        for raw in components
+    ):
+        common_length += 1
+    if common_length <= 0:
+        raise ValueError("Registered Parts do not share an authored asset root")
+    while common_length > 0:
+        candidate = "/" + "/".join(components[0][:common_length])
+        prim = stage.GetPrimAtPath(candidate)
+        if prim and prim.GetTypeName() == "Xform" and not prim.IsInstanceProxy():
+            prefix = candidate.rstrip("/") + "/"
+            if all(str(path).startswith(prefix) for path in part_paths):
+                return candidate
+        common_length -= 1
+    raise ValueError("Registered Parts have no common writable Xform root")
+
+
+def _load_whole_asset_pose_override(path: str | Path) -> dict[str, Any]:
+    """Load one bounded SE(3) transform for the complete registered asset."""
+
+    source = Path(path).expanduser().resolve(strict=True)
+    document = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(document, dict) or document.get("schema_version") != (
+        "qwen-whole-asset-pose-override/v1"
+    ):
+        raise ValueError("Whole-asset pose override has an unsupported schema")
+    root = document.get("asset_root_prim_path")
+    translation = document.get("world_translation")
+    rotation = document.get("world_rotation_rotvec_degrees")
+    if not isinstance(root, str) or not root.startswith("/"):
+        raise ValueError("Whole-asset pose override requires an absolute asset root")
+    for label, value in (
+        ("translation", translation),
+        ("rotation vector", rotation),
+    ):
+        if (
+            not isinstance(value, list)
+            or len(value) != 3
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, (int, float))
+                or not math.isfinite(float(item))
+                for item in value
+            )
+        ):
+            raise ValueError(
+                f"Whole-asset pose override requires a finite {label}"
+            )
+    if document.get("pivot") != "asset_bounds_center":
+        raise ValueError("Whole-asset pose rotation must use the asset bounds center")
+    return {
+        "asset_root_prim_path": root,
+        "world_translation": [float(item) for item in translation],
+        "world_rotation_rotvec_degrees": [float(item) for item in rotation],
+        "pivot": "asset_bounds_center",
+    }
+
+
+def _apply_whole_asset_pose_override(
+    *,
+    stage: Any,
+    override: Mapping[str, Any],
+    registered_part_paths: Sequence[str],
+    asset_center: Sequence[float],
+    maximum_translation: float,
+    maximum_rotation_degrees: float = 20.0,
+) -> dict[str, Any]:
+    """Apply one world-space SE(3) delta to the complete registered asset."""
+
+    from pxr import Gf, Usd, UsdGeom
+
+    expected_root = _lowest_common_part_xform_path(
+        stage=stage, part_paths=registered_part_paths
+    )
+    root = str(override["asset_root_prim_path"])
+    if root != expected_root:
+        raise ValueError(
+            "Whole-asset pose must target the lowest common registered Xform: "
+            f"{root!r} != {expected_root!r}"
+        )
+    prim = stage.GetPrimAtPath(root)
+    if not prim or prim.GetTypeName() != "Xform" or prim.IsInstanceProxy():
+        raise ValueError(f"Whole-asset pose root is not a writable Xform: {root}")
+    translation = np.asarray(override["world_translation"], dtype=np.float64)
+    translation_norm = float(np.linalg.norm(translation))
+    if translation_norm > maximum_translation:
+        raise ValueError(
+            "Whole-asset pose exceeds bounded asset-relative translation: "
+            f"{translation_norm:.6f} > {maximum_translation:.6f}"
+        )
+    rotvec = np.asarray(
+        override["world_rotation_rotvec_degrees"], dtype=np.float64
+    )
+    angle = float(np.linalg.norm(rotvec))
+    if angle > maximum_rotation_degrees:
+        raise ValueError(
+            "Whole-asset pose exceeds bounded rotation: "
+            f"{angle:.6f} > {maximum_rotation_degrees:.6f} degrees"
+        )
+    center = Gf.Vec3d(*(float(value) for value in asset_center))
+    delta = Gf.Matrix4d(1.0)
+    delta.SetTranslate(-center)
+    if angle > 1e-12:
+        axis = Gf.Vec3d(*(float(value / angle) for value in rotvec))
+        rotation = Gf.Matrix4d(1.0)
+        rotation.SetRotate(Gf.Rotation(axis, angle))
+        delta = delta * rotation
+    restore = Gf.Matrix4d(1.0)
+    restore.SetTranslate(center + Gf.Vec3d(*(float(value) for value in translation)))
+    delta = delta * restore
+
+    xform = UsdGeom.Xformable(prim)
+    local_before = xform.GetLocalTransformation(Usd.TimeCode.Default())
+    world_before = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    parent = prim.GetParent()
+    parent_world = (
+        UsdGeom.Xformable(parent).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        if parent and not parent.IsPseudoRoot() and UsdGeom.Xformable(parent)
+        else Gf.Matrix4d(1.0)
+    )
+    desired_world = world_before * delta
+    desired_local = desired_world * parent_world.GetInverse()
+    # USD composes an appended op on the left in its row-vector convention:
+    # local_after = compensation * local_before.
+    compensation = desired_local * local_before.GetInverse()
+    op = xform.AddTransformOp(
+        UsdGeom.XformOp.PrecisionDouble,
+        "qwenWholeAssetPose",
+    )
+    op.Set(compensation)
+    achieved_world = xform.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    maximum_error = max(
+        abs(float(achieved_world[row][column] - desired_world[row][column]))
+        for row in range(4)
+        for column in range(4)
+    )
+    if maximum_error > 1e-7:
+        raise ValueError(
+            "Whole-asset pose could not realize the requested world transform: "
+            f"max matrix error={maximum_error:.9f}"
+        )
+    return {
+        "asset_root_prim_path": root,
+        "registered_part_count": len(registered_part_paths),
+        "registered_part_coverage": 1.0,
+        "world_translation": translation.tolist(),
+        "world_rotation_rotvec_degrees": rotvec.tolist(),
+        "rotation_angle_degrees": angle,
+        "pivot_world": [float(center[index]) for index in range(3)],
+    }
+
+
 def _apply_assembly_pose_overrides(
     *, stage: Any, overrides: Sequence[dict[str, Any]], maximum_translation: float
 ) -> None:
@@ -1384,6 +1549,7 @@ def _render_part_views_once(
     generate_part_evidence: bool = True,
     custom_view_specs_path: str | Path | None = None,
     assembly_pose_overrides_path: str | Path | None = None,
+    whole_asset_pose_override_path: str | Path | None = None,
     progress_callback: ProgressCallback | None = None,
     _lifecycle: _RenderLifecycle,
 ) -> dict[str, Any]:
@@ -1431,6 +1597,15 @@ def _render_part_views_once(
         if assembly_pose_overrides_path is not None
         else []
     )
+    whole_asset_pose_override = (
+        _load_whole_asset_pose_override(whole_asset_pose_override_path)
+        if whole_asset_pose_override_path is not None
+        else None
+    )
+    if assembly_pose_overrides and whole_asset_pose_override is not None:
+        raise ValueError(
+            "Local assembly overrides and a whole-asset pose are mutually exclusive"
+        )
     if custom_view_specs is None:
         view_directions, view_presets = _resolve_view_directions(view_names)
     else:
@@ -1518,10 +1693,21 @@ def _render_part_views_once(
     extents = tuple(float(maximum[i] - minimum[i]) for i in range(3))
     diagonal = max(math.sqrt(sum(value * value for value in extents)), 1e-3)
     camera_distance = diagonal * 2.15
+    whole_asset_pose_runtime = None
     if assembly_pose_overrides:
         _apply_assembly_pose_overrides(
             stage=stage,
             overrides=assembly_pose_overrides,
+            maximum_translation=0.20 * diagonal,
+        )
+        for _ in range(3):
+            omni.kit.app.get_app().update()
+    elif whole_asset_pose_override is not None:
+        whole_asset_pose_runtime = _apply_whole_asset_pose_override(
+            stage=stage,
+            override=whole_asset_pose_override,
+            registered_part_paths=list(part_by_path),
+            asset_center=center,
             maximum_translation=0.20 * diagonal,
         )
         for _ in range(3):
@@ -2017,6 +2203,16 @@ def _render_part_views_once(
             else None
         ),
         "assembly_pose_override_count": len(assembly_pose_overrides),
+        "whole_asset_pose_override": (
+            str(
+                Path(whole_asset_pose_override_path)
+                .expanduser()
+                .resolve(strict=True)
+            )
+            if whole_asset_pose_override_path is not None
+            else None
+        ),
+        "whole_asset_pose_runtime": whole_asset_pose_runtime,
         "rt_subframes": rt_subframes,
         "expanded_view_count": len(names),
         "view_presets": view_presets,
@@ -2086,6 +2282,7 @@ def render_part_views(
     generate_part_evidence: bool = True,
     custom_view_specs_path: str | Path | None = None,
     assembly_pose_overrides_path: str | Path | None = None,
+    whole_asset_pose_override_path: str | Path | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Render one evidence set and synchronously release all Kit resources."""
@@ -2105,6 +2302,7 @@ def render_part_views(
             generate_part_evidence=generate_part_evidence,
             custom_view_specs_path=custom_view_specs_path,
             assembly_pose_overrides_path=assembly_pose_overrides_path,
+            whole_asset_pose_override_path=whole_asset_pose_override_path,
             progress_callback=progress_callback,
             _lifecycle=lifecycle,
         )
@@ -2138,6 +2336,13 @@ def parse_args() -> argparse.Namespace:
         help=(
             "optional qwen-assembly-pose-overrides/v1 document; applies "
             "bounded rigid transforms to whole Xform subtrees in memory only"
+        ),
+    )
+    parser.add_argument(
+        "--whole-asset-pose",
+        help=(
+            "optional qwen-whole-asset-pose-override/v1 document; moves and "
+            "rotates the lowest common Xform containing every registered Part"
         ),
     )
     parser.add_argument("--rt-subframes", type=int, default=8)
@@ -2244,6 +2449,7 @@ def main() -> int:
             generate_part_evidence=not args.rgb_only,
             custom_view_specs_path=args.view_specs,
             assembly_pose_overrides_path=args.assembly_pose_overrides,
+            whole_asset_pose_override_path=args.whole_asset_pose,
             progress_callback=emit_progress_event,
         )
     except Exception:
