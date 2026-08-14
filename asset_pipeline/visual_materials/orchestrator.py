@@ -1674,6 +1674,7 @@ def _bind_part_id_material_predictions(
     plan: Mapping[str, Any],
     audit: Mapping[str, Any],
     qwen_document: Mapping[str, Any],
+    component_qwen_document: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Persist the prediction -> MDL -> deferred-color lineage in the plan."""
 
@@ -1719,6 +1720,79 @@ def _bind_part_id_material_predictions(
             "semantic_hybrid Part-ID prediction lineage has invalid exact cover"
         )
 
+    component_selection_by_part: dict[str, Mapping[str, Any]] = {}
+    component_qwen_sha256: str | None = None
+    plan_provenance = output_plan.get("provenance")
+    component_selection = (
+        plan_provenance.get("appearance_component_mdl_selection")
+        if isinstance(plan_provenance, Mapping)
+        else None
+    )
+    component_selection_rows = (
+        component_selection.get("selections")
+        if isinstance(component_selection, Mapping)
+        else None
+    )
+    if component_selection_rows:
+        if not isinstance(component_qwen_document, Mapping):
+            raise RuntimeError(
+                "semantic_hybrid component prediction lineage is missing"
+            )
+        component_unsigned = copy.deepcopy(dict(component_qwen_document))
+        component_integrity = component_unsigned.pop("integrity", None)
+        component_choices = component_qwen_document.get("choices")
+        component_predictions = component_qwen_document.get("material_predictions")
+        if (
+            not isinstance(component_integrity, Mapping)
+            or component_integrity.get("document_sha256")
+            != canonical_sha256(component_unsigned)
+            or component_qwen_document.get("require_material_prediction") is not True
+            or not isinstance(component_choices, Mapping)
+            or not isinstance(component_predictions, Mapping)
+            or set(component_choices) != set(component_predictions)
+        ):
+            raise RuntimeError(
+                "semantic_hybrid component prediction result is not sealed"
+            )
+        component_qwen_sha256 = canonical_sha256(component_qwen_document)
+        for row in component_selection_rows:
+            component_id = row.get("component_id") if isinstance(row, Mapping) else None
+            member_part_ids = row.get("member_part_ids") if isinstance(row, Mapping) else None
+            selected_component_material_id = (
+                row.get("material_id") if isinstance(row, Mapping) else None
+            )
+            component_prediction = (
+                component_predictions.get(component_id)
+                if isinstance(component_id, str)
+                else None
+            )
+            if (
+                not isinstance(component_id, str)
+                or not component_id
+                or isinstance(member_part_ids, (str, bytes))
+                or not isinstance(member_part_ids, list)
+                or len(member_part_ids) < 2
+                or len(member_part_ids) != len(set(member_part_ids))
+                or any(
+                    not isinstance(part_id, str) or not part_id
+                    for part_id in member_part_ids
+                )
+                or component_choices.get(component_id)
+                != selected_component_material_id
+                or not isinstance(component_prediction, Mapping)
+                or component_prediction.get("part_id") != component_id
+                or component_prediction.get("decision_status") != "accepted"
+            ):
+                raise RuntimeError(
+                    "semantic_hybrid component prediction selection is invalid"
+                )
+            for member_part_id in member_part_ids:
+                if member_part_id in component_selection_by_part:
+                    raise RuntimeError(
+                        "semantic_hybrid component prediction members overlap"
+                    )
+                component_selection_by_part[member_part_id] = row
+
     qwen_sha256 = canonical_sha256(qwen_document)
     for part_id in sorted(choices):
         assignment = assignment_by_part.get(part_id)
@@ -1740,15 +1814,68 @@ def _bind_part_id_material_predictions(
         status = audit_row.get("status")
         if status == "independently_selected":
             selection_applied = True
+            component_row = component_selection_by_part.get(part_id)
+            if component_row is None:
+                final_material_id = selected_material_id
+                selection_scope = "independent_part_id"
+                component_binding = None
+            else:
+                component_id = component_row["component_id"]
+                component_predictions = component_qwen_document["material_predictions"]
+                component_prediction = component_predictions[component_id]
+                try:
+                    part_semantics = normalize_part_material_semantics(
+                        prediction["material_semantics"]
+                    )
+                    component_semantics = normalize_part_material_semantics(
+                        component_prediction["material_semantics"]
+                    )
+                except (MaterialSemanticsError, KeyError, TypeError) as exc:
+                    raise RuntimeError(
+                        "semantic_hybrid component/member prediction is invalid "
+                        f"for {part_id}: {exc}"
+                    ) from exc
+                semantic_keys = (
+                    "substrate",
+                    "surface_treatment",
+                    "optical_behavior",
+                    "finish",
+                )
+                if any(
+                    part_semantics[key] != component_semantics[key]
+                    for key in semantic_keys
+                ):
+                    raise RuntimeError(
+                        "semantic_hybrid component/member material prediction "
+                        f"conflicts for {part_id}"
+                    )
+                final_material_id = component_row["material_id"]
+                selection_scope = "physically_homogeneous_appearance_component"
+                component_binding = {
+                    "component_id": component_id,
+                    "component_prediction_sha256": canonical_sha256(
+                        component_prediction
+                    ),
+                    "component_qwen_result_sha256": component_qwen_sha256,
+                    "component_selected_material_id": final_material_id,
+                }
             if (
-                assignment.get("material_id") != selected_material_id
-                or audit_row.get("material_id") != selected_material_id
+                assignment.get("material_id") != final_material_id
+                or audit_row.get("material_id") != final_material_id
             ):
                 raise RuntimeError(
                     f"semantic_hybrid predicted material choice drifted for {part_id}"
                 )
         elif status == "observed_low_confidence_baseline_retained":
             selection_applied = False
+            final_material_id = selected_material_id
+            selection_scope = "independent_part_id_rejected_low_confidence"
+            component_binding = None
+            if part_id in component_selection_by_part:
+                raise RuntimeError(
+                    "semantic_hybrid low-confidence Part-ID entered a component "
+                    f"selection for {part_id}"
+                )
             if audit_row.get("rejected_qwen_material_id") != selected_material_id:
                 raise RuntimeError(
                     f"semantic_hybrid rejected material choice drifted for {part_id}"
@@ -1764,12 +1891,16 @@ def _bind_part_id_material_predictions(
             "predicted_material_semantics": copy.deepcopy(
                 prediction.get("material_semantics")
             ),
-            "selected_material_id": selected_material_id,
+            "independent_predicted_material_id": selected_material_id,
+            "selected_material_id": final_material_id,
+            "selection_scope": selection_scope,
             "selection_applied": selection_applied,
             "material_identity_locked_before_color": selection_applied,
             "color_stage_material_id_change_allowed": False,
             "qwen_result_sha256": qwen_sha256,
         }
+        if component_binding is not None:
+            binding["appearance_component_prediction_selection"] = component_binding
         provenance = assignment.get("provenance")
         if not isinstance(provenance, dict):
             raise RuntimeError(
@@ -1788,6 +1919,8 @@ def _bind_part_id_material_predictions(
             "material_prediction_then_mdl_identity_lock_then_same_id_color"
         ),
         "qwen_result_sha256": qwen_sha256,
+        "component_qwen_result_sha256": component_qwen_sha256,
+        "component_selected_part_count": len(component_selection_by_part),
         "observed_part_count": len(choices),
         "material_identity_locked_before_color": True,
         "color_stage_material_id_change_allowed": False,
@@ -1802,6 +1935,173 @@ def _bind_part_id_material_predictions(
         "document_sha256": canonical_sha256(output_audit)
     }
     return output_plan, output_audit
+
+
+def _semantic_hybrid_component_authorization(
+    *,
+    appearance_components: Mapping[str, Any],
+    part_qwen_document: Mapping[str, Any],
+    component_qwen_document: Mapping[str, Any],
+) -> tuple[list[str], dict[str, Any]]:
+    """Authorize component identity sharing only for homogeneous predictions.
+
+    Appearance components are color/texture cohorts, not physical-material
+    declarations.  A component-level MDL may therefore replace member-level
+    choices only when every member independently predicts the same physical
+    material signature as the component.  Mixed cohorts remain independent.
+    """
+
+    def sealed_predictions(
+        document: Mapping[str, Any], label: str
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        unsigned = copy.deepcopy(dict(document))
+        integrity = unsigned.pop("integrity", None)
+        choices = document.get("choices")
+        predictions = document.get("material_predictions")
+        if (
+            not isinstance(integrity, Mapping)
+            or integrity.get("document_sha256") != canonical_sha256(unsigned)
+            or document.get("require_material_prediction") is not True
+            or not isinstance(choices, Mapping)
+            or not isinstance(predictions, Mapping)
+            or set(choices) != set(predictions)
+        ):
+            raise RuntimeError(
+                f"semantic_hybrid {label} material predictions are not sealed"
+            )
+        return choices, predictions
+
+    _part_choices, part_predictions = sealed_predictions(
+        part_qwen_document, "Part-ID"
+    )
+    component_choices, component_predictions = sealed_predictions(
+        component_qwen_document, "appearance-component"
+    )
+    raw_components = appearance_components.get("components")
+    if not isinstance(raw_components, list) or not raw_components:
+        raise RuntimeError(
+            "semantic_hybrid appearance components are missing"
+        )
+    component_rows: dict[str, Mapping[str, Any]] = {}
+    for row in raw_components:
+        component_id = row.get("component_id") if isinstance(row, Mapping) else None
+        if (
+            not isinstance(component_id, str)
+            or not component_id
+            or component_id in component_rows
+        ):
+            raise RuntimeError(
+                "semantic_hybrid appearance component cover is invalid"
+            )
+        component_rows[component_id] = row
+    if set(component_rows) != set(component_choices):
+        raise RuntimeError(
+            "semantic_hybrid component predictions do not exactly cover components"
+        )
+
+    signature_keys = (
+        "substrate",
+        "surface_treatment",
+        "optical_behavior",
+        "finish",
+    )
+    authorized_component_ids: list[str] = []
+    excluded_components: list[dict[str, Any]] = []
+    for component_id in sorted(component_rows):
+        row = component_rows[component_id]
+        member_part_ids = row.get("member_part_ids")
+        component_prediction = component_predictions.get(component_id)
+        if (
+            isinstance(member_part_ids, (str, bytes))
+            or not isinstance(member_part_ids, list)
+            or len(member_part_ids) < 2
+            or len(member_part_ids) != len(set(member_part_ids))
+            or any(
+                not isinstance(part_id, str) or not part_id
+                for part_id in member_part_ids
+            )
+            or not isinstance(component_prediction, Mapping)
+            or component_prediction.get("part_id") != component_id
+            or component_prediction.get("decision_status") != "accepted"
+        ):
+            raise RuntimeError(
+                f"semantic_hybrid component prediction is invalid for {component_id}"
+            )
+        try:
+            component_semantics = normalize_part_material_semantics(
+                component_prediction["material_semantics"]
+            )
+        except (MaterialSemanticsError, KeyError, TypeError) as exc:
+            raise RuntimeError(
+                f"semantic_hybrid component prediction is invalid for {component_id}: {exc}"
+            ) from exc
+        component_signature = {
+            key: component_semantics[key] for key in signature_keys
+        }
+        member_signatures: dict[str, dict[str, Any]] = {}
+        conflicting_part_ids: list[str] = []
+        for part_id in sorted(member_part_ids):
+            part_prediction = part_predictions.get(part_id)
+            if (
+                not isinstance(part_prediction, Mapping)
+                or part_prediction.get("part_id") != part_id
+                or part_prediction.get("decision_status") != "accepted"
+            ):
+                raise RuntimeError(
+                    "semantic_hybrid component member lacks an accepted material "
+                    f"prediction: {component_id}/{part_id}"
+                )
+            try:
+                part_semantics = normalize_part_material_semantics(
+                    part_prediction["material_semantics"]
+                )
+            except (MaterialSemanticsError, KeyError, TypeError) as exc:
+                raise RuntimeError(
+                    "semantic_hybrid component member prediction is invalid: "
+                    f"{component_id}/{part_id}: {exc}"
+                ) from exc
+            part_signature = {key: part_semantics[key] for key in signature_keys}
+            member_signatures[part_id] = part_signature
+            if part_signature != component_signature:
+                conflicting_part_ids.append(part_id)
+        if conflicting_part_ids:
+            excluded_components.append(
+                {
+                    "component_id": component_id,
+                    "member_part_ids": sorted(member_part_ids),
+                    "component_material_signature": component_signature,
+                    "member_material_signatures": member_signatures,
+                    "conflicting_part_ids": conflicting_part_ids,
+                    "reason_code": "MEMBER_MATERIAL_PREDICTION_CONFLICT",
+                    "resolution": "retain_independent_part_id_material_identities",
+                }
+            )
+        else:
+            authorized_component_ids.append(component_id)
+
+    audit = {
+        "schema_version": "qwen-component-material-prediction-consistency/v1",
+        "policy": (
+            "appearance_similarity_never_overrides_part_physical_material; "
+            "component identity sharing requires exact member prediction consensus"
+        ),
+        "signature_fields": list(signature_keys),
+        "appearance_components_sha256": canonical_sha256(appearance_components),
+        "part_qwen_result_sha256": canonical_sha256(part_qwen_document),
+        "component_qwen_result_sha256": canonical_sha256(component_qwen_document),
+        "authorized_component_ids": authorized_component_ids,
+        "excluded_components": excluded_components,
+        "summary": {
+            "component_count": len(component_rows),
+            "authorized_component_count": len(authorized_component_ids),
+            "excluded_component_count": len(excluded_components),
+            "excluded_part_count": sum(
+                len(row["member_part_ids"]) for row in excluded_components
+            ),
+        },
+    }
+    audit["integrity"] = {"document_sha256": canonical_sha256(audit)}
+    return authorized_component_ids, audit
 
 
 def _validate_semantic_hybrid_invocation(
@@ -2473,6 +2773,7 @@ def _run_policy_part_id_stage(
         appearance_component_document: dict[str, Any] | None = None
         appearance_component_retrieval_document: dict[str, Any] | None = None
         appearance_component_qwen_document: dict[str, Any] | None = None
+        component_prediction_consistency: dict[str, Any] | None = None
         if appearance_components_report.is_file():
             candidate_component_document = read_object(
                 appearance_components_report,
@@ -2656,6 +2957,16 @@ def _run_policy_part_id_stage(
             and appearance_component_retrieval_document is not None
             and appearance_component_qwen_document is not None
         ):
+            authorized_component_ids: list[str] | None = None
+            if _semantic_hybrid_enabled(config):
+                (
+                    authorized_component_ids,
+                    component_prediction_consistency,
+                ) = _semantic_hybrid_component_authorization(
+                    appearance_components=appearance_component_document,
+                    part_qwen_document=qwen_part_document,
+                    component_qwen_document=appearance_component_qwen_document,
+                )
             try:
                 direct_plan_document, direct_audit_document = (
                     apply_fixed_component_mdl_choices(
@@ -2675,6 +2986,7 @@ def _run_policy_part_id_stage(
                             else appearance_component_retrieval_document
                         ),
                         component_qwen_choices=appearance_component_qwen_document,
+                        authorized_component_ids=authorized_component_ids,
                     )
                 )
             except AppearanceComponentMaterialError as exc:
@@ -2687,11 +2999,24 @@ def _run_policy_part_id_stage(
                 direct_audit_document["appearance_component_mdl_selection"],
             )
         if _semantic_hybrid_enabled(config):
+            if component_prediction_consistency is not None:
+                plan_provenance = direct_plan_document.get("provenance")
+                if not isinstance(plan_provenance, dict):
+                    raise RuntimeError(
+                        "semantic_hybrid plan provenance is invalid"
+                    )
+                plan_provenance["component_material_prediction_consistency"] = (
+                    copy.deepcopy(component_prediction_consistency)
+                )
+                direct_audit_document[
+                    "component_material_prediction_consistency"
+                ] = copy.deepcopy(component_prediction_consistency)
             direct_plan_document, direct_audit_document = (
                 _bind_part_id_material_predictions(
                     plan=direct_plan_document,
                     audit=direct_audit_document,
                     qwen_document=qwen_part_document,
+                    component_qwen_document=appearance_component_qwen_document,
                 )
             )
         write_object(part_id_material_plan, direct_plan_document)

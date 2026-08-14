@@ -258,6 +258,177 @@ def test_semantic_hybrid_binds_prediction_to_part_id_plan_and_audit() -> None:
     assert audit["output_plan_sha256"] == orchestrator.canonical_sha256(plan)
 
 
+def _sealed_prediction_document(
+    choices: dict[str, str], predictions: dict[str, dict[str, object]]
+) -> dict[str, object]:
+    unsigned = {
+        "require_material_prediction": True,
+        "selection_order": (
+            "material_prediction_then_mdl_identity_lock_then_same_id_color"
+        ),
+        "choices": choices,
+        "material_predictions": predictions,
+    }
+    return {
+        **unsigned,
+        "integrity": {
+            "document_sha256": orchestrator.canonical_sha256(unsigned)
+        },
+    }
+
+
+def test_semantic_hybrid_excludes_physically_mixed_appearance_component() -> None:
+    matte = "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte"
+    gloss = "mdl:Miscellaneous/Paint_Gloss.mdl#Paint_Gloss"
+    part_document = _sealed_prediction_document(
+        {"P1": gloss, "P2": matte, "P3": gloss},
+        {
+            "P1": _material_prediction("P1"),
+            "P2": _material_prediction("P2", substrate="polymer"),
+            "P3": _material_prediction("P3"),
+        },
+    )
+    component_document = _sealed_prediction_document(
+        {"AC_dark": gloss},
+        {"AC_dark": _material_prediction("AC_dark")},
+    )
+
+    authorized, audit = orchestrator._semantic_hybrid_component_authorization(
+        appearance_components={
+            "components": [
+                {
+                    "component_id": "AC_dark",
+                    "member_part_ids": ["P1", "P2", "P3"],
+                }
+            ]
+        },
+        part_qwen_document=part_document,
+        component_qwen_document=component_document,
+    )
+
+    assert authorized == []
+    assert audit["summary"]["excluded_component_count"] == 1
+    assert audit["excluded_components"][0]["conflicting_part_ids"] == ["P2"]
+    assert audit["excluded_components"][0]["resolution"] == (
+        "retain_independent_part_id_material_identities"
+    )
+
+
+def test_semantic_hybrid_binds_homogeneous_component_identity_override() -> None:
+    matte = "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte"
+    gloss = "mdl:Miscellaneous/Paint_Gloss.mdl#Paint_Gloss"
+    part_document = _sealed_prediction_document(
+        {"P1": matte, "P2": gloss},
+        {"P1": _material_prediction("P1"), "P2": _material_prediction("P2")},
+    )
+    component_document = _sealed_prediction_document(
+        {"AC_green": gloss},
+        {"AC_green": _material_prediction("AC_green")},
+    )
+    plan, audit = orchestrator._bind_part_id_material_predictions(
+        plan={
+            "assignments": [
+                {
+                    "part_id": part_id,
+                    "material_id": gloss,
+                    "provenance": {},
+                }
+                for part_id in ("P1", "P2")
+            ],
+            "provenance": {
+                "appearance_component_mdl_selection": {
+                    "selections": [
+                        {
+                            "component_id": "AC_green",
+                            "member_part_ids": ["P1", "P2"],
+                            "material_id": gloss,
+                        }
+                    ]
+                }
+            },
+        },
+        audit={
+            "parts": [
+                {
+                    "part_id": part_id,
+                    "status": "independently_selected",
+                    "material_id": gloss,
+                }
+                for part_id in ("P1", "P2")
+            ],
+            "summary": {},
+        },
+        qwen_document=part_document,
+        component_qwen_document=component_document,
+    )
+
+    binding = plan["assignments"][0]["provenance"][
+        "material_prediction_selection"
+    ]
+    assert binding["independent_predicted_material_id"] == matte
+    assert binding["selected_material_id"] == gloss
+    assert binding["selection_scope"] == (
+        "physically_homogeneous_appearance_component"
+    )
+    assert binding["appearance_component_prediction_selection"]["component_id"] == (
+        "AC_green"
+    )
+    assert audit["summary"]["material_prediction_bound_count"] == 2
+
+
+def test_semantic_hybrid_component_binding_rejects_physical_conflict() -> None:
+    matte = "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte"
+    gloss = "mdl:Miscellaneous/Paint_Gloss.mdl#Paint_Gloss"
+    part_document = _sealed_prediction_document(
+        {"P1": matte, "P2": gloss},
+        {
+            "P1": _material_prediction("P1", substrate="polymer"),
+            "P2": _material_prediction("P2"),
+        },
+    )
+    component_document = _sealed_prediction_document(
+        {"AC_green": gloss},
+        {"AC_green": _material_prediction("AC_green")},
+    )
+    with pytest.raises(RuntimeError, match="conflicts for P1"):
+        orchestrator._bind_part_id_material_predictions(
+            plan={
+                "assignments": [
+                    {
+                        "part_id": part_id,
+                        "material_id": gloss,
+                        "provenance": {},
+                    }
+                    for part_id in ("P1", "P2")
+                ],
+                "provenance": {
+                    "appearance_component_mdl_selection": {
+                        "selections": [
+                            {
+                                "component_id": "AC_green",
+                                "member_part_ids": ["P1", "P2"],
+                                "material_id": gloss,
+                            }
+                        ]
+                    }
+                },
+            },
+            audit={
+                "parts": [
+                    {
+                        "part_id": part_id,
+                        "status": "independently_selected",
+                        "material_id": gloss,
+                    }
+                    for part_id in ("P1", "P2")
+                ],
+                "summary": {},
+            },
+            qwen_document=part_document,
+            component_qwen_document=component_document,
+        )
+
+
 def test_semantic_hybrid_catalog_expansion_is_bound_for_downstream_plan() -> None:
     material_id = "mdl:Plastics/Plastic_ABS.mdl#Plastic_ABS"
     retrieval_unsigned = {
