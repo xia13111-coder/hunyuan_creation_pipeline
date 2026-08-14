@@ -10,8 +10,11 @@ from PIL import Image
 
 from qwen_material_pipeline.workflows.part_id_qwen import (
     BATCH_SCHEMA_VERSION,
+    MATERIAL_FAMILY_PREDICTION_BATCH_SCHEMA_VERSION,
+    PartIdQwenError,
     _apply_part_id_selective_regression,
     _compatibility_shortlist,
+    _family_filtered_ranking,
     _promote_library_gap_candidates,
     _target_appearance,
     _validate_batch,
@@ -60,7 +63,184 @@ class _Runner:
         )
 
 
+class _MaterialFamilyFirstRunner:
+    model_identity = {"backend": "fake", "fingerprint": "family-first-test"}
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.payloads: list[object] = []
+
+    def generate_with_metadata(self, payload: object) -> _Generation:
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls == 1:
+            return _Generation(
+                json.dumps(
+                    {
+                        "schema_version": (
+                            MATERIAL_FAMILY_PREDICTION_BATCH_SCHEMA_VERSION
+                        ),
+                        "predictions": [
+                            {
+                                "part_id": "P0001",
+                                "catalog_family": "paint",
+                                "surface_finish": "matte",
+                                "confidence": 0.93,
+                            }
+                        ],
+                    }
+                )
+            )
+        return _Generation(
+            json.dumps(
+                {
+                    "schema_version": BATCH_SCHEMA_VERSION,
+                    "selections": [
+                        {
+                            "part_id": "P0001",
+                            "candidate_index": 1,
+                            "confidence": 0.88,
+                        }
+                    ],
+                }
+            )
+        )
+
+
 class PartIdQwenTests(unittest.TestCase):
+    def test_material_family_first_predicts_then_selects_only_same_family(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            crop = root / "P0001.png"
+            Image.fromarray(np.full((24, 24, 3), (32, 110, 48), dtype=np.uint8)).save(
+                crop
+            )
+            second_crop = root / "P0001_iso.png"
+            Image.fromarray(np.full((24, 24, 3), (42, 105, 55), dtype=np.uint8)).save(
+                second_crop
+            )
+            paint_matte = "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte"
+            paint_gloss = "mdl:Miscellaneous/Paint_Gloss.mdl#Paint_Gloss"
+            green_glass = "mdl:Glass/Green_Glass.mdl#Green_Glass"
+            catalog = {
+                "materials": [
+                    {
+                        "material_id": paint_matte,
+                        "display_name": "Paint Matte",
+                        "family": "paint",
+                        "finishes": ["matte"],
+                    },
+                    {
+                        "material_id": paint_gloss,
+                        "display_name": "Paint Gloss",
+                        "family": "paint",
+                        "finishes": ["glossy"],
+                    },
+                    {
+                        "material_id": green_glass,
+                        "display_name": "Green Glass",
+                        "family": "glass",
+                        "finishes": ["smooth"],
+                    },
+                ]
+            }
+            evidence = {
+                "schema_version": "qwen-part-id-reference-evidence/v1",
+                "integrity": {"document_sha256": "evidence"},
+                "parts": [
+                    {
+                        "part_id": "P0001",
+                        "status": "observed",
+                        "descriptor": {"surface_class": "dielectric"},
+                        "observations": [
+                            {
+                                "view_id": "front",
+                                "crop": str(crop),
+                                "selected_for_material_inference": True,
+                            },
+                            {
+                                "view_id": "iso",
+                                "crop": str(second_crop),
+                                "selected_for_material_inference": False,
+                            },
+                        ],
+                    }
+                ],
+            }
+            retrieval = {
+                "groups": [
+                    {
+                        "group_id": "P0001",
+                        "fused_ranking": [
+                            {"rank": 1, "material_id": green_glass},
+                            {"rank": 2, "material_id": paint_gloss},
+                            {"rank": 3, "material_id": paint_matte},
+                        ],
+                    }
+                ]
+            }
+            runner = _MaterialFamilyFirstRunner()
+            result = run_part_id_qwen_rerank(
+                evidence=evidence,
+                retrieval=retrieval,
+                catalog=catalog,
+                runner=runner,
+                model="fake",
+                output_dir=root / "qwen",
+                batch_size=1,
+                candidate_count=2,
+                require_material_family_prediction=True,
+            )
+
+        self.assertEqual(runner.calls, 2)
+        prediction_content = runner.payloads[0]["messages"][1]["content"]
+        self.assertEqual(
+            sum(row.get("type") == "image_url" for row in prediction_content),
+            2,
+        )
+        self.assertEqual(result["material_prediction_mode"], "catalog_family_first")
+        self.assertEqual(
+            result["selection_order"],
+            [
+                "material_family_prediction",
+                "exact_catalog_family_filter",
+                "exact_mdl_visual_selection",
+            ],
+        )
+        self.assertEqual(result["material_predictions"][0]["catalog_family"], "paint")
+        self.assertEqual(result["choices"], {"P0001": paint_matte})
+        self.assertEqual(result["selections"][0]["confidence"], 0.88)
+        self.assertEqual(
+            result["visual_compatibility_gate"]["parts"][0]["authorized_material_ids"],
+            [paint_matte, paint_gloss],
+        )
+        self.assertNotIn(
+            green_glass,
+            result["visual_compatibility_gate"]["parts"][0]["authorized_material_ids"],
+        )
+        self.assertEqual(result["summary"]["physical_cross_family_fallback_count"], 0)
+
+    def test_material_family_filter_requires_complete_family_catalog_coverage(
+        self,
+    ) -> None:
+        paint_matte = "mdl:Paint_Matte.mdl#Paint_Matte"
+        paint_gloss = "mdl:Paint_Gloss.mdl#Paint_Gloss"
+        with self.assertRaisesRegex(PartIdQwenError, "complete catalog"):
+            _family_filtered_ranking(
+                ranking=[{"rank": 1, "material_id": paint_matte}],
+                catalog_by_id={
+                    paint_matte: {"material_id": paint_matte, "family": "paint"},
+                    paint_gloss: {"material_id": paint_gloss, "family": "paint"},
+                },
+                prediction={
+                    "catalog_family": "paint",
+                    "surface_finish": "matte",
+                    "confidence": 0.9,
+                },
+            )
+
     def test_tiny_chromatic_part_keeps_color_authority_in_selection(
         self,
     ) -> None:

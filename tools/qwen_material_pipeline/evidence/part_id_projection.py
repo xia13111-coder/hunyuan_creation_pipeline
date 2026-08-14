@@ -3019,6 +3019,7 @@ def build_part_id_material_plan(
     retrieval_result: Mapping[str, Any],
     qwen_choices: Mapping[str, str] | None = None,
     qwen_confidences: Mapping[str, float] | None = None,
+    qwen_material_predictions: Mapping[str, Mapping[str, Any]] | None = None,
     allow_color_parameters: bool = False,
     part_registry: Mapping[str, Any] | None = None,
     enforce_coating_consistency: bool = True,
@@ -3103,6 +3104,33 @@ def build_part_id_material_plan(
         for value in selected_qwen_confidences.values()
     ):
         raise PartIdProjectionError("Qwen confidences must be finite unit floats")
+    selected_material_predictions = {
+        str(part_id): copy.deepcopy(dict(prediction))
+        for part_id, prediction in (qwen_material_predictions or {}).items()
+        if isinstance(part_id, str) and isinstance(prediction, Mapping)
+    }
+    if qwen_material_predictions is not None:
+        if set(selected_material_predictions) != expected_retrieval_parts:
+            raise PartIdProjectionError(
+                "material predictions must exactly cover every observed Part ID"
+            )
+        for part_id, prediction in selected_material_predictions.items():
+            if (
+                prediction.get("part_id") != part_id
+                or prediction.get("status")
+                not in {"APPLYABLE", "INSUFFICIENT_EVIDENCE"}
+                or not isinstance(prediction.get("catalog_family"), str)
+                or not prediction["catalog_family"]
+                or not isinstance(prediction.get("surface_finish"), str)
+                or not prediction["surface_finish"]
+                or isinstance(prediction.get("confidence"), bool)
+                or not isinstance(prediction.get("confidence"), (int, float))
+                or not math.isfinite(float(prediction["confidence"]))
+                or not 0.0 <= float(prediction["confidence"]) <= 1.0
+            ):
+                raise PartIdProjectionError(
+                    f"material prediction for {part_id} is invalid"
+                )
     if not isinstance(allow_color_parameters, bool):
         raise PartIdProjectionError("allow_color_parameters must be boolean")
     if not isinstance(enforce_coating_consistency, bool):
@@ -3168,6 +3196,7 @@ def build_part_id_material_plan(
                 f"observed Part ID {part_id} has no exact material candidates"
             )
         qwen_material = selected_qwen.get(part_id)
+        material_prediction = selected_material_predictions.get(part_id)
         if qwen_material is not None and qwen_material not in candidates:
             raise PartIdProjectionError(
                 f"Qwen selected a non-retrieved material for {part_id}: {qwen_material}"
@@ -3218,17 +3247,24 @@ def build_part_id_material_plan(
                     "candidate_material_ids": candidates,
                 }
             )
+            if material_prediction is not None:
+                baseline_provenance["material_prediction"] = copy.deepcopy(
+                    material_prediction
+                )
             output_assignments.append(assignment)
-            audit_rows.append(
-                {
-                    "part_id": part_id,
-                    "status": "observed_low_confidence_baseline_retained",
-                    "material_id": assignment.get("material_id"),
-                    "rejected_qwen_material_id": qwen_material,
-                    "rejected_qwen_confidence": qwen_confidence,
-                    "evidence_view_ids": [str(selected_observation["view_id"])],
-                }
-            )
+            rejected_audit_row = {
+                "part_id": part_id,
+                "status": "observed_low_confidence_baseline_retained",
+                "material_id": assignment.get("material_id"),
+                "rejected_qwen_material_id": qwen_material,
+                "rejected_qwen_confidence": qwen_confidence,
+                "evidence_view_ids": [str(selected_observation["view_id"])],
+            }
+            if material_prediction is not None:
+                rejected_audit_row["material_prediction"] = copy.deepcopy(
+                    material_prediction
+                )
+            audit_rows.append(rejected_audit_row)
             continue
         selected = qwen_material or candidates[0]
         selected_row = next(row for row in fused if row.get("material_id") == selected)
@@ -3287,17 +3323,24 @@ def build_part_id_material_plan(
             "candidate_material_ids": candidates,
             "evidence_mask_sha256s": sorted([str(selected_observation["mask_sha256"])]),
         }
+        if material_prediction is not None:
+            assignment["provenance"]["material_prediction"] = copy.deepcopy(
+                material_prediction
+            )
         output_assignments.append(assignment)
-        audit_rows.append(
-            {
-                "part_id": part_id,
-                "status": "independently_selected",
-                "material_id": selected,
-                "selected_retrieval_rank": int(selected_row.get("rank", 1)),
-                "qwen_reranked": qwen_material is not None,
-                "evidence_view_ids": assignment["evidence_views"],
-            }
-        )
+        selected_audit_row = {
+            "part_id": part_id,
+            "status": "independently_selected",
+            "material_id": selected,
+            "selected_retrieval_rank": int(selected_row.get("rank", 1)),
+            "qwen_reranked": qwen_material is not None,
+            "evidence_view_ids": assignment["evidence_views"],
+        }
+        if material_prediction is not None:
+            selected_audit_row["material_prediction"] = copy.deepcopy(
+                material_prediction
+            )
+        audit_rows.append(selected_audit_row)
 
     coating_consistency = {
         "schema_version": COATING_CONSISTENCY_SCHEMA_VERSION,
@@ -3390,6 +3433,8 @@ def build_part_id_material_plan(
             "coating_consistency_schema_version": coating_consistency["schema_version"],
         }
     )
+    if selected_material_predictions:
+        provenance["material_prediction_mode"] = "catalog_family_first"
     plan = {
         "schema_version": ASSIGNMENT_SCHEMA_VERSION,
         "assignment_unit": "part_id",
@@ -3444,6 +3489,10 @@ def build_part_id_material_plan(
             ],
         },
     }
+    if selected_material_predictions:
+        audit_unsigned["summary"]["material_prediction_count"] = len(
+            selected_material_predictions
+        )
     audit = {
         **audit_unsigned,
         "integrity": {"document_sha256": _canonical_sha256(audit_unsigned)},

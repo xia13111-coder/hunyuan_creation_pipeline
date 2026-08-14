@@ -23,6 +23,7 @@ MATERIAL_ASSIGNMENT_UNITS = frozenset({"palette_group", "part_id"})
 MATERIAL_PARAMETER_CANDIDATE_MODES = frozenset(
     {"disabled", "evidence_gated_h0_h1"}
 )
+MATERIAL_PREDICTION_MODES = frozenset({"disabled", "catalog_family_first"})
 QWEN_MODEL_FAMILIES = frozenset(
     {"qwen3_5", "qwen3_vl", "openai_compatible"}
 )
@@ -107,6 +108,7 @@ class VisualMaterialConfig:
     quality_lighting_profile: str = "material-neutral"
     immutable_mdl_after_selection: bool = False
     material_parameter_candidate_mode: str = "disabled"
+    material_prediction_mode: str = "disabled"
     exact_mdl_tournament_max_candidates: int = 12
     exact_mdl_tournament_all_groups: bool = True
     exact_mdl_tournament_minimum_score_improvement: float = 0.015
@@ -438,6 +440,7 @@ def load_visual_material_config(
                 "selection_objective",
                 "assignment_unit",
                 "parameter_candidate_mode",
+                "prediction_mode",
                 "exact_mdl_tournament_max_candidates",
                 "exact_mdl_tournament_all_groups",
                 "exact_mdl_tournament_minimum_score_improvement",
@@ -555,6 +558,11 @@ def load_visual_material_config(
             "config.materials.selection_objective must be one of "
             f"{sorted(MATERIAL_SELECTION_OBJECTIVES)}"
         )
+    material_prediction_mode = require_choice(
+        materials.get("prediction_mode", "disabled"),
+        "config.materials.prediction_mode",
+        MATERIAL_PREDICTION_MODES,
+    )
     siglip_top_k = require_at_least_two(
         retrieval.get("siglip_top_k"),
         "config.retrieval.siglip_top_k",
@@ -568,6 +576,46 @@ def load_visual_material_config(
             "config.retrieval.final_top_k cannot exceed "
             "config.retrieval.siglip_top_k"
         )
+    if material_prediction_mode == "catalog_family_first":
+        if (
+            require_choice(
+                materials.get("assignment_unit", "palette_group"),
+                "config.materials.assignment_unit",
+                MATERIAL_ASSIGNMENT_UNITS,
+            )
+            != "part_id"
+        ):
+            raise ValueError(
+                "catalog_family_first requires materials.assignment_unit='part_id'"
+            )
+        if not require_bool(
+            materials.get("immutable_after_selection", False),
+            "config.materials.immutable_after_selection",
+        ):
+            raise ValueError(
+                "catalog_family_first requires materials.immutable_after_selection=true"
+            )
+        if (
+            require_choice(
+                materials.get("parameter_candidate_mode", "disabled"),
+                "config.materials.parameter_candidate_mode",
+                MATERIAL_PARAMETER_CANDIDATE_MODES,
+            )
+            != "disabled"
+        ):
+            raise ValueError(
+                "catalog_family_first requires materials.parameter_candidate_mode='disabled'"
+            )
+        if material_selection_objective != "semantic_compatible_visual":
+            raise ValueError(
+                "catalog_family_first requires "
+                "materials.selection_objective='semantic_compatible_visual'"
+            )
+        if retrieval_final_top_k != siglip_top_k:
+            raise ValueError(
+                "catalog_family_first requires retrieval.final_top_k to equal "
+                "retrieval.siglip_top_k so family filtering cannot omit catalog rows"
+            )
     qwen_max_new_tokens = require_positive_int(
         qwen.get("max_new_tokens"),
         "config.qwen.max_new_tokens",
@@ -858,6 +906,7 @@ def load_visual_material_config(
             "config.materials.parameter_candidate_mode",
             MATERIAL_PARAMETER_CANDIDATE_MODES,
         ),
+        material_prediction_mode=material_prediction_mode,
         exact_mdl_tournament_max_candidates=require_at_least_two(
             materials.get("exact_mdl_tournament_max_candidates", 12),
             "config.materials.exact_mdl_tournament_max_candidates",

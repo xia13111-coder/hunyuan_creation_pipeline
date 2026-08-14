@@ -25,6 +25,7 @@ from asset_pipeline.visual_materials.orchestrator import (
     _quality_can_measure_lighting_statistics,
     _quality_has_lighting_normalized_groups,
     _run_qwen_mvinverse_with_recovery,
+    _validate_catalog_family_first_result,
     _validated_exact_mdl_tournament_mapping,
     _verified_partial_live_resume_available,
 )
@@ -42,6 +43,75 @@ from asset_pipeline.visual_materials.quality import (
 
 
 class VisualMaterialBridgeTests(unittest.TestCase):
+    def test_family_first_assignment_binding_accepts_only_predicted_family(
+        self,
+    ) -> None:
+        paint = "mdl:Paint.mdl#Paint"
+        result = _validate_catalog_family_first_result(
+            qwen_document={
+                "material_predictions": [
+                    {
+                        "part_id": "P0001",
+                        "catalog_family": "paint",
+                        "surface_finish": "matte",
+                        "confidence": 0.91,
+                        "status": "APPLYABLE",
+                    }
+                ]
+            },
+            choices={"P0001": paint},
+            confidences={"P0001": 0.88},
+            catalog_document={"materials": [{"material_id": paint, "family": "paint"}]},
+        )
+
+        self.assertEqual(result["P0001"]["catalog_family"], "paint")
+
+    def test_family_first_assignment_binding_rejects_cross_family_choice(
+        self,
+    ) -> None:
+        glass = "mdl:Green_Glass.mdl#Green_Glass"
+        with self.assertRaisesRegex(RuntimeError, "outside its predicted"):
+            _validate_catalog_family_first_result(
+                qwen_document={
+                    "material_predictions": [
+                        {
+                            "part_id": "P0001",
+                            "catalog_family": "paint",
+                            "surface_finish": "matte",
+                            "confidence": 0.91,
+                            "status": "APPLYABLE",
+                        }
+                    ]
+                },
+                choices={"P0001": glass},
+                confidences={"P0001": 0.88},
+                catalog_document={
+                    "materials": [{"material_id": glass, "family": "glass"}]
+                },
+            )
+
+    def test_family_first_insufficient_prediction_cannot_be_assigned(self) -> None:
+        paint = "mdl:Paint.mdl#Paint"
+        with self.assertRaisesRegex(RuntimeError, "nonzero assignment confidence"):
+            _validate_catalog_family_first_result(
+                qwen_document={
+                    "material_predictions": [
+                        {
+                            "part_id": "P0001",
+                            "catalog_family": "unknown",
+                            "surface_finish": "unknown",
+                            "confidence": 0.30,
+                            "status": "INSUFFICIENT_EVIDENCE",
+                        }
+                    ]
+                },
+                choices={"P0001": paint},
+                confidences={"P0001": 0.30},
+                catalog_document={
+                    "materials": [{"material_id": paint, "family": "paint"}]
+                },
+            )
+
     def test_part_id_lock_ignores_palette_group_disagreement_contract(self) -> None:
         self.assertFalse(_palette_group_disagreement_contract_applies("part_id"))
         self.assertTrue(_palette_group_disagreement_contract_applies("palette_group"))
@@ -1122,6 +1192,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         self.assertEqual(config.material_assignment_unit, "palette_group")
         self.assertEqual(config.quality_lighting_profile, "material-neutral")
         self.assertFalse(config.immutable_mdl_after_selection)
+        self.assertEqual(config.material_prediction_mode, "disabled")
         self.assertEqual(
             config.material_selection_objective,
             "semantic_compatible_visual",
@@ -1167,6 +1238,66 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             config.final_visual_gate_minimum_owner_local_resolved_fraction,
             0.50,
         )
+
+    def test_config_accepts_catalog_family_first_material_prediction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path, _isaac, _references = self._fixture(Path(temp_dir))
+            document = json.loads(config_path.read_text(encoding="utf-8"))
+            document["materials"].update(
+                {
+                    "assignment_unit": "part_id",
+                    "immutable_after_selection": True,
+                    "parameter_candidate_mode": "disabled",
+                    "prediction_mode": "catalog_family_first",
+                    "selection_objective": "semantic_compatible_visual",
+                }
+            )
+            document["retrieval"]["final_top_k"] = document["retrieval"]["siglip_top_k"]
+            config_path.write_text(json.dumps(document), encoding="utf-8")
+
+            config = load_visual_material_config(config_path)
+
+        self.assertEqual(config.material_prediction_mode, "catalog_family_first")
+        self.assertEqual(config.material_assignment_unit, "part_id")
+        self.assertTrue(config.immutable_mdl_after_selection)
+        self.assertEqual(config.material_parameter_candidate_mode, "disabled")
+        self.assertEqual(config.retrieval_final_top_k, config.siglip_top_k)
+
+    def test_config_rejects_incomplete_catalog_family_first_contract(self) -> None:
+        invalid_mutations = (
+            (
+                lambda document: document["materials"].update(
+                    {"parameter_candidate_mode": "evidence_gated_h0_h1"}
+                ),
+                "parameter_candidate_mode",
+            ),
+            (
+                lambda document: document["retrieval"].update({"final_top_k": 32}),
+                "final_top_k",
+            ),
+        )
+        for mutation, expected_message in invalid_mutations:
+            with self.subTest(expected_message=expected_message):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    config_path, _isaac, _references = self._fixture(Path(temp_dir))
+                    document = json.loads(config_path.read_text(encoding="utf-8"))
+                    document["materials"].update(
+                        {
+                            "assignment_unit": "part_id",
+                            "immutable_after_selection": True,
+                            "parameter_candidate_mode": "disabled",
+                            "prediction_mode": "catalog_family_first",
+                            "selection_objective": "semantic_compatible_visual",
+                        }
+                    )
+                    document["retrieval"]["final_top_k"] = document["retrieval"][
+                        "siglip_top_k"
+                    ]
+                    mutation(document)
+                    config_path.write_text(json.dumps(document), encoding="utf-8")
+
+                    with self.assertRaisesRegex(ValueError, expected_message):
+                        load_visual_material_config(config_path)
 
     def test_config_accepts_remote_gpt_without_local_model_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1238,6 +1369,36 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         )
         self.assertEqual(document["qwen"]["mapping_verification_views"], 2)
         self.assertEqual(document["qwen"]["parallel_requests"], 1)
+
+    def test_family_first_profile_has_identity_only_contract(self) -> None:
+        profile = (
+            Path(__file__).resolve().parents[1]
+            / "tools"
+            / "qwen_material_pipeline"
+            / "configs"
+            / "pipeline"
+            / "manual_part_id_materials_family_first.json"
+        )
+        document = json.loads(profile.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            document["materials"]["prediction_mode"],
+            "catalog_family_first",
+        )
+        self.assertEqual(document["materials"]["assignment_unit"], "part_id")
+        self.assertTrue(document["materials"]["immutable_after_selection"])
+        self.assertEqual(
+            document["materials"]["parameter_candidate_mode"],
+            "disabled",
+        )
+        self.assertEqual(
+            document["materials"]["selection_objective"],
+            "semantic_compatible_visual",
+        )
+        self.assertEqual(
+            document["retrieval"]["final_top_k"],
+            document["retrieval"]["siglip_top_k"],
+        )
 
     def test_config_rejects_palette_token_ceiling_below_initial_budget(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

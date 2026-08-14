@@ -940,6 +940,22 @@ class PartIdProjectionTests(unittest.TestCase):
                     "P0002": "mdl:Blue.mdl#Blue",
                 },
                 qwen_confidences={"P0001": 0.73, "P0002": 0.55},
+                qwen_material_predictions={
+                    "P0001": {
+                        "part_id": "P0001",
+                        "catalog_family": "paint",
+                        "surface_finish": "matte",
+                        "confidence": 0.91,
+                        "status": "APPLYABLE",
+                    },
+                    "P0002": {
+                        "part_id": "P0002",
+                        "catalog_family": "paint",
+                        "surface_finish": "glossy",
+                        "confidence": 0.88,
+                        "status": "APPLYABLE",
+                    },
+                },
             )
             assignments = {
                 assignment["part_id"]: assignment for assignment in plan["assignments"]
@@ -966,6 +982,20 @@ class PartIdProjectionTests(unittest.TestCase):
             self.assertEqual(
                 assignments["P0001"]["provenance"]["qwen_confidence"],
                 0.73,
+            )
+            self.assertEqual(
+                assignments["P0001"]["provenance"]["material_prediction"],
+                {
+                    "part_id": "P0001",
+                    "catalog_family": "paint",
+                    "surface_finish": "matte",
+                    "confidence": 0.91,
+                    "status": "APPLYABLE",
+                },
+            )
+            self.assertEqual(
+                audit["summary"]["material_prediction_count"],
+                2,
             )
             for stale_field in (
                 "apply_action",

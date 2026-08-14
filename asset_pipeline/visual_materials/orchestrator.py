@@ -1291,6 +1291,78 @@ class PolicyPartIdStageResult:
     selection_lock_document: dict[str, Any] | None
 
 
+def _validate_catalog_family_first_result(
+    *,
+    qwen_document: Mapping[str, Any],
+    choices: Mapping[str, Any],
+    confidences: Mapping[str, float],
+    catalog_document: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    raw_predictions = qwen_document.get("material_predictions")
+    if not isinstance(raw_predictions, list):
+        raise RuntimeError(
+            "Part-ID Qwen result contains no material-family predictions"
+        )
+    predictions: dict[str, dict[str, Any]] = {}
+    for raw_prediction in raw_predictions:
+        part_id = (
+            raw_prediction.get("part_id")
+            if isinstance(raw_prediction, Mapping)
+            else None
+        )
+        if not isinstance(part_id, str) or part_id in predictions:
+            raise RuntimeError(
+                "Part-ID Qwen result has invalid material-family predictions"
+            )
+        predictions[part_id] = copy.deepcopy(dict(raw_prediction))
+    if set(predictions) != set(choices) or set(confidences) != set(choices):
+        raise RuntimeError(
+            "Part-ID Qwen material predictions, choices and confidences "
+            "do not have the same exact cover"
+        )
+    raw_catalog_materials = catalog_document.get("materials")
+    if not isinstance(raw_catalog_materials, list):
+        raise RuntimeError("NVIDIA MDL catalog has no materials")
+    catalog_by_id = {
+        str(row["material_id"]): row
+        for row in raw_catalog_materials
+        if isinstance(row, Mapping) and isinstance(row.get("material_id"), str)
+    }
+    for part_id, material_id in choices.items():
+        if not isinstance(material_id, str):
+            raise RuntimeError(f"Part-ID {part_id} has an invalid MDL choice")
+        prediction = predictions[part_id]
+        selected_catalog_row = catalog_by_id.get(material_id)
+        if not isinstance(selected_catalog_row, Mapping):
+            raise RuntimeError(
+                f"Part-ID {part_id} selected a material outside the catalog"
+            )
+        if prediction.get("status") == "APPLYABLE":
+            predicted_family = prediction.get("catalog_family")
+            selected_family = selected_catalog_row.get("family")
+            if (
+                not isinstance(predicted_family, str)
+                or not isinstance(selected_family, str)
+                or selected_family.strip().casefold()
+                != predicted_family.strip().casefold()
+            ):
+                raise RuntimeError(
+                    f"Part-ID {part_id} selected an MDL outside its predicted "
+                    "material family"
+                )
+        elif prediction.get("status") == "INSUFFICIENT_EVIDENCE":
+            if confidences[part_id] != 0.0:
+                raise RuntimeError(
+                    f"Part-ID {part_id} has insufficient material identity "
+                    "evidence but a nonzero assignment confidence"
+                )
+        else:
+            raise RuntimeError(
+                f"Part-ID {part_id} has an invalid material-prediction status"
+            )
+    return predictions
+
+
 def _run_policy_part_id_stage(
     context: VisualMaterialPipelineContext,
     *,
@@ -1776,6 +1848,8 @@ def _run_policy_part_id_stage(
             and config.material_parameter_candidate_mode == "evidence_gated_h0_h1"
         ):
             part_id_qwen_command.append("--allow-mdl-color-tuning")
+        if config.material_prediction_mode == "catalog_family_first":
+            part_id_qwen_command.append("--require-material-family-prediction")
         _run_stage(
             "part_id_qwen_rerank",
             part_id_qwen_command,
@@ -1787,6 +1861,20 @@ def _run_policy_part_id_stage(
             part_id_qwen_result,
             "Part-ID Qwen choices",
         )
+        if config.material_prediction_mode != "disabled":
+            qwen_part_integrity = qwen_part_document.get("integrity")
+            qwen_part_unsigned = copy.deepcopy(qwen_part_document)
+            qwen_part_unsigned.pop("integrity", None)
+            if not isinstance(qwen_part_integrity, Mapping) or qwen_part_integrity.get(
+                "document_sha256"
+            ) != canonical_sha256(qwen_part_unsigned):
+                raise RuntimeError("Part-ID Qwen result failed its integrity seal")
+            if qwen_part_document.get("material_prediction_mode") != (
+                config.material_prediction_mode
+            ):
+                raise RuntimeError(
+                    "Part-ID Qwen material-prediction mode does not match the config"
+                )
         qwen_part_choices = qwen_part_document.get("choices")
         if not isinstance(qwen_part_choices, dict):
             raise RuntimeError("Part-ID Qwen result contains no choices")
@@ -1798,10 +1886,24 @@ def _run_policy_part_id_stage(
             and isinstance(row.get("confidence"), (int, float))
             and not isinstance(row.get("confidence"), bool)
         }
+        qwen_material_predictions: dict[str, dict[str, Any]] | None = None
+        if config.material_prediction_mode == "catalog_family_first":
+            qwen_material_predictions = _validate_catalog_family_first_result(
+                qwen_document=qwen_part_document,
+                choices=qwen_part_choices,
+                confidences=qwen_part_confidences,
+                catalog_document=read_object(
+                    effective_catalog,
+                    "material-family-first NVIDIA MDL catalog",
+                ),
+            )
         appearance_component_document: dict[str, Any] | None = None
         appearance_component_retrieval_document: dict[str, Any] | None = None
         appearance_component_qwen_document: dict[str, Any] | None = None
-        if appearance_components_report.is_file():
+        if (
+            config.material_prediction_mode == "disabled"
+            and appearance_components_report.is_file()
+        ):
             candidate_component_document = read_object(
                 appearance_components_report,
                 "photo-supported appearance components",
@@ -1948,6 +2050,7 @@ def _run_policy_part_id_stage(
             ),
             qwen_choices=qwen_part_choices,
             qwen_confidences=qwen_part_confidences,
+            qwen_material_predictions=qwen_material_predictions,
             allow_color_parameters=(
                 not config.immutable_mdl_after_selection
                 and config.material_parameter_candidate_mode == "evidence_gated_h0_h1"
@@ -1956,7 +2059,10 @@ def _run_policy_part_id_stage(
                 source_registry,
                 "Part-ID source registry for coating consistency",
             ),
-            enforce_coating_consistency=(appearance_component_document is None),
+            enforce_coating_consistency=(
+                appearance_component_document is None
+                and config.material_prediction_mode == "disabled"
+            ),
         )
         if (
             appearance_component_document is not None
@@ -2005,7 +2111,7 @@ def _run_policy_part_id_stage(
                 f"constrained {component_summary['appearance_component_constrained_part_count']} "
                 "Part IDs. Each selected NVIDIA Base MDL remains immutable.",
             )
-        else:
+        elif config.material_prediction_mode == "disabled":
             log_message(
                 log_cb,
                 "Automatic same-coating consistency passed: "
@@ -2013,6 +2119,18 @@ def _run_policy_part_id_stage(
                 f"{coating_summary['constrained_part_count']} Part IDs; "
                 f"{coating_summary['material_changed_part_count']} independent "
                 "material choices were unified without palette G-groups.",
+            )
+        else:
+            prediction_summary = qwen_part_document.get("summary", {})
+            log_message(
+                log_cb,
+                "Material-family-first Part-ID assignment completed: "
+                f"{prediction_summary.get('material_prediction_applyable_count', 0)} "
+                "predictions were applyable; "
+                f"{prediction_summary.get('material_prediction_insufficient_evidence_count', 0)} "
+                "parts retained their fallback; cross-family fallback count=0. "
+                "No colour parameters or appearance-component identity sharing "
+                "were allowed in this stage.",
             )
 
     plan = read_object(effective_material_plan, "material plan")
@@ -2768,6 +2886,7 @@ def _run_visual_qa_stage(
     )
     if (
         config.material_assignment_unit == "part_id"
+        and config.material_prediction_mode == "disabled"
         and config.immutable_mdl_after_selection
         and all(path.is_file() for path in component_actual_tournament_inputs)
     ):
@@ -7168,6 +7287,7 @@ def _run_finalize_assignment_stage(
         ),
         "immutable_mdl_after_selection": config.immutable_mdl_after_selection,
         "material_parameter_candidate_mode": (config.material_parameter_candidate_mode),
+        "material_prediction_mode": config.material_prediction_mode,
         "part_id_parameter_tournament": (
             str(part_id_parameter_tournament_audit.resolve(strict=True))
             if part_id_parameter_tournament_audit.is_file()
