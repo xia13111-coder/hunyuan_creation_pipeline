@@ -699,7 +699,6 @@ def apply_fixed_component_mdl_choices(
     component_evidence: Mapping[str, Any],
     component_retrieval: Mapping[str, Any],
     component_qwen_choices: Mapping[str, Any],
-    authorized_component_ids: Sequence[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Apply one Qwen-chosen fixed MDL per accepted visual component.
 
@@ -709,29 +708,6 @@ def apply_fixed_component_mdl_choices(
     """
 
     components = _component_rows(appearance_components)
-    expected_components = {row["component_id"] for row in components}
-    if authorized_component_ids is None:
-        authorized_components = set(expected_components)
-        component_authorization_mode = "all_accepted_appearance_components"
-    else:
-        if isinstance(authorized_component_ids, (str, bytes)):
-            raise AppearanceComponentMaterialError(
-                "authorized component IDs must be a sequence"
-            )
-        authorized_component_rows = list(authorized_component_ids)
-        if (
-            len(authorized_component_rows) != len(set(authorized_component_rows))
-            or any(
-                not isinstance(component_id, str) or not component_id
-                for component_id in authorized_component_rows
-            )
-            or not set(authorized_component_rows).issubset(expected_components)
-        ):
-            raise AppearanceComponentMaterialError(
-                "authorized component IDs are invalid"
-            )
-        authorized_components = set(authorized_component_rows)
-        component_authorization_mode = "caller_authorized_physical_consistency_subset"
     part_evidence = _part_evidence_by_id(part_id_evidence)
     if component_evidence.get("schema_version") != COMPONENT_EVIDENCE_SCHEMA_VERSION:
         raise AppearanceComponentMaterialError("unsupported component selection evidence")
@@ -779,6 +755,7 @@ def apply_fixed_component_mdl_choices(
         for row in retrieval_groups
         if isinstance(row, Mapping) and isinstance(row.get("group_id"), str)
     }
+    expected_components = {row["component_id"] for row in components}
     if set(retrieval_by_component) != expected_components:
         raise AppearanceComponentMaterialError(
             "component retrieval does not exactly cover accepted components"
@@ -829,8 +806,6 @@ def apply_fixed_component_mdl_choices(
     selection_records: list[dict[str, Any]] = []
     for component in components:
         component_id = component["component_id"]
-        if component_id not in authorized_components:
-            continue
         material_id = raw_choices.get(component_id)
         if not isinstance(material_id, str) or not material_id:
             raise AppearanceComponentMaterialError(
@@ -932,11 +907,6 @@ def apply_fixed_component_mdl_choices(
                 "component_evidence_sha256": component_evidence_sha256,
                 "component_retrieval_sha256": _canonical_sha256(component_retrieval),
                 "component_qwen_choices_sha256": _canonical_sha256(component_qwen_choices),
-                "component_authorization_mode": component_authorization_mode,
-                "authorized_component_ids": sorted(authorized_components),
-                "excluded_component_ids": sorted(
-                    expected_components - authorized_components
-                ),
                 "one_fixed_mdl_per_component": True,
                 "mdl_parameter_mutation_allowed": False,
                 "selections": selection_records,
@@ -945,7 +915,7 @@ def apply_fixed_component_mdl_choices(
             "coating_consistency_replaced_by": "photo_supported_appearance_components",
         }
     )
-    plan["photo_appearance_components_used"] = bool(selection_records)
+    plan["photo_appearance_components_used"] = True
     plan["coating_consistency_used"] = False
     # Downstream Part-ID quality gating predates this photo-supported stage and
     # requires a successful consistency contract.  Publish an explicit PASS

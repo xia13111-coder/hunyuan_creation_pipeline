@@ -226,28 +226,6 @@ class AppearanceComponentMaterialTests(unittest.TestCase):
                 )
             self.assertEqual(audit["summary"]["appearance_component_count"], 1)
 
-            independent_plan, independent_audit = apply_fixed_component_mdl_choices(
-                base_plan=base_plan,
-                base_audit=base_audit,
-                appearance_components=components,
-                part_id_evidence=evidence,
-                component_evidence=component_evidence,
-                component_retrieval=retrieval,
-                component_qwen_choices=qwen,
-                authorized_component_ids=[],
-            )
-            self.assertEqual(
-                {row["material_id"] for row in independent_plan["assignments"]},
-                {"mdl:Metals/Chrome.mdl#Chrome"},
-            )
-            self.assertFalse(independent_plan["photo_appearance_components_used"])
-            selection_audit = independent_audit[
-                "appearance_component_mdl_selection"
-            ]
-            self.assertEqual(selection_audit["selections"], [])
-            self.assertEqual(selection_audit["authorized_component_ids"], [])
-            self.assertEqual(selection_audit["excluded_component_ids"], ["AC_green"])
-
     def test_component_qwen_reuses_bounded_candidate_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

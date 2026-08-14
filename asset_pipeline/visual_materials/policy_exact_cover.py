@@ -34,10 +34,6 @@ from .policy_contract import (
 from qwen_material_pipeline.evidence.palette_fusion import (
     is_verified_unresolved_pixel_chromatic_group,
 )
-from qwen_material_pipeline.materials.policy_exact_cover import (
-    PolicyExactCoverError,
-    build_policy_exact_cover,
-)
 
 
 def _policy_checkpoint_matches_requested_overrides(
@@ -773,7 +769,6 @@ def _validate_policy_exact_cover_bundle(
     mvinverse_pbr_evidence: dict[str, Any],
     whitelist: dict[str, Any],
     palette_fusion: dict[str, Any] | None = None,
-    part_id_evidence: dict[str, Any] | None = None,
     expected_source_visual_strategy: str | None = None,
     expected_policy_overrides: Mapping[str, Any] | None = None,
     expected_immutable_mdl_after_selection: bool = False,
@@ -802,47 +797,6 @@ def _validate_policy_exact_cover_bundle(
     if palette_fusion is not None:
         expected_hashes["palette_fusion_sha256"] = canonical_sha256(
             palette_fusion
-        )
-    if part_id_evidence is not None:
-        if not isinstance(expected_policy_overrides, Mapping):
-            raise RuntimeError(
-                "Policy Part-ID evidence convergence requires its exact source "
-                "policy document"
-            )
-        unsigned_part_id_evidence = dict(part_id_evidence)
-        part_id_integrity = unsigned_part_id_evidence.pop("integrity", None)
-        raw_evidence_inputs = part_id_evidence.get("inputs")
-        registry_input_hashes = [
-            raw_input.get("document_sha256")
-            for raw_input in (
-                raw_evidence_inputs
-                if isinstance(raw_evidence_inputs, list)
-                else []
-            )
-            if isinstance(raw_input, dict)
-            and raw_input.get("label") == "rendered_registry"
-        ]
-        if (
-            part_id_evidence.get("schema_version")
-            != "qwen-part-id-reference-evidence/v1"
-            or part_id_evidence.get("assignment_unit") != "part_id"
-            or not isinstance(part_id_integrity, dict)
-            or part_id_integrity.get("document_sha256")
-            != canonical_sha256(unsigned_part_id_evidence)
-            or registry_input_hashes != [canonical_sha256(registry)]
-        ):
-            raise RuntimeError(
-                "Policy Part-ID evidence is invalid or belongs to another registry"
-            )
-        expected_hashes["part_id_evidence_sha256"] = canonical_sha256(
-            part_id_evidence
-        )
-        expected_hashes["source_policy_sha256"] = canonical_sha256(
-            dict(expected_policy_overrides)
-        )
-    elif "part_id_evidence_sha256" in provenance:
-        raise RuntimeError(
-            "Policy exact-cover plan requires its bound Part-ID evidence"
         )
     for field, expected in expected_hashes.items():
         if provenance.get(field) != expected:
@@ -924,80 +878,6 @@ def _validate_policy_exact_cover_bundle(
         raise RuntimeError(
             "Policy exact-cover plan does not cover the registry exactly once"
         )
-    if part_id_evidence is not None:
-        raw_evidence_parts = part_id_evidence.get("parts")
-        evidence_status_by_part: dict[str, str] = {}
-        if not isinstance(raw_evidence_parts, list):
-            raise RuntimeError("Policy Part-ID evidence has no parts")
-        for index, raw_evidence_part in enumerate(raw_evidence_parts):
-            if not isinstance(raw_evidence_part, dict):
-                raise RuntimeError(
-                    f"Policy Part-ID evidence part {index} is invalid"
-                )
-            part_id = raw_evidence_part.get("part_id")
-            status = raw_evidence_part.get("status")
-            observations = raw_evidence_part.get("observations")
-            if (
-                not isinstance(part_id, str)
-                or not part_id
-                or part_id in evidence_status_by_part
-                or status not in {"observed", "unobserved"}
-                or not isinstance(observations, list)
-                or (status == "observed" and not observations)
-                or (status == "unobserved" and observations)
-            ):
-                raise RuntimeError(
-                    f"Policy Part-ID evidence part {index} is malformed"
-                )
-            evidence_status_by_part[part_id] = str(status)
-        if set(evidence_status_by_part) != set(registry_ids):
-            raise RuntimeError(
-                "Policy Part-ID evidence does not exactly cover the registry"
-            )
-        assignment_by_part = {
-            str(item["part_id"]): item
-            for item in assignments
-            if isinstance(item, dict)
-        }
-        group_keys = {"canonical_group_id", "material_region_group_id", "group_id"}
-        unobserved_part_ids = {
-            part_id
-            for part_id, status in evidence_status_by_part.items()
-            if status == "unobserved"
-        }
-        invalid_hidden_parts = []
-        for part_id in sorted(unobserved_part_ids):
-            assignment = assignment_by_part[part_id]
-            assignment_provenance = assignment.get("provenance")
-            if (
-                assignment.get("status") != POLICY_FALLBACK_STATUS
-                or any(assignment.get(key) is not None for key in group_keys)
-                or not isinstance(assignment_provenance, dict)
-                or any(
-                    assignment_provenance.get(key) is not None
-                    for key in group_keys
-                )
-            ):
-                invalid_hidden_parts.append(part_id)
-        convergence = audit.get("part_id_evidence_convergence")
-        evidence_summary = part_id_evidence.get("summary")
-        if (
-            invalid_hidden_parts
-            or not isinstance(evidence_summary, dict)
-            or evidence_summary.get("registry_part_count") != len(registry_ids)
-            or evidence_summary.get("unobserved_part_count")
-            != len(unobserved_part_ids)
-            or not isinstance(convergence, dict)
-            or convergence.get("state") != "final_visibility_applied"
-            or convergence.get("part_id_evidence_sha256")
-            != canonical_sha256(part_id_evidence)
-            or convergence.get("unobserved_part_count")
-            != len(unobserved_part_ids)
-        ):
-            raise RuntimeError(
-                "Policy Part-ID evidence convergence is inconsistent; "
-                f"invalid hidden parts={invalid_hidden_parts[:20]}"
-            )
 
     # A parent Mesh binding does not override an existing materialBind
     # GeomSubset. New registries therefore carry a hash-bound inventory of
@@ -1276,32 +1156,6 @@ def _validate_policy_exact_cover_bundle(
         ):
             raise RuntimeError(
                 "Policy exact-cover source visual strategy audit is inconsistent"
-            )
-    if part_id_evidence is not None:
-        try:
-            replay_plan, replay_audit = build_policy_exact_cover(
-                registry=registry,
-                staged_result=staged_result,
-                confidence_gate=confidence_gate,
-                whitelist=whitelist,
-                policy=expected_policy_overrides,
-                base_plan=base_plan,
-                group_materials=group_materials,
-                mvinverse_pbr_evidence=mvinverse_pbr_evidence,
-                palette_fusion=palette_fusion,
-                part_id_evidence=part_id_evidence,
-                acknowledge_policy_fallback=True,
-                immutable_mdl_after_selection=(
-                    expected_immutable_mdl_after_selection
-                ),
-            )
-        except PolicyExactCoverError as exc:
-            raise RuntimeError(
-                f"Policy Part-ID evidence replay failed closed: {exc}"
-            ) from exc
-        if plan != replay_plan or audit != replay_audit:
-            raise RuntimeError(
-                "Policy Part-ID evidence convergence differs from exact trusted replay"
             )
     return fallback_count
 

@@ -80,7 +80,6 @@ GROUP_MATERIALS_SCHEMA_VERSION = "qwen-palette-material/v1"
 MVINVERSE_SCHEMA_VERSION = "qwen-mvinverse-pbr-evidence/v1"
 PALETTE_FUSION_SCHEMA_VERSION = "qwen-multiview-palette-fusion/v1"
 CANONICAL_PALETTE_SCHEMA_VERSION = "qwen-canonical-material-palette/v1"
-PART_ID_EVIDENCE_SCHEMA_VERSION = "qwen-part-id-reference-evidence/v1"
 FALLBACK_STATUS = "policy_fallback"
 # The production policy is bounded to the configured NVIDIA ``Base`` root.
 # IDs are therefore relative to that root rather than to its ``Materials``
@@ -257,97 +256,6 @@ def _whitelist_ids(document: Mapping[str, Any]) -> set[str]:
             "whitelist.material_ids must be non-empty and unique"
         )
     return set(identifiers)
-
-
-def _part_id_evidence_statuses(
-    document: Mapping[str, Any] | None,
-    *,
-    registry: Mapping[str, Any],
-    registry_ids: set[str],
-) -> dict[str, str]:
-    """Validate the final Part-ID visibility evidence used by policy fallback.
-
-    The exact-cover policy is normally authored before the relatively expensive
-    local Part-ID projection stage.  A caller may supply that final evidence on
-    a deterministic second pass.  Doing so prevents a CAD part that proved
-    hidden in every reference view from inheriting any earlier palette/group
-    choice while preserving the legacy first-pass behaviour when no evidence
-    is supplied.
-    """
-
-    if document is None:
-        return {}
-    if (
-        document.get("schema_version") != PART_ID_EVIDENCE_SCHEMA_VERSION
-        or document.get("assignment_unit") != "part_id"
-    ):
-        raise PolicyExactCoverError(
-            "Part-ID evidence has an unsupported schema or assignment unit"
-        )
-    integrity = document.get("integrity")
-    unsigned = dict(document)
-    unsigned.pop("integrity", None)
-    if (
-        not isinstance(integrity, Mapping)
-        or integrity.get("document_sha256") != _canonical_sha256(unsigned)
-    ):
-        raise PolicyExactCoverError("Part-ID evidence failed its integrity seal")
-    raw_inputs = document.get("inputs")
-    rendered_registry_inputs = [
-        raw_input
-        for raw_input in (raw_inputs if isinstance(raw_inputs, list) else [])
-        if isinstance(raw_input, Mapping)
-        and raw_input.get("label") == "rendered_registry"
-    ]
-    if (
-        not isinstance(raw_inputs, list)
-        or len(rendered_registry_inputs) != 1
-        or rendered_registry_inputs[0].get("document_sha256")
-        != _canonical_sha256(registry)
-    ):
-        raise PolicyExactCoverError(
-            "Part-ID evidence is not bound to the policy rendered registry"
-        )
-    raw_parts = document.get("parts")
-    if not isinstance(raw_parts, list):
-        raise PolicyExactCoverError("Part-ID evidence has no parts")
-    statuses: dict[str, str] = {}
-    for index, raw_part in enumerate(raw_parts):
-        if not isinstance(raw_part, Mapping):
-            raise PolicyExactCoverError(
-                f"Part-ID evidence part {index} is not an object"
-            )
-        part_id = raw_part.get("part_id")
-        status = raw_part.get("status")
-        observations = raw_part.get("observations")
-        if (
-            not isinstance(part_id, str)
-            or not part_id
-            or part_id in statuses
-            or status not in {"observed", "unobserved"}
-            or not isinstance(observations, list)
-            or (status == "observed" and not observations)
-            or (status == "unobserved" and observations)
-        ):
-            raise PolicyExactCoverError(
-                f"Part-ID evidence part {index} is malformed"
-            )
-        statuses[part_id] = str(status)
-    if set(statuses) != registry_ids:
-        raise PolicyExactCoverError(
-            "Part-ID evidence does not exactly cover the policy registry"
-        )
-    summary = document.get("summary")
-    observed_count = sum(status == "observed" for status in statuses.values())
-    if (
-        not isinstance(summary, Mapping)
-        or summary.get("registry_part_count") != len(registry_ids)
-        or summary.get("observed_part_count") != observed_count
-        or summary.get("unobserved_part_count")
-        != len(registry_ids) - observed_count
-    ):
-        raise PolicyExactCoverError("Part-ID evidence summary is inconsistent")
-    return statuses
 
 
 def _registry_source_material_bind_subsets(
@@ -1235,7 +1143,6 @@ def _retain_non_authoring_mapping_lineage(
     gate_records: Mapping[str, Mapping[str, Any]],
     confidence_gate: Mapping[str, Any],
     palette_fusion: Mapping[str, Any] | None,
-    excluded_part_ids: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Retain a REVIEW mapping strictly as a provisional audit hypothesis.
 
@@ -1265,9 +1172,6 @@ def _retain_non_authoring_mapping_lineage(
         }
 
     for part_id in sorted(output):
-        if part_id in excluded_part_ids:
-            rejection_counts["PART_ID_UNOBSERVED"] += 1
-            continue
         assignment = output[part_id]
         if assignment.get("status") != FALLBACK_STATUS:
             continue
@@ -1414,7 +1318,6 @@ def _propagate_non_authoring_mapping_lineage(
     parts: Sequence[Mapping[str, Any]],
     output: Mapping[str, dict[str, Any]],
     cluster_keys: Sequence[str],
-    excluded_part_ids: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Propagate only a provisional audit hypothesis across exact identities.
 
@@ -1440,8 +1343,6 @@ def _propagate_non_authoring_mapping_lineage(
                 continue
             sources: list[tuple[str, Mapping[str, Any]]] = []
             for part_id in part_ids:
-                if part_id in excluded_part_ids:
-                    continue
                 assignment = output[part_id]
                 provenance = assignment.get("provenance")
                 if not isinstance(provenance, Mapping):
@@ -1520,8 +1421,6 @@ def _propagate_non_authoring_mapping_lineage(
                 }
             )
             for part_id in part_ids:
-                if part_id in excluded_part_ids:
-                    continue
                 assignment = output[part_id]
                 if assignment.get("status") != FALLBACK_STATUS:
                     continue
@@ -2807,7 +2706,6 @@ def build_policy_exact_cover(
     group_materials: Mapping[str, Any] | None = None,
     mvinverse_pbr_evidence: Mapping[str, Any] | None = None,
     palette_fusion: Mapping[str, Any] | None = None,
-    part_id_evidence: Mapping[str, Any] | None = None,
     immutable_mdl_after_selection: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return an exact-cover plan and a hash-bound best-effort audit."""
@@ -2820,23 +2718,9 @@ def build_policy_exact_cover(
         raise PolicyExactCoverError(
             "immutable_mdl_after_selection must be boolean"
         )
-    if part_id_evidence is not None and policy is None:
-        raise PolicyExactCoverError(
-            "Part-ID evidence convergence requires an explicit source policy"
-        )
     allowed_material_ids = _whitelist_ids(whitelist)
     parts, parts_by_id = _registry_parts(registry)
     registry_ids = set(parts_by_id)
-    part_id_evidence_statuses = _part_id_evidence_statuses(
-        part_id_evidence,
-        registry=registry,
-        registry_ids=registry_ids,
-    )
-    unobserved_part_ids = {
-        part_id
-        for part_id, status in part_id_evidence_statuses.items()
-        if status == "unobserved"
-    }
     candidates = _candidate_assignments(
         staged_result,
         registry_ids=registry_ids,
@@ -2908,8 +2792,6 @@ def build_policy_exact_cover(
     # propagation.  A model's staged ``auto`` label is not sufficient.
     trusted_identity_sources = dict(gate_auto)
     trusted_identity_sources.update(autonomous_base)
-    for part_id in unobserved_part_ids:
-        trusted_identity_sources.pop(part_id, None)
     for cluster_key in (
         key for key in candidate_auto_keys if key != "existing_visual_material"
     ):
@@ -2934,14 +2816,6 @@ def build_policy_exact_cover(
             tier="trusted_authored_material_binding",
             conflicts=conflicts,
         )
-
-    # A final Part-ID projection has stronger visibility authority than the
-    # earlier palette/group and exact-identity hypotheses.  Remove every
-    # hidden part from those candidate outputs so it can re-enter only through
-    # the independent per-part policy rules below.  This is intentionally a
-    # no-op for legacy/current callers, which do not provide Part-ID evidence.
-    for part_id in unobserved_part_ids:
-        output.pop(part_id, None)
 
     requested_strategy = effective_policy.get("default_strategy")
     if requested_strategy not in {"dominant_staged_auto", "declared_material"}:
@@ -2981,11 +2855,7 @@ def build_policy_exact_cover(
         if part_id in output:
             continue
         if source_visual_strategy == "neutralize_unverified":
-            corroboration = (
-                None
-                if part_id in unobserved_part_ids
-                else corroborated_source_visual.get(part_id)
-            )
+            corroboration = corroborated_source_visual.get(part_id)
             if corroboration is not None:
                 group_id = str(corroboration["canonical_group_id"])
                 material_selection = corroborated_group_materials.get(group_id)
@@ -3207,14 +3077,12 @@ def build_policy_exact_cover(
         gate_records=gate_records,
         confidence_gate=confidence_gate,
         palette_fusion=palette_fusion,
-        excluded_part_ids=unobserved_part_ids,
     )
     propagated_mapping_lineage_audit = (
         _propagate_non_authoring_mapping_lineage(
             parts=parts,
             output=output,
             cluster_keys=candidate_auto_keys,
-            excluded_part_ids=unobserved_part_ids,
         )
     )
     assignments = [output[str(part["part_id"])] for part in parts]
@@ -3344,16 +3212,6 @@ def build_policy_exact_cover(
                 if palette_fusion is not None
                 else {}
             ),
-            **(
-                {
-                    "part_id_evidence_sha256": _canonical_sha256(
-                        part_id_evidence
-                    ),
-                    "source_policy_sha256": _canonical_sha256(policy),
-                }
-                if part_id_evidence is not None
-                else {}
-            ),
             "whitelist_sha256": _canonical_sha256(whitelist),
             "policy_sha256": _canonical_sha256(effective_policy),
             **(
@@ -3406,18 +3264,6 @@ def build_policy_exact_cover(
         report_summary[
             "corroborated_source_visual_provisional_nvidia_mdl_count"
         ] = len(corroborated_source_visual_provisional_mdl_part_ids)
-    if part_id_evidence is not None:
-        report_summary.update(
-            {
-                "part_id_evidence_observed_count": (
-                    len(part_id_evidence_statuses) - len(unobserved_part_ids)
-                ),
-                "part_id_evidence_unobserved_count": len(unobserved_part_ids),
-                "part_id_evidence_constrained_policy_fallback_count": len(
-                    unobserved_part_ids
-                ),
-            }
-        )
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,
         "summary": report_summary,
@@ -3446,28 +3292,6 @@ def build_policy_exact_cover(
                 corroborated_source_visual_mdl_part_ids
             ),
         },
-        **(
-            {
-                "part_id_evidence_convergence": {
-                    "state": "final_visibility_applied",
-                    "assignment_unit": "part_id",
-                    "part_id_evidence_sha256": _canonical_sha256(
-                        part_id_evidence
-                    ),
-                    "source_policy_sha256": _canonical_sha256(policy),
-                    "observed_part_count": (
-                        len(part_id_evidence_statuses) - len(unobserved_part_ids)
-                    ),
-                    "unobserved_part_count": len(unobserved_part_ids),
-                    "unobserved_assignment_policy": (
-                        "independent_policy_only_no_palette_group_or_identity_"
-                        "propagation"
-                    ),
-                }
-            }
-            if part_id_evidence is not None
-            else {}
-        ),
         "selected_default_material_id": default_material,
         "requested_default_strategy": requested_strategy,
         "effective_default_strategy": "declared_material",

@@ -6,8 +6,6 @@ from pathlib import Path
 import pytest
 
 from qwen_material_pipeline.materials.catalog import (
-    CATALOG_SCHEMA_VERSION,
-    LEGACY_CATALOG_SCHEMA_VERSION,
     MaterialCatalog,
     MaterialCatalogError,
     MaterialPathError,
@@ -129,30 +127,8 @@ def test_catalog_json_is_stable_and_loaded_against_explicit_root(
     ]
     assert loaded.to_dict()["materials"] == first.to_dict()["materials"]
     document = json.loads(output.read_text(encoding="utf-8"))
-    assert document["schema_version"] == CATALOG_SCHEMA_VERSION == 2
-    assert document["surface_semantics_schema_version"] == (
-        "qwen-catalog-surface-semantics/v1"
-    )
+    assert document["schema_version"] == 1
     assert document["material_count"] == 3
-    assert all("surface_semantics" in item for item in document["materials"])
-
-
-def test_v1_catalog_load_is_enriched_with_surface_semantics(tmp_path: Path) -> None:
-    root = tmp_path / "Materials"
-    _write_fixture(root)
-    catalog = MaterialCatalog.scan(root)
-    document = catalog.to_dict()
-    document["schema_version"] = LEGACY_CATALOG_SCHEMA_VERSION
-    document.pop("surface_semantics_schema_version")
-    for record in document["materials"]:
-        record.pop("surface_semantics")
-    path = tmp_path / "legacy_catalog.json"
-    path.write_text(json.dumps(document), encoding="utf-8")
-
-    loaded = MaterialCatalog.load(path, material_root=root)
-
-    assert loaded.to_dict()["schema_version"] == CATALOG_SCHEMA_VERSION
-    assert all(record.surface_semantics for record in loaded.materials)
 
 
 def test_full_allowlist_exactly_contains_every_catalog_export(tmp_path: Path) -> None:
@@ -181,15 +157,6 @@ def test_miscellaneous_paint_is_classified_as_paint(tmp_path: Path) -> None:
     catalog = MaterialCatalog.scan(root)
 
     assert catalog.materials[0].family == "paint"
-    assert catalog.materials[0].surface_semantics == {
-        "schema_version": "qwen-catalog-surface-semantics/v1",
-        "compatible_substrates": ["metal", "polymer", "wood"],
-        "surface_treatment": "paint",
-        "optical_behavior": "opaque",
-        "finish": "matte",
-        "inference_source": "nvidia_path_name_and_authored_defaults/v1",
-        "confidence": "high",
-    }
 
 
 def test_structured_top_k_search_and_chinese_aliases(tmp_path: Path) -> None:

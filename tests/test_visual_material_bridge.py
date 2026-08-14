@@ -1119,7 +1119,6 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         self.assertEqual(config.siglip_top_k, 64)
         self.assertEqual(config.retrieval_final_top_k, 32)
         self.assertEqual(config.retrieval_batch_size, 24)
-        self.assertEqual(config.material_selection_pipeline_mode, "current")
         self.assertEqual(config.material_assignment_unit, "palette_group")
         self.assertEqual(config.quality_lighting_profile, "material-neutral")
         self.assertFalse(config.immutable_mdl_after_selection)
@@ -1465,95 +1464,6 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             config = load_visual_material_config(config_path)
 
         self.assertEqual(config.material_assignment_unit, "part_id")
-
-    def test_config_enables_bounded_semantic_hybrid_pipeline(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            config_path, _isaac, _references = self._fixture(Path(temp_dir))
-            document = json.loads(config_path.read_text(encoding="utf-8"))
-            document["materials"].update(
-                {
-                    "selection_pipeline_mode": "semantic_hybrid",
-                    "assignment_unit": "part_id",
-                    "immutable_after_selection": False,
-                    "parameter_candidate_mode": "evidence_gated_h0_h1",
-                    "selection_objective": "semantic_compatible_visual",
-                    "exact_mdl_tournament_max_candidates": 3,
-                }
-            )
-            config_path.write_text(json.dumps(document), encoding="utf-8")
-            config = load_visual_material_config(config_path)
-
-        self.assertEqual(config.material_selection_pipeline_mode, "semantic_hybrid")
-        self.assertEqual(config.material_assignment_unit, "part_id")
-        self.assertFalse(config.immutable_mdl_after_selection)
-        self.assertEqual(
-            config.material_parameter_candidate_mode,
-            "evidence_gated_h0_h1",
-        )
-        self.assertEqual(
-            config.material_selection_objective,
-            "semantic_compatible_visual",
-        )
-        self.assertEqual(config.exact_mdl_tournament_max_candidates, 3)
-
-    def test_config_rejects_semantic_hybrid_contract_drift(self) -> None:
-        invalid_values = {
-            "assignment_unit": "palette_group",
-            "immutable_after_selection": True,
-            "parameter_candidate_mode": "disabled",
-            "selection_objective": "visual_similarity",
-            "exact_mdl_tournament_max_candidates": 4,
-        }
-        for field, invalid_value in invalid_values.items():
-            with self.subTest(field=field), tempfile.TemporaryDirectory() as temp_dir:
-                config_path, _isaac, _references = self._fixture(Path(temp_dir))
-                document = json.loads(config_path.read_text(encoding="utf-8"))
-                document["materials"].update(
-                    {
-                        "selection_pipeline_mode": "semantic_hybrid",
-                        "assignment_unit": "part_id",
-                        "immutable_after_selection": False,
-                        "parameter_candidate_mode": "evidence_gated_h0_h1",
-                        "selection_objective": "semantic_compatible_visual",
-                        "exact_mdl_tournament_max_candidates": 3,
-                        field: invalid_value,
-                    }
-                )
-                config_path.write_text(json.dumps(document), encoding="utf-8")
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "semantic_hybrid.*requires.*" + field,
-                ):
-                    load_visual_material_config(config_path)
-
-    def test_semantic_hybrid_profile_uses_current_v2_catalog(self) -> None:
-        repository = Path(__file__).resolve().parents[1]
-        profile = (
-            repository
-            / "tools"
-            / "qwen_material_pipeline"
-            / "configs"
-            / "pipeline"
-            / "manual_part_id_materials_semantic_hybrid.json"
-        )
-        document = json.loads(profile.read_text(encoding="utf-8"))
-        materials = document["materials"]
-        catalog_path = (profile.parent / materials["catalog"]).resolve(strict=True)
-        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(materials["selection_pipeline_mode"], "semantic_hybrid")
-        self.assertEqual(materials["assignment_unit"], "part_id")
-        self.assertFalse(materials["immutable_after_selection"])
-        self.assertEqual(
-            materials["parameter_candidate_mode"],
-            "evidence_gated_h0_h1",
-        )
-        self.assertEqual(
-            materials["selection_objective"],
-            "semantic_compatible_visual",
-        )
-        self.assertEqual(materials["exact_mdl_tournament_max_candidates"], 3)
-        self.assertEqual(catalog["schema_version"], 2)
 
     def test_config_overrides_multigroup_tournament_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

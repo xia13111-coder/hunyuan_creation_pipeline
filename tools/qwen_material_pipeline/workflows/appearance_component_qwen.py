@@ -58,7 +58,6 @@ def run_component_qwen_rerank(
     output_dir: Path,
     batch_size: int = 4,
     candidate_count: int = 8,
-    require_material_prediction: bool = False,
 ) -> dict[str, Any]:
     if component_evidence.get("schema_version") != COMPONENT_EVIDENCE_SCHEMA_VERSION:
         raise ValueError("unsupported component evidence schema")
@@ -77,11 +76,7 @@ def run_component_qwen_rerank(
         output_dir=output_dir,
         batch_size=batch_size,
         candidate_count=candidate_count,
-        # The first pass still writes no parameters.  This flag only prevents
-        # a semantically correct, reviewed MDL from being rejected because its
-        # catalog swatch has not received the later same-ID H1 color yet.
-        allow_color_tuning=require_material_prediction,
-        require_material_prediction=require_material_prediction,
+        allow_color_tuning=False,
         entity_label="photo-supported appearance component",
     )
     raw.pop("integrity", None)
@@ -94,11 +89,7 @@ def run_component_qwen_rerank(
             "component_evidence_sha256": component_evidence["integrity"][
                 "document_sha256"
             ],
-            "selection_contract": (
-                "predicted_material_then_one_base_mdl_then_same_id_color_h1"
-                if require_material_prediction
-                else "one_immutable_base_mdl_per_component"
-            ),
+            "selection_contract": "one_immutable_base_mdl_per_component",
         }
     )
     return {**raw, "integrity": {"document_sha256": _canonical_sha256(raw)}}
@@ -118,11 +109,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--candidate-count", type=int, default=8)
     parser.add_argument("--max-new-tokens", type=int, default=1024)
-    parser.add_argument(
-        "--require-material-prediction",
-        action="store_true",
-        help="predict physical material semantics before selecting component MDLs",
-    )
     parser.add_argument(
         "--dtype", choices=("auto", "bfloat16", "float16", "float32"), default="bfloat16"
     )
@@ -157,7 +143,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_dir=args.output_dir.expanduser().resolve(),
             batch_size=args.batch_size,
             candidate_count=args.candidate_count,
-            require_material_prediction=args.require_material_prediction,
         )
     finally:
         runner.unload()
