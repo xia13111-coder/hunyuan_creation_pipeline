@@ -16,10 +16,13 @@ from qwen_material_pipeline.workflows.part_id_qwen import (
     _apply_component_identity_consensus,
     _apply_part_id_selective_regression,
     _compatibility_shortlist,
+    _direct_exact_library_match,
     _family_filtered_ranking,
     _identity_filtered_ranking,
     _identity_shortlist,
+    _physical_pbr_evidence,
     _promote_library_gap_candidates,
+    _rank_identity_candidates_with_pbr,
     _target_appearance,
     _validate_batch,
     run_part_id_qwen_rerank,
@@ -294,29 +297,34 @@ class PartIdQwenTests(unittest.TestCase):
                 require_material_family_prediction=True,
             )
 
-        self.assertEqual(runner.calls, 2)
+        self.assertEqual(runner.calls, 1)
         prediction_content = runner.payloads[0]["messages"][1]["content"]
         self.assertEqual(
             sum(row.get("type") == "image_url" for row in prediction_content),
             2,
         )
-        selection_prompt = runner.payloads[1]["messages"][1]["content"][-1]["text"]
-        self.assertIn('"visual_retrieval_scores_withheld": true', selection_prompt)
-        self.assertIn('"original_retrieval_rank": null', selection_prompt)
-        self.assertIn('"color_score": null', selection_prompt)
         self.assertEqual(result["material_prediction_mode"], "catalog_family_first")
         self.assertEqual(
             result["selection_order"],
             [
                 "physical_material_identity_prediction_without_color",
                 "exact_substrate_treatment_optical_filter",
-                "exact_material_or_corresponding_material_selection_without_color",
+                "full_catalog_mvinverse_pbr_exact_match_or_direct_assignment",
+                "qwen_corresponding_material_selection_only_when_unresolved",
                 "appearance_component_exact_mdl_consensus",
             ],
         )
         self.assertEqual(result["material_predictions"][0]["catalog_family"], "paint")
         self.assertEqual(result["choices"], {"P0001": paint_matte})
-        self.assertEqual(result["selections"][0]["confidence"], 0.88)
+        self.assertEqual(result["selections"][0]["confidence"], 0.92)
+        self.assertEqual(
+            result["selections"][0]["selection_authority"],
+            "unique_full_catalog_physical_contract",
+        )
+        self.assertEqual(result["qwen_raw_selections"], [])
+        self.assertEqual(
+            result["summary"]["direct_exact_library_assignment_count"], 1
+        )
         self.assertEqual(
             result["visual_compatibility_gate"]["parts"][0]["authorized_material_ids"],
             [paint_matte, paint_gloss],
@@ -472,6 +480,97 @@ class PartIdQwenTests(unittest.TestCase):
             [row["original_retrieval_rank"] for row in shortlist], [None, None]
         )
         self.assertTrue(all(row["color_evidence_used"] is False for row in shortlist))
+
+    def test_full_catalog_pbr_fingerprint_can_authorize_unique_exact_match(
+        self,
+    ) -> None:
+        plastic = "mdl:Plastic.mdl#Plastic"
+        abs_plastic = "mdl:Plastic_ABS.mdl#Plastic_ABS"
+        rows = _rank_identity_candidates_with_pbr(
+            [
+                {
+                    "material_id": plastic,
+                    "identity_match_tier": "exact_material_contract",
+                    "predicted_finish_match": False,
+                },
+                {
+                    "material_id": abs_plastic,
+                    "identity_match_tier": "exact_material_contract",
+                    "predicted_finish_match": False,
+                },
+            ],
+            descriptor={
+                "roughness_hint": 0.30,
+                "metallicity_hint": 0.02,
+                "mvinverse_albedo_median_rgb": [0.9, 0.1, 0.1],
+            },
+            profiles_by_id={
+                plastic: {
+                    "authored_mdl": {
+                        "reflection_roughness_constant": 0.50,
+                        "metallic_constant": 0.0,
+                    }
+                },
+                abs_plastic: {
+                    "authored_mdl": {
+                        "reflection_roughness_constant": 0.28,
+                        "metallic_constant": 0.0,
+                    }
+                },
+            },
+        )
+        prediction = {
+            "status": "APPLYABLE",
+            "identity_resolution": "exact_material",
+            "confidence": 0.92,
+            "surface_finish": "unknown",
+        }
+
+        match = _direct_exact_library_match(rows, prediction=prediction)
+
+        self.assertIsNotNone(match)
+        assert match is not None
+        self.assertEqual(match["material_id"], abs_plastic)
+        self.assertEqual(
+            match["authority"],
+            "unique_full_catalog_mvinverse_pbr_fingerprint",
+        )
+        self.assertEqual(
+            _physical_pbr_evidence(
+                {
+                    "roughness_hint": 0.30,
+                    "metallicity_hint": 0.02,
+                    "mvinverse_albedo_median_rgb": [0.9, 0.1, 0.1],
+                }
+            ),
+            {"roughness": 0.30, "metallic": 0.02},
+        )
+
+    def test_ambiguous_pbr_fingerprint_never_directly_assigns(self) -> None:
+        match = _direct_exact_library_match(
+            [
+                {
+                    "material_id": "mdl:A",
+                    "identity_match_tier": "exact_material_contract",
+                    "predicted_finish_match": False,
+                    "physical_pbr_mean_error": 0.03,
+                },
+                {
+                    "material_id": "mdl:B",
+                    "identity_match_tier": "exact_material_contract",
+                    "predicted_finish_match": False,
+                    "physical_pbr_mean_error": 0.05,
+                },
+            ],
+            prediction={
+                "status": "APPLYABLE",
+                "identity_resolution": "exact_material",
+                "confidence": 0.95,
+                "surface_finish": "unknown",
+            },
+        )
+
+        self.assertIsNone(match)
 
     def test_identity_filter_collapses_color_variants_to_generic_material(
         self,
@@ -632,8 +731,8 @@ class PartIdQwenTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(runner.calls, 2)
-        self.assertEqual(set(result["choices"].values()), {satin})
+        self.assertEqual(runner.calls, 1)
+        self.assertEqual(set(result["choices"].values()), {matte})
         self.assertEqual(
             {row["component_id"] for row in result["material_predictions"]},
             {"AC_1"},

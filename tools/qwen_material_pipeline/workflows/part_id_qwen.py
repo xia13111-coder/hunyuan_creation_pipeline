@@ -47,6 +47,8 @@ COLOR_CRITICAL_MAXIMUM_HUE_DISTANCE_DEGREES = 30.0
 COLOR_CRITICAL_MINIMUM_CANDIDATE_SATURATION = 0.10
 MINIMUM_MATERIAL_FAMILY_CONFIDENCE = 0.60
 MINIMUM_EXACT_TREATMENT_CONFIDENCE = 0.85
+MAXIMUM_DIRECT_EXACT_PBR_ERROR = 0.12
+MINIMUM_DIRECT_EXACT_PBR_MARGIN = 0.08
 MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH = 4
 MATERIAL_FINISH_OPTIONS = frozenset(
     {
@@ -652,6 +654,206 @@ def _colorless_material_identity_key(
     return ("_".join(identity_tokens), treatment, optical, finish)
 
 
+def _physical_pbr_evidence(
+    descriptor: Mapping[str, Any] | None,
+) -> dict[str, float]:
+    """Aggregate colour-free per-surface MVInverse evidence.
+
+    Appearance-component predictions carry the member descriptors one level
+    below the component descriptor.  Keeping this reader deliberately narrow
+    prevents albedo/RGB fields from leaking into the identity stage.
+    """
+
+    if not isinstance(descriptor, Mapping):
+        return {}
+    descriptors: list[Mapping[str, Any]] = [descriptor]
+    members = descriptor.get("member_descriptors")
+    if isinstance(members, Mapping):
+        descriptors.extend(
+            value for value in members.values() if isinstance(value, Mapping)
+        )
+    result: dict[str, float] = {}
+    for source_key, output_key in (
+        ("roughness_hint", "roughness"),
+        ("metallicity_hint", "metallic"),
+    ):
+        values = sorted(
+            float(value)
+            for row in descriptors
+            for value in [row.get(source_key)]
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and 0.0 <= float(value) <= 1.0
+        )
+        if values:
+            middle = len(values) // 2
+            result[output_key] = (
+                values[middle]
+                if len(values) % 2
+                else (values[middle - 1] + values[middle]) / 2.0
+            )
+    return result
+
+
+def _library_pbr_fingerprint(
+    profile: Mapping[str, Any] | None,
+) -> dict[str, float]:
+    """Return only authored scalar channels not overridden by a texture."""
+
+    authored = profile.get("authored_mdl") if isinstance(profile, Mapping) else None
+    if not isinstance(authored, Mapping):
+        return {}
+    orm_texture = (
+        authored.get("ORM_texture")
+        if authored.get("enable_ORM_texture") is True
+        else None
+    )
+    result: dict[str, float] = {}
+    for output_key, constant_key, texture_key in (
+        (
+            "roughness",
+            "reflection_roughness_constant",
+            "reflectionroughness_texture",
+        ),
+        ("metallic", "metallic_constant", "metallic_texture"),
+    ):
+        value = authored.get(constant_key)
+        if (
+            isinstance(orm_texture, str)
+            and orm_texture
+            or isinstance(authored.get(texture_key), str)
+            and authored.get(texture_key)
+        ):
+            continue
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and 0.0 <= float(value) <= 1.0
+        ):
+            result[output_key] = float(value)
+    return result
+
+
+def _rank_identity_candidates_with_pbr(
+    ranking: Sequence[Mapping[str, Any]],
+    *,
+    descriptor: Mapping[str, Any] | None,
+    profiles_by_id: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rank the full compatible catalog using colour-free physical evidence."""
+
+    observed = _physical_pbr_evidence(descriptor)
+    ranked: list[dict[str, Any]] = []
+    for raw in ranking:
+        row = dict(raw)
+        material_id = row.get("material_id")
+        fingerprint = _library_pbr_fingerprint(
+            profiles_by_id.get(material_id)
+            if isinstance(material_id, str)
+            else None
+        )
+        terms = {
+            key: abs(observed[key] - fingerprint[key])
+            for key in sorted(set(observed) & set(fingerprint))
+        }
+        mean_error = sum(terms.values()) / len(terms) if terms else None
+        row["physical_pbr_evidence"] = dict(observed)
+        row["library_pbr_fingerprint"] = fingerprint
+        row["physical_pbr_term_errors"] = terms
+        row["physical_pbr_mean_error"] = mean_error
+        row["physical_pbr_similarity"] = (
+            1.0 - mean_error if mean_error is not None else None
+        )
+        ranked.append(row)
+    ranked.sort(
+        key=lambda row: (
+            0 if row.get("predicted_finish_match") is True else 1,
+            (
+                float(row["physical_pbr_mean_error"])
+                if isinstance(row.get("physical_pbr_mean_error"), (int, float))
+                else float("inf")
+            ),
+            str(row["material_id"]),
+        )
+    )
+    return ranked
+
+
+def _direct_exact_library_match(
+    ranking: Sequence[Mapping[str, Any]],
+    *,
+    prediction: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Authorize a direct MDL only for a unique, high-confidence exact match.
+
+    A unique physical contract may be accepted without numeric PBR evidence.
+    When several exact MDLs share the contract, MVInverse must isolate one by
+    both absolute error and runner-up margin.  Ambiguity always falls back to
+    bounded Qwen comparison rather than guessing.
+    """
+
+    if (
+        prediction.get("status") != "APPLYABLE"
+        or prediction.get("identity_resolution") != "exact_material"
+        or float(prediction.get("confidence", 0.0))
+        < MINIMUM_EXACT_TREATMENT_CONFIDENCE
+    ):
+        return None
+    exact = [
+        dict(row)
+        for row in ranking
+        if row.get("identity_match_tier") == "exact_material_contract"
+    ]
+    finish = prediction.get("surface_finish")
+    if isinstance(finish, str) and finish != "unknown":
+        finish_matches = [
+            row for row in exact if row.get("predicted_finish_match") is True
+        ]
+        if finish_matches:
+            exact = finish_matches
+    if len(exact) == 1:
+        winner = exact[0]
+        return {
+            "material_id": winner["material_id"],
+            "authority": "unique_full_catalog_physical_contract",
+            "physical_pbr_mean_error": winner.get("physical_pbr_mean_error"),
+            "physical_pbr_runner_up_margin": None,
+            "physical_pbr_evidence": winner.get("physical_pbr_evidence", {}),
+            "library_pbr_fingerprint": winner.get("library_pbr_fingerprint", {}),
+        }
+    comparable = [
+        row
+        for row in exact
+        if isinstance(row.get("physical_pbr_mean_error"), (int, float))
+    ]
+    comparable.sort(
+        key=lambda row: (
+            float(row["physical_pbr_mean_error"]),
+            str(row["material_id"]),
+        )
+    )
+    if len(comparable) < 2:
+        return None
+    winner, runner_up = comparable[:2]
+    error = float(winner["physical_pbr_mean_error"])
+    margin = float(runner_up["physical_pbr_mean_error"]) - error
+    if (
+        error > MAXIMUM_DIRECT_EXACT_PBR_ERROR
+        or margin < MINIMUM_DIRECT_EXACT_PBR_MARGIN
+    ):
+        return None
+    return {
+        "material_id": winner["material_id"],
+        "authority": "unique_full_catalog_mvinverse_pbr_fingerprint",
+        "physical_pbr_mean_error": error,
+        "physical_pbr_runner_up_margin": margin,
+        "physical_pbr_evidence": winner.get("physical_pbr_evidence", {}),
+        "library_pbr_fingerprint": winner.get("library_pbr_fingerprint", {}),
+    }
+
+
 def _identity_filtered_ranking(
     *,
     ranking: Sequence[Mapping[str, Any]],
@@ -805,6 +1007,13 @@ def _identity_shortlist(
         rows.sort(
             key=lambda row: (
                 0 if row.get("predicted_finish_match") is True else 1,
+                (
+                    float(row["physical_pbr_mean_error"])
+                    if isinstance(
+                        row.get("physical_pbr_mean_error"), (int, float)
+                    )
+                    else float("inf")
+                ),
                 str(row["material_id"]),
             )
         )
@@ -855,6 +1064,15 @@ def _identity_shortlist(
                 "relaxed_constraints": [],
                 "conditional_h1_evaluation": False,
                 "color_evidence_used": False,
+                "physical_pbr_evidence": raw.get("physical_pbr_evidence", {}),
+                "library_pbr_fingerprint": raw.get(
+                    "library_pbr_fingerprint", {}
+                ),
+                "physical_pbr_term_errors": raw.get(
+                    "physical_pbr_term_errors", {}
+                ),
+                "physical_pbr_mean_error": raw.get("physical_pbr_mean_error"),
+                "physical_pbr_similarity": raw.get("physical_pbr_similarity"),
             }
         )
         shortlist.append(row)
@@ -885,6 +1103,9 @@ def _candidate_summary(
         "dino_score": None if withhold_color else row.get("dino_score"),
         "color_score": None if withhold_color else row.get("color_score"),
         "mvinverse_score": None if withhold_color else row.get("mvinverse_score"),
+        "physical_pbr_similarity": row.get("physical_pbr_similarity"),
+        "physical_pbr_evidence": row.get("physical_pbr_evidence", {}),
+        "library_pbr_fingerprint": row.get("library_pbr_fingerprint", {}),
     }
 
 
@@ -2402,6 +2623,8 @@ def run_part_id_qwen_rerank(
         material_predictions.sort(key=lambda row: str(row["part_id"]))
     prediction_by_id = {str(row["part_id"]): row for row in material_predictions}
     jobs: list[dict[str, Any]] = []
+    direct_selections: list[dict[str, Any]] = []
+    direct_assignment_audits: list[dict[str, Any]] = []
     gate_audits: list[dict[str, Any]] = []
     for part_id in sorted(part_by_id):
         part = part_by_id[part_id]
@@ -2427,6 +2650,31 @@ def run_part_id_qwen_rerank(
                 ranking=ranking,
                 catalog_by_id=catalog_by_id,
                 prediction=prediction,
+            )
+            component_id = prediction.get("component_id")
+            if isinstance(component_id, str):
+                members = component_members.get(component_id)
+                if not members:
+                    raise PartIdQwenError(
+                        f"Part-ID {part_id} cites an unknown appearance component"
+                    )
+                identity_descriptor: Mapping[str, Any] | None = {
+                    "member_descriptors": {
+                        member_id: part_by_id[member_id].get("descriptor", {})
+                        for member_id in members
+                    }
+                }
+            else:
+                raw_descriptor = part.get("descriptor")
+                identity_descriptor = (
+                    raw_descriptor
+                    if isinstance(raw_descriptor, Mapping)
+                    else None
+                )
+            ranking = _rank_identity_candidates_with_pbr(
+                ranking,
+                descriptor=identity_descriptor,
+                profiles_by_id=profiles_by_id,
             )
         target = (
             None
@@ -2473,6 +2721,12 @@ def run_part_id_qwen_rerank(
                 f"{part_id} has no NVIDIA Base MDL satisfying its color, "
                 "opacity and texture constraints"
             )
+        direct_match = (
+            _direct_exact_library_match(ranking, prediction=prediction)
+            if require_material_family_prediction
+            and isinstance(prediction, Mapping)
+            else None
+        )
         candidates = []
         for row in shortlist:
             # Blocked candidates remain in visual_compatibility_gate below for
@@ -2519,32 +2773,72 @@ def run_part_id_qwen_rerank(
                     "conditional_h1_evaluation": row.get("conditional_h1_evaluation"),
                     "identity_match_tier": row.get("identity_match_tier"),
                     "color_evidence_used": row.get("color_evidence_used"),
+                    "physical_pbr_similarity": row.get(
+                        "physical_pbr_similarity"
+                    ),
+                    "physical_pbr_mean_error": row.get(
+                        "physical_pbr_mean_error"
+                    ),
                 }
             )
-        jobs.append(
-            {
-                "part_id": part_id,
-                # The annotated correspondence crop is intentionally not a
-                # VLM material target.  It may contain other parts inside a
-                # valid tolerant box.  Prefer the neutralized exact-core crop
-                # emitted by Part-ID evidence, retaining the legacy crop only
-                # for old sealed checkpoints.
-                "crop": selected_observations[0].get(
-                    "isolated_crop", selected_observations[0]["crop"]
+        job = {
+            "part_id": part_id,
+            # The annotated correspondence crop is intentionally not a VLM
+            # material target. It may contain other parts inside a valid
+            # tolerant box. Prefer the neutralized exact-core crop emitted by
+            # Part-ID evidence, retaining the legacy crop only for old sealed
+            # checkpoints.
+            "crop": selected_observations[0].get(
+                "isolated_crop", selected_observations[0]["crop"]
+            ),
+            "descriptor": part["descriptor"],
+            "target_appearance": target,
+            "candidates": candidates,
+            "library_gap_fallback": library_gap_fallback,
+            "material_prediction": prediction,
+        }
+        if direct_match is None:
+            jobs.append(job)
+        else:
+            direct_material_id = str(direct_match["material_id"])
+            candidate_index = next(
+                (
+                    int(candidate["candidate_index"])
+                    for candidate in candidates
+                    if candidate["material_id"] == direct_material_id
                 ),
-                "descriptor": part["descriptor"],
-                "target_appearance": target,
-                "candidates": candidates,
-                "library_gap_fallback": library_gap_fallback,
-                "material_prediction": prediction,
-            }
-        )
+                None,
+            )
+            if candidate_index is None:
+                raise PartIdQwenError(
+                    f"direct exact match for {part_id} is absent from the "
+                    "physical shortlist"
+                )
+            direct_selections.append(
+                {
+                    "part_id": part_id,
+                    "material_id": direct_material_id,
+                    "candidate_index": candidate_index,
+                    "requested_candidate_index": None,
+                    "index_resolution": "direct_exact_library_match",
+                    "confidence": float(prediction["confidence"]),
+                    "match_type": "EXACT_LIBRARY_MATCH",
+                    "selection_authority": direct_match["authority"],
+                }
+            )
+            direct_assignment_audits.append(
+                {
+                    "part_id": part_id,
+                    **direct_match,
+                }
+            )
         gate_audits.append(
             {
                 "part_id": part_id,
                 "target_appearance": target,
                 "library_gap_fallback": library_gap_fallback,
                 "material_prediction": prediction,
+                "direct_exact_library_assignment": direct_match,
                 "authorized_catalog_family": (
                     prediction.get("catalog_family")
                     if isinstance(prediction, Mapping)
@@ -2591,6 +2885,18 @@ def run_part_id_qwen_rerank(
                         "conditional_h1_evaluation": row["conditional_h1_evaluation"],
                         "identity_match_tier": row.get("identity_match_tier"),
                         "color_evidence_used": row.get("color_evidence_used"),
+                        "physical_pbr_similarity": row.get(
+                            "physical_pbr_similarity"
+                        ),
+                        "physical_pbr_mean_error": row.get(
+                            "physical_pbr_mean_error"
+                        ),
+                        "physical_pbr_evidence": row.get(
+                            "physical_pbr_evidence", {}
+                        ),
+                        "library_pbr_fingerprint": row.get(
+                            "library_pbr_fingerprint", {}
+                        ),
                     }
                     for row in shortlist
                 ],
@@ -2619,7 +2925,8 @@ def run_part_id_qwen_rerank(
                 grayscale=require_material_family_prediction,
             )
             job["comparison_sheet"] = str(sheet)
-    selections: list[dict[str, Any]] = []
+    selections: list[dict[str, Any]] = [dict(row) for row in direct_selections]
+    qwen_selections: list[dict[str, Any]] = []
     batch_audits: list[dict[str, Any]] = []
     batches = [
         jobs[index : index + batch_size] for index in range(0, len(jobs), batch_size)
@@ -2659,6 +2966,7 @@ def run_part_id_qwen_rerank(
                 )
                 continue
             selections.extend(validated)
+            qwen_selections.extend(dict(row) for row in validated)
             audit_path = _write(
                 raw_dir / f"batch_{batch_index:03d}_attempt_{attempt}.parse.json",
                 {
@@ -2685,7 +2993,7 @@ def run_part_id_qwen_rerank(
             raise PartIdQwenError(
                 f"Qwen Part-ID batch {batch_index} failed twice: {final_error}"
             )
-    qwen_selections = [dict(row) for row in selections]
+    selections.sort(key=lambda row: str(row["part_id"]))
     if require_material_family_prediction:
         selections, component_identity_consensus = (
             _apply_component_identity_consensus(
@@ -2699,7 +3007,10 @@ def run_part_id_qwen_rerank(
             "parts": [],
             "summary": {
                 "part_count": len(selections),
-                "qwen_choice_retained_count": len(selections),
+                "qwen_choice_retained_count": len(qwen_selections),
+                "direct_exact_library_assignment_count": len(
+                    direct_selections
+                ),
                 "fresh_local_baseline_selected_count": 0,
                 "exact_cover": True,
             },
@@ -2766,7 +3077,8 @@ def run_part_id_qwen_rerank(
             [
                 "physical_material_identity_prediction_without_color",
                 "exact_substrate_treatment_optical_filter",
-                "exact_material_or_corresponding_material_selection_without_color",
+                "full_catalog_mvinverse_pbr_exact_match_or_direct_assignment",
+                "qwen_corresponding_material_selection_only_when_unresolved",
                 "appearance_component_exact_mdl_consensus",
             ]
             if require_material_family_prediction
@@ -2778,11 +3090,12 @@ def run_part_id_qwen_rerank(
             isinstance(job.get("comparison_sheet"), str) for job in jobs
         ),
         "qwen_raw_selections": qwen_selections,
+        "direct_exact_library_assignments": direct_assignment_audits,
         "part_id_selective_regression": selective_regression,
         "component_identity_consensus": component_identity_consensus,
         "visual_compatibility_gate": {
             "policy": (
-                "physical_identity_without_color/v1"
+                "full_catalog_physical_identity_mvinverse_without_color/v2"
                 if require_material_family_prediction
                 else "perceptual_color_texture_transmission_gate/v2"
             ),
@@ -2824,6 +3137,12 @@ def run_part_id_qwen_rerank(
                 len(members) for members in component_members.values()
             ),
             "color_evidence_used_for_identity_count": 0,
+            "mvinverse_pbr_evidence_available_count": sum(
+                bool(_physical_pbr_evidence(part.get("descriptor")))
+                for part in part_by_id.values()
+            ),
+            "direct_exact_library_assignment_count": len(direct_selections),
+            "qwen_corresponding_selection_count": len(qwen_selections),
             "exact_library_match_count": sum(
                 row.get("match_type") == "EXACT_LIBRARY_MATCH"
                 and row.get("confidence", 0.0) > 0.0
