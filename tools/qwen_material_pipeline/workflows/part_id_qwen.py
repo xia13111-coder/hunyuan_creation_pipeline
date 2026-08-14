@@ -31,6 +31,9 @@ from qwen_material_pipeline.qwen.local_vl import TransformersQwen3VLRunner
 
 OUTPUT_SCHEMA_VERSION = "qwen-part-id-material-rerank/v1"
 BATCH_SCHEMA_VERSION = "qwen-part-id-material-rerank-batch/v2"
+MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION = (
+    "qwen-part-id-material-rerank-batch/v3"
+)
 MATERIAL_FAMILY_PREDICTION_BATCH_SCHEMA_VERSION = (
     "qwen-part-id-material-family-prediction-batch/v1"
 )
@@ -43,6 +46,7 @@ COLOR_CRITICAL_MAXIMUM_DELTA_E = 25.0
 COLOR_CRITICAL_MAXIMUM_HUE_DISTANCE_DEGREES = 30.0
 COLOR_CRITICAL_MINIMUM_CANDIDATE_SATURATION = 0.10
 MINIMUM_MATERIAL_FAMILY_CONFIDENCE = 0.60
+MINIMUM_EXACT_TREATMENT_CONFIDENCE = 0.85
 MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH = 4
 MATERIAL_FINISH_OPTIONS = frozenset(
     {
@@ -59,6 +63,38 @@ MATERIAL_FINISH_OPTIONS = frozenset(
         "rusty",
         "frosted",
     }
+)
+MATERIAL_SUBSTRATE_OPTIONS = frozenset(
+    {
+        "unknown",
+        "metal",
+        "polymer",
+        "elastomer",
+        "glass",
+        "wood",
+        "textile",
+        "leather",
+        "ceramic",
+        "mineral",
+        "stone",
+        "paper",
+        "liquid",
+    }
+)
+MATERIAL_TREATMENT_OPTIONS = frozenset(
+    {
+        "unknown",
+        "bare",
+        "paint",
+        "anodized",
+        "plated",
+        "oxidized",
+        "conversion_coating",
+        "emissive",
+    }
+)
+MATERIAL_OPTICAL_OPTIONS = frozenset(
+    {"unknown", "opaque", "transparent", "translucent", "emissive"}
 )
 
 
@@ -96,6 +132,20 @@ def _write(path: Path, value: Mapping[str, Any]) -> Path:
     return path
 
 
+def _write_grayscale_identity_crop(source: Path, output: Path) -> Path:
+    try:
+        resolved = source.expanduser().resolve(strict=True)
+        with Image.open(resolved) as opened:
+            grayscale = ImageOps.grayscale(opened).convert("RGB")
+    except (OSError, ValueError) as exc:
+        raise PartIdQwenError(
+            f"unable to prepare grayscale material-identity evidence: {source}: {exc}"
+        ) from exc
+    output.parent.mkdir(parents=True, exist_ok=True)
+    grayscale.save(output)
+    return output
+
+
 def _catalog_by_id(catalog: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     materials = catalog.get("materials")
     if not isinstance(materials, list) or not materials:
@@ -125,82 +175,195 @@ def _catalog_family_options(
     return families
 
 
+def _catalog_identity_options(
+    catalog_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, list[str]]:
+    substrates: set[str] = set()
+    treatments: set[str] = set()
+    optical_behaviors: set[str] = set()
+    for material_id, record in catalog_by_id.items():
+        semantics = record.get("surface_semantics")
+        if not isinstance(semantics, Mapping):
+            raise PartIdQwenError(
+                f"material catalog record {material_id} has no surface semantics"
+            )
+        raw_substrates = semantics.get("compatible_substrates")
+        treatment = semantics.get("surface_treatment")
+        optical = semantics.get("optical_behavior")
+        if (
+            not isinstance(raw_substrates, list)
+            or not raw_substrates
+            or not all(isinstance(value, str) for value in raw_substrates)
+            or not isinstance(treatment, str)
+            or not isinstance(optical, str)
+        ):
+            raise PartIdQwenError(
+                f"material catalog record {material_id} has invalid surface semantics"
+            )
+        substrates.update(value.casefold() for value in raw_substrates)
+        treatments.add(treatment.casefold())
+        optical_behaviors.add(optical.casefold())
+    if not substrates or not treatments or not optical_behaviors:
+        raise PartIdQwenError("material catalog has no usable identity semantics")
+    return {
+        "physical_substrates": sorted(substrates | {"unknown"}),
+        "surface_treatments": sorted(treatments | {"unknown"}),
+        "optical_behaviors": sorted(optical_behaviors | {"unknown"}),
+    }
+
+
+def _catalog_family_for_identity(
+    *,
+    physical_substrate: str,
+    surface_treatment: str,
+    optical_behavior: str,
+) -> str:
+    if surface_treatment == "paint":
+        return "paint"
+    if surface_treatment == "emissive" or optical_behavior == "emissive":
+        return "emissives"
+    return {
+        "metal": "metal",
+        "polymer": "plastic",
+        "elastomer": "rubber",
+        "glass": "glass",
+        "wood": "wood",
+        "textile": "textiles",
+        "leather": "leather",
+        "ceramic": "ceramic",
+        "mineral": "stone",
+        "stone": "stone",
+        "paper": "paper",
+        "liquid": "liquid",
+    }.get(physical_substrate, "unknown")
+
+
 def _validate_material_prediction_batch(
     document: Mapping[str, Any],
     *,
     expected: Sequence[Mapping[str, Any]],
-    allowed_families: Sequence[str],
+    identity_options: Mapping[str, Sequence[str]],
 ) -> list[dict[str, Any]]:
     if set(document) != {"schema_version", "predictions"}:
         raise PartIdQwenError(
-            "Qwen material-family prediction returned unexpected fields"
+            "Qwen material-identity prediction returned unexpected fields"
         )
     if (
         document.get("schema_version")
         != MATERIAL_FAMILY_PREDICTION_BATCH_SCHEMA_VERSION
     ):
-        raise PartIdQwenError("Qwen material-family prediction uses the wrong schema")
+        raise PartIdQwenError("Qwen material-identity prediction uses the wrong schema")
     rows = document.get("predictions")
     if not isinstance(rows, list) or len(rows) != len(expected):
-        raise PartIdQwenError("Qwen material-family prediction count is invalid")
+        raise PartIdQwenError("Qwen material-identity prediction count is invalid")
     expected_ids = {str(row["part_id"]) for row in expected}
-    allowed = set(allowed_families)
-    allowed.add("unknown")
+    allowed_substrates = set(identity_options["physical_substrates"])
+    allowed_treatments = set(identity_options["surface_treatments"])
+    allowed_optical = set(identity_options["optical_behaviors"])
     output: dict[str, dict[str, Any]] = {}
     for index, raw in enumerate(rows):
         if not isinstance(raw, Mapping) or set(raw) != {
             "part_id",
-            "catalog_family",
+            "physical_substrate",
+            "surface_treatment",
+            "optical_behavior",
             "surface_finish",
-            "confidence",
+            "substrate_confidence",
+            "treatment_confidence",
         }:
             raise PartIdQwenError(
-                f"Qwen material-family prediction {index} has invalid fields"
+                f"Qwen material-identity prediction {index} has invalid fields"
             )
         part_id = raw.get("part_id")
-        family = raw.get("catalog_family")
+        substrate = raw.get("physical_substrate")
+        treatment = raw.get("surface_treatment")
+        optical = raw.get("optical_behavior")
         finish = raw.get("surface_finish")
-        confidence = raw.get("confidence")
+        substrate_confidence = raw.get("substrate_confidence")
+        treatment_confidence = raw.get("treatment_confidence")
         if (
             not isinstance(part_id, str)
             or part_id not in expected_ids
             or part_id in output
         ):
             raise PartIdQwenError(
-                f"Qwen material-family prediction {index} cites an invalid part"
+                f"Qwen material-identity prediction {index} cites an invalid part"
             )
-        if not isinstance(family, str) or family not in allowed:
+        if not isinstance(substrate, str) or substrate not in allowed_substrates:
             raise PartIdQwenError(
-                f"Qwen predicted an unsupported catalog family for {part_id}"
+                f"Qwen predicted an unsupported physical substrate for {part_id}"
+            )
+        if not isinstance(treatment, str) or treatment not in allowed_treatments:
+            raise PartIdQwenError(
+                f"Qwen predicted an unsupported surface treatment for {part_id}"
+            )
+        if not isinstance(optical, str) or optical not in allowed_optical:
+            raise PartIdQwenError(
+                f"Qwen predicted an unsupported optical behavior for {part_id}"
             )
         if not isinstance(finish, str) or finish not in MATERIAL_FINISH_OPTIONS:
             raise PartIdQwenError(
                 f"Qwen predicted an unsupported surface finish for {part_id}"
             )
-        if (
-            isinstance(confidence, bool)
-            or not isinstance(confidence, (int, float))
-            or not math.isfinite(float(confidence))
-            or not 0.0 <= float(confidence) <= 1.0
+        for label, value in (
+            ("substrate", substrate_confidence),
+            ("treatment", treatment_confidence),
         ):
-            raise PartIdQwenError(
-                f"Qwen predicted an invalid material confidence for {part_id}"
-            )
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                raise PartIdQwenError(
+                    f"Qwen predicted an invalid {label} confidence for {part_id}"
+                )
+        substrate_is_known = (
+            substrate != "unknown"
+            and optical != "unknown"
+            and float(substrate_confidence) >= MINIMUM_MATERIAL_FAMILY_CONFIDENCE
+        )
+        exact_treatment_is_known = (
+            treatment != "unknown"
+            and float(treatment_confidence)
+            >= MINIMUM_EXACT_TREATMENT_CONFIDENCE
+        )
+        identity_resolution = (
+            "exact_material"
+            if substrate_is_known and exact_treatment_is_known
+            else "corresponding_material"
+            if substrate_is_known
+            else "insufficient_evidence"
+        )
+        confidence = (
+            min(float(substrate_confidence), float(treatment_confidence))
+            if identity_resolution == "exact_material"
+            else float(substrate_confidence)
+        )
         output[part_id] = {
             "part_id": part_id,
-            "catalog_family": family,
+            "catalog_family": _catalog_family_for_identity(
+                physical_substrate=substrate,
+                surface_treatment=treatment,
+                optical_behavior=optical,
+            ),
+            "physical_substrate": substrate,
+            "surface_treatment": treatment,
+            "optical_behavior": optical,
             "surface_finish": finish,
-            "confidence": float(confidence),
+            "substrate_confidence": float(substrate_confidence),
+            "treatment_confidence": float(treatment_confidence),
+            "confidence": confidence,
+            "identity_resolution": identity_resolution,
             "status": (
                 "APPLYABLE"
-                if family != "unknown"
-                and float(confidence) >= MINIMUM_MATERIAL_FAMILY_CONFIDENCE
+                if substrate_is_known
                 else "INSUFFICIENT_EVIDENCE"
             ),
         }
     if set(output) != expected_ids:
         raise PartIdQwenError(
-            "Qwen material-family prediction does not exactly cover its input"
+            "Qwen material-identity prediction does not exactly cover its input"
         )
     return [output[str(row["part_id"])] for row in expected]
 
@@ -209,7 +372,7 @@ def _material_prediction_payload(
     *,
     model: str,
     batch: Sequence[Mapping[str, Any]],
-    allowed_families: Sequence[str],
+    identity_options: Mapping[str, Sequence[str]],
     retry_detail: str | None = None,
 ) -> dict[str, Any]:
     content: list[dict[str, Any]] = []
@@ -224,8 +387,9 @@ def _material_prediction_payload(
                 "type": "text",
                 "text": (
                     f"MATERIAL IDENTITY TARGET {item['part_id']}. All following "
-                    "images are neutral-background crops of this exact CAD Part-ID "
-                    "from different trusted views. Descriptor: "
+                    "images are grayscale, neutral-background crops of the same "
+                    "physical surface from trusted views or linked CAD parts. "
+                    "Colour has deliberately been removed. Descriptor: "
                     + json.dumps(item.get("descriptor", {}), ensure_ascii=False)
                 ),
             }
@@ -248,9 +412,12 @@ def _material_prediction_payload(
         "predictions": [
             {
                 "part_id": str(item["part_id"]),
-                "catalog_family": "one allowed catalog family or unknown",
+                "physical_substrate": "one allowed substrate or unknown",
+                "surface_treatment": "one allowed treatment or unknown",
+                "optical_behavior": "one allowed optical behavior or unknown",
                 "surface_finish": "one allowed finish",
-                "confidence": 0.75,
+                "substrate_confidence": 0.75,
+                "treatment_confidence": 0.55,
             }
             for item in batch
         ],
@@ -258,11 +425,15 @@ def _material_prediction_payload(
     prompt = "\n".join(
         [
             "Predict physical material identity before seeing any material candidate.",
-            "Ignore colour as evidence of material family. Green, black, silver or white can all be paint, metal, plastic or rubber.",
-            "Choose the NVIDIA catalog family that describes the visible surface material. A painted or powder-coated metal enclosure is catalog_family=paint; exposed steel/aluminium is metal; an elastomer is rubber; a polymer housing is plastic; transparent glazing is glass.",
-            "Use unknown with confidence below 0.60 when the crop cannot support a physical identity. Never guess from an adjacent part, background, CAD part name, or colour alone.",
-            "Allowed catalog_family values: "
-            + json.dumps([*allowed_families, "unknown"], ensure_ascii=False),
+            "Colour is unavailable and must not influence the decision. Identify the substrate, its surface treatment, optical behavior, and finish from geometry, texture, reflectance and manufacturing cues.",
+            "Examples: a powder-coated enclosure is substrate=metal, treatment=paint, optical=opaque; exposed steel is metal/bare/opaque; anodized aluminium is metal/anodized/opaque; hard plastic is polymer/bare/opaque; rubber is elastomer/bare/opaque; clear glazing is glass/bare/transparent.",
+            "Score substrate_confidence and treatment_confidence separately. A visible rigid polymer or metal substrate can be high-confidence even when paint versus anodized versus bare is uncertain. Use treatment=unknown and a low treatment_confidence instead of guessing. Exact treatment requires exceptional evidence; the program will otherwise choose a corresponding same-substrate material. Never guess from background, CAD names, or colour.",
+            "Allowed physical_substrate values: "
+            + json.dumps(identity_options["physical_substrates"], ensure_ascii=False),
+            "Allowed surface_treatment values: "
+            + json.dumps(identity_options["surface_treatments"], ensure_ascii=False),
+            "Allowed optical_behavior values: "
+            + json.dumps(identity_options["optical_behaviors"], ensure_ascii=False),
             "Allowed surface_finish values: "
             + json.dumps(sorted(MATERIAL_FINISH_OPTIONS), ensure_ascii=False),
             "Return exactly one strict JSON object with no Markdown or prose and this exact shape: "
@@ -302,7 +473,7 @@ def _predict_material_families(
     items: Sequence[Mapping[str, Any]],
     runner: Any,
     model: str,
-    allowed_families: Sequence[str],
+    identity_options: Mapping[str, Sequence[str]],
     batch_size: int,
     raw_dir: Path,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -342,7 +513,7 @@ def _predict_material_families(
                 _material_prediction_payload(
                     model=model,
                     batch=batch,
-                    allowed_families=allowed_families,
+                    identity_options=identity_options,
                     retry_detail=str(final_error) if final_error is not None else None,
                 )
             )
@@ -355,7 +526,7 @@ def _predict_material_families(
                 validated = _validate_material_prediction_batch(
                     document,
                     expected=batch,
-                    allowed_families=allowed_families,
+                    identity_options=identity_options,
                 )
             except Exception as exc:
                 final_error = exc
@@ -395,10 +566,202 @@ def _predict_material_families(
             break
         else:
             raise PartIdQwenError(
-                "Qwen material-family prediction batch "
+                "Qwen material-identity prediction batch "
                 f"{batch_index} failed twice: {final_error}"
             )
     return predictions, audits
+
+
+_COLOR_IDENTITY_TOKENS = frozenset(
+    {
+        "black",
+        "blue",
+        "brown",
+        "charcoal",
+        "cream",
+        "cyan",
+        "forest",
+        "gold",
+        "gray",
+        "green",
+        "grey",
+        "olive",
+        "orange",
+        "pink",
+        "purple",
+        "red",
+        "silver",
+        "tan",
+        "white",
+        "yellow",
+    }
+)
+
+
+def _catalog_identity_semantics(
+    material_id: str,
+    record: Mapping[str, Any],
+) -> tuple[set[str], str, str, str, str]:
+    semantics = record.get("surface_semantics")
+    if not isinstance(semantics, Mapping):
+        raise PartIdQwenError(
+            f"material catalog record {material_id} has no surface semantics"
+        )
+    substrates = semantics.get("compatible_substrates")
+    treatment = semantics.get("surface_treatment")
+    optical = semantics.get("optical_behavior")
+    semantic_finish = semantics.get("finish", "unknown")
+    confidence = semantics.get("confidence")
+    if (
+        not isinstance(substrates, list)
+        or not substrates
+        or not all(isinstance(value, str) and value for value in substrates)
+        or not isinstance(treatment, str)
+        or not treatment
+        or not isinstance(optical, str)
+        or not optical
+        or not isinstance(semantic_finish, str)
+        or not isinstance(confidence, str)
+    ):
+        raise PartIdQwenError(
+            f"material catalog record {material_id} has invalid surface semantics"
+        )
+    return (
+        {value.casefold() for value in substrates},
+        treatment.casefold(),
+        optical.casefold(),
+        semantic_finish.casefold(),
+        confidence.casefold(),
+    )
+
+
+def _colorless_material_identity_key(
+    material_id: str,
+    *,
+    treatment: str,
+    optical: str,
+    finish: str,
+) -> tuple[str, str, str, str]:
+    name = material_id.rsplit("#", 1)[-1].casefold()
+    tokens = [token for token in name.replace("-", "_").split("_") if token]
+    identity_tokens = [
+        token
+        for token in tokens
+        if token not in _COLOR_IDENTITY_TOKENS and token != "finish"
+    ]
+    return ("_".join(identity_tokens), treatment, optical, finish)
+
+
+def _identity_filtered_ranking(
+    *,
+    ranking: Sequence[Mapping[str, Any]],
+    catalog_by_id: Mapping[str, Mapping[str, Any]],
+    prediction: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    confidence = float(prediction.get("confidence", 0.0))
+    if prediction.get("status") != "APPLYABLE" or confidence < (
+        MINIMUM_MATERIAL_FAMILY_CONFIDENCE
+    ):
+        return [dict(row) for row in ranking]
+    substrate = str(prediction.get("physical_substrate", "unknown"))
+    treatment = str(prediction.get("surface_treatment", "unknown"))
+    optical = str(prediction.get("optical_behavior", "unknown"))
+    finish = str(prediction.get("surface_finish", "unknown"))
+    exact_treatment_authoritative = (
+        prediction.get("identity_resolution") == "exact_material"
+    )
+    ranking_by_id = {
+        str(row.get("material_id")): dict(row)
+        for row in ranking
+        if isinstance(row.get("material_id"), str)
+    }
+    missing = sorted(set(catalog_by_id) - ranking_by_id.keys())
+    if missing:
+        raise PartIdQwenError(
+            "material-identity-first retrieval must cover the complete catalog; "
+            f"the ranking is missing {len(missing)} material IDs"
+        )
+    exact: list[dict[str, Any]] = []
+    corresponding: list[dict[str, Any]] = []
+    for material_id, record in catalog_by_id.items():
+        substrates, candidate_treatment, candidate_optical, semantic_finish, semantic_confidence = (
+            _catalog_identity_semantics(material_id, record)
+        )
+        if semantic_confidence == "low" or substrate not in substrates:
+            continue
+        if candidate_optical != optical:
+            continue
+        row = dict(ranking_by_id[material_id])
+        record_finishes = {
+            str(value).casefold()
+            for value in record.get("finishes", [])
+            if isinstance(value, str)
+        }
+        if semantic_finish != "unknown":
+            record_finishes.add(semantic_finish)
+        row["predicted_family"] = prediction.get("catalog_family")
+        row["predicted_substrate"] = substrate
+        row["predicted_treatment"] = treatment
+        row["predicted_optical_behavior"] = optical
+        row["predicted_finish"] = finish
+        row["predicted_finish_match"] = bool(
+            finish != "unknown" and finish in record_finishes
+        )
+        row["identity_match_tier"] = (
+            "exact_material_contract"
+            if exact_treatment_authoritative and candidate_treatment == treatment
+            else "corresponding_material_fallback"
+        )
+        row["catalog_surface_semantics"] = dict(record["surface_semantics"])
+        (
+            exact
+            if exact_treatment_authoritative and candidate_treatment == treatment
+            else corresponding
+        ).append(row)
+    filtered = exact if exact else corresponding
+    if not filtered:
+        raise PartIdQwenError(
+            "material_library_gap: no material has the predicted substrate and "
+            f"optical behavior for {prediction.get('part_id')}"
+        )
+    # Colour variants of the same physical preset are one identity in stage 1.
+    # Prefer the generic preset; colour is authored only in a later stage.
+    deduplicated: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for row in filtered:
+        material_id = str(row["material_id"])
+        _substrates, candidate_treatment, candidate_optical, semantic_finish, _confidence = (
+            _catalog_identity_semantics(material_id, catalog_by_id[material_id])
+        )
+        key = _colorless_material_identity_key(
+            material_id,
+            treatment=candidate_treatment,
+            optical=candidate_optical,
+            finish=semantic_finish,
+        )
+        current = deduplicated.get(key)
+        name_tokens = set(
+            material_id.rsplit("#", 1)[-1].casefold().replace("-", "_").split("_")
+        )
+        priority = (
+            len(name_tokens & _COLOR_IDENTITY_TOKENS),
+            len(name_tokens),
+            int(row.get("rank", 1_000_000)),
+            material_id,
+        )
+        if current is None or priority < current["_identity_variant_priority"]:
+            row["_identity_variant_priority"] = priority
+            deduplicated[key] = row
+    filtered = list(deduplicated.values())
+    for row in filtered:
+        row.pop("_identity_variant_priority", None)
+    filtered.sort(
+        key=lambda row: (
+            0 if row["predicted_finish_match"] else 1,
+            str(row["catalog_surface_semantics"]["surface_treatment"]),
+            str(row["material_id"]),
+        )
+    )
+    return filtered
 
 
 def _family_filtered_ranking(
@@ -407,57 +770,102 @@ def _family_filtered_ranking(
     catalog_by_id: Mapping[str, Mapping[str, Any]],
     prediction: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
-    family = str(prediction.get("catalog_family", "unknown"))
-    confidence = float(prediction.get("confidence", 0.0))
-    if family == "unknown" or confidence < MINIMUM_MATERIAL_FAMILY_CONFIDENCE:
-        return [dict(row) for row in ranking]
-    expected_ids = {
-        material_id
-        for material_id, record in catalog_by_id.items()
-        if str(record.get("family", "")).strip().casefold() == family
-    }
-    if not expected_ids:
-        raise PartIdQwenError(
-            f"predicted catalog family {family!r} has no NVIDIA MDL materials"
-        )
-    ranking_by_id = {
-        str(row.get("material_id")): dict(row)
-        for row in ranking
-        if isinstance(row.get("material_id"), str)
-    }
-    missing = sorted(expected_ids - ranking_by_id.keys())
-    if missing:
-        raise PartIdQwenError(
-            "material-family-first retrieval must cover the complete catalog; "
-            f"family {family!r} is missing {len(missing)} material IDs"
-        )
-    finish = str(prediction.get("surface_finish", "unknown"))
-    filtered = [ranking_by_id[material_id] for material_id in expected_ids]
-    for row in filtered:
-        record = catalog_by_id[str(row["material_id"])]
-        record_finishes = {
-            str(value).casefold()
-            for value in record.get("finishes", [])
-            if isinstance(value, str)
-        }
-        row["predicted_family"] = family
-        row["predicted_finish"] = finish
-        row["predicted_finish_match"] = bool(
-            finish != "unknown" and finish in record_finishes
-        )
-    filtered.sort(
-        key=lambda row: (
-            0 if row["predicted_finish_match"] else 1,
-            int(row.get("rank", 1_000_000)),
-            str(row["material_id"]),
-        )
+    """Backward-compatible private alias for the identity-first filter."""
+
+    return _identity_filtered_ranking(
+        ranking=ranking,
+        catalog_by_id=catalog_by_id,
+        prediction=prediction,
     )
-    return filtered
+
+
+def _identity_shortlist(
+    ranking: Sequence[Mapping[str, Any]],
+    *,
+    candidate_count: int,
+) -> list[dict[str, Any]]:
+    if candidate_count < 1:
+        raise PartIdQwenError("candidate_count must be positive")
+    # RGB retrieval rank is deliberately not an authority in this lane. Build
+    # a deterministic, treatment-diverse shortlist from the physically valid
+    # catalog set so a colour-correlated rank cannot decide which MDLs the VLM
+    # is allowed to see.
+    buckets: dict[str, list[Mapping[str, Any]]] = {}
+    for raw in ranking:
+        semantics = raw.get("catalog_surface_semantics")
+        treatment = (
+            semantics.get("surface_treatment")
+            if isinstance(semantics, Mapping)
+            else None
+        )
+        if not isinstance(treatment, str):
+            raise PartIdQwenError("identity candidate has no surface treatment")
+        buckets.setdefault(treatment, []).append(raw)
+    for rows in buckets.values():
+        rows.sort(
+            key=lambda row: (
+                0 if row.get("predicted_finish_match") is True else 1,
+                str(row["material_id"]),
+            )
+        )
+    selected: list[Mapping[str, Any]] = []
+    treatment_order = sorted(buckets)
+    while len(selected) < candidate_count:
+        progressed = False
+        for treatment in treatment_order:
+            rows = buckets[treatment]
+            if rows:
+                selected.append(rows.pop(0))
+                progressed = True
+                if len(selected) == candidate_count:
+                    break
+        if not progressed:
+            break
+    shortlist: list[dict[str, Any]] = []
+    for index, raw in enumerate(selected, start=1):
+        row = dict(raw)
+        row.update(
+            {
+                "original_retrieval_rank": None,
+                "compatibility_rank": index,
+                "visual_compatibility_score": None,
+                "appearance_median_rgb": None,
+                "color_similarity": None,
+                "hue_similarity": None,
+                "color_delta_e": None,
+                "color_tunable": False,
+                "color_gate_passed": None,
+                "texture_similarity": None,
+                "texture_gradient_energy": None,
+                "transmission_risk": False,
+                "texture_mismatch_risk": False,
+                "intrinsic_pattern_risk": False,
+                "selection_allowed": True,
+                "selection_allowed_by_default_constraints": True,
+                "library_gap_fallback": (
+                    raw.get("identity_match_tier")
+                    == "corresponding_material_fallback"
+                ),
+                "library_gap_fallback_tier": (
+                    raw.get("identity_match_tier")
+                    if raw.get("identity_match_tier")
+                    == "corresponding_material_fallback"
+                    else None
+                ),
+                "relaxed_constraints": [],
+                "conditional_h1_evaluation": False,
+                "color_evidence_used": False,
+            }
+        )
+        shortlist.append(row)
+    return shortlist
 
 
 def _candidate_summary(
     row: Mapping[str, Any],
     catalog_record: Mapping[str, Any],
+    *,
+    withhold_color: bool = False,
 ) -> dict[str, Any]:
     return {
         "material_id": row["material_id"],
@@ -466,13 +874,17 @@ def _candidate_summary(
         "family": catalog_record.get("family"),
         "category_path": catalog_record.get("category_path"),
         "keywords": catalog_record.get("keywords", []),
-        "colors": catalog_record.get("colors", []),
+        "colors": [] if withhold_color else catalog_record.get("colors", []),
         "finishes": catalog_record.get("finishes", []),
-        "retrieval_rank": row.get("rank"),
-        "siglip2_score": row.get("siglip2_score"),
-        "dino_score": row.get("dino_score"),
-        "color_score": row.get("color_score"),
-        "mvinverse_score": row.get("mvinverse_score"),
+        "surface_semantics": catalog_record.get("surface_semantics"),
+        "identity_match_tier": row.get("identity_match_tier"),
+        "color_evidence_withheld": withhold_color,
+        "visual_retrieval_scores_withheld": withhold_color,
+        "retrieval_rank": None if withhold_color else row.get("rank"),
+        "siglip2_score": None if withhold_color else row.get("siglip2_score"),
+        "dino_score": None if withhold_color else row.get("dino_score"),
+        "color_score": None if withhold_color else row.get("color_score"),
+        "mvinverse_score": None if withhold_color else row.get("mvinverse_score"),
     }
 
 
@@ -1335,6 +1747,7 @@ def _comparison_sheet(
     candidates: Sequence[Mapping[str, Any]],
     render_paths: Mapping[str, Path | None],
     output: Path,
+    grayscale: bool = False,
 ) -> Path:
     tile_size = 320
     columns = 3
@@ -1360,8 +1773,11 @@ def _comparison_sheet(
         if path is not None:
             try:
                 with Image.open(path) as opened:
+                    source_image = opened.convert("RGB")
+                    if grayscale:
+                        source_image = ImageOps.grayscale(source_image).convert("RGB")
                     image = ImageOps.contain(
-                        opened.convert("RGB"),
+                        source_image,
                         (area[2] - area[0], area[3] - area[1]),
                     )
                 background = Image.new(
@@ -1402,10 +1818,16 @@ def _validate_batch(
     document: Mapping[str, Any],
     *,
     expected: Sequence[dict[str, Any]],
+    require_material_identity_match: bool = False,
 ) -> list[dict[str, Any]]:
     if set(document) != {"schema_version", "selections"}:
         raise PartIdQwenError("Qwen Part-ID batch returned unexpected fields")
-    if document.get("schema_version") != BATCH_SCHEMA_VERSION:
+    expected_schema = (
+        MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION
+        if require_material_identity_match
+        else BATCH_SCHEMA_VERSION
+    )
+    if document.get("schema_version") != expected_schema:
         raise PartIdQwenError("Qwen Part-ID batch uses the wrong schema")
     rows = document.get("selections")
     if not isinstance(rows, list) or len(rows) != len(expected):
@@ -1413,15 +1835,15 @@ def _validate_batch(
     expected_by_id = {str(item["part_id"]): item for item in expected}
     output: dict[str, dict[str, Any]] = {}
     for index, raw in enumerate(rows):
-        if not isinstance(raw, Mapping) or set(raw) != {
-            "part_id",
-            "candidate_index",
-            "confidence",
-        }:
+        expected_fields = {"part_id", "candidate_index", "confidence"}
+        if require_material_identity_match:
+            expected_fields.add("match_type")
+        if not isinstance(raw, Mapping) or set(raw) != expected_fields:
             raise PartIdQwenError(f"Qwen Part-ID selection {index} has invalid fields")
         part_id = raw.get("part_id")
         candidate_index = raw.get("candidate_index")
         confidence = raw.get("confidence")
+        match_type = raw.get("match_type")
         if (
             not isinstance(part_id, str)
             or part_id not in expected_by_id
@@ -1476,6 +1898,13 @@ def _validate_batch(
             or not 0.0 <= float(confidence) <= 1.0
         ):
             raise PartIdQwenError(f"Qwen returned invalid confidence for {part_id}")
+        if require_material_identity_match and match_type not in {
+            "EXACT_LIBRARY_MATCH",
+            "CORRESPONDING_MATERIAL",
+        }:
+            raise PartIdQwenError(
+                f"Qwen returned an invalid material match type for {part_id}"
+            )
         output[part_id] = {
             "part_id": part_id,
             "material_id": material_id,
@@ -1484,6 +1913,8 @@ def _validate_batch(
             "index_resolution": index_resolution,
             "confidence": float(confidence),
         }
+        if require_material_identity_match:
+            output[part_id]["match_type"] = match_type
     if set(output) != set(expected_by_id):
         raise PartIdQwenError("Qwen Part-ID batch does not exactly cover its input")
     return [output[str(item["part_id"])] for item in expected]
@@ -1523,7 +1954,11 @@ def _payload(
             ]
         )
     output_shape = {
-        "schema_version": BATCH_SCHEMA_VERSION,
+        "schema_version": (
+            MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION
+            if require_material_family_prediction
+            else BATCH_SCHEMA_VERSION
+        ),
         "selections": [
             {
                 "part_id": item["part_id"],
@@ -1531,6 +1966,15 @@ def _payload(
                     "one supplied integer candidate_index for this part"
                 ),
                 "confidence": 0.75,
+                **(
+                    {
+                        "match_type": (
+                            "EXACT_LIBRARY_MATCH or CORRESPONDING_MATERIAL"
+                        )
+                    }
+                    if require_material_family_prediction
+                    else {}
+                ),
             }
             for item in batch
         ],
@@ -1541,14 +1985,18 @@ def _payload(
             "Each TARGET is the bounded, core-masked material evidence from a globally registered CAD Part-ID. Neutral pixels are not material evidence. Use the supplied descriptor and the visible core; do not infer a material from an adjacent part or background.",
             "Do not create new material groups or copy a decision to an unrelated target.",
             (
-                "Material identity is already fixed by the independent first pass. "
-                "Every numbered candidate belongs to that exact predicted catalog "
-                "family. Keep identity fixed and select the closest finish, texture, "
-                "highlight response and roughness; colour is only a secondary tie-break."
+                "Material identity is bounded by the independent first pass. Every "
+                "numbered candidate satisfies the predicted substrate and optical "
+                "behavior; when treatment evidence is authoritative, every candidate "
+                "also satisfies that treatment. First choose the exact physical material "
+                "when it exists; otherwise choose the closest corresponding material. "
+                "The sheet is grayscale: "
+                "colour is forbidden even as a tie-break. Judge manufacturing type, "
+                "finish, texture, highlight shape and roughness only."
                 if require_material_family_prediction
                 else "Optimize visible similarity only. Exact engineering/semantic category may differ, but visual behavior may not: opacity versus transmission, surface continuity, texture scale, color, brightness, highlight response and roughness are mandatory constraints."
             ),
-            "Compare TARGET directly with the numbered actual MDL renders. Never choose a transmissive/transparent candidate for an opaque target, and never introduce grass, fabric, wood, stone or other repeating/high-frequency texture when TARGET is smooth.",
+            "Compare TARGET directly with the numbered actual MDL renders. Never infer identity from brightness or colour names embedded in a preset ID. Never choose a transmissive candidate for an opaque target or introduce a different substrate.",
             (
                 "For color_tunable=true candidates, a Part-ID-specific H1 may "
                 "replace only the reviewed MDL color input. Judge those default "
@@ -1566,6 +2014,17 @@ def _payload(
             ),
             "SigLIP2, DINO, MVInverse and compatibility scores are evidence, not an instruction to choose rank 1. The actual comparison image has final authority.",
             "Every supplied candidate is selectable. Return its integer candidate_index exactly; never write, reconstruct or guess a material_id path.",
+            *(
+                [
+                    "Set match_type=EXACT_LIBRARY_MATCH only when the grayscale "
+                    "target and selected library preset support the same physical "
+                    "material, treatment and finish. Otherwise set "
+                    "CORRESPONDING_MATERIAL. A corresponding material is a valid "
+                    "conservative fallback, not a failure."
+                ]
+                if require_material_family_prediction
+                else []
+            ),
             "Valid candidate_index ranges: "
             + ", ".join(
                 f"{item['part_id']}=1..{len(item['candidates'])}" for item in batch
@@ -1592,8 +2051,8 @@ def _payload(
             {
                 "role": "system",
                 "content": (
-                    "You are a bounded visual material classifier. Decisions "
-                    "are independent per CAD part_id. Obey the exact JSON contract."
+                    "You are a bounded physical material classifier. Colour is not "
+                    "evidence in the identity-first lane. Obey the exact JSON contract."
                 ),
             },
             {"role": "user", "content": content},
@@ -1603,6 +2062,137 @@ def _payload(
         "stream": False,
         "enable_thinking": False,
     }
+
+
+def _validated_appearance_component_memberships(
+    appearance_components: Mapping[str, Any] | None,
+    *,
+    observed_part_ids: set[str],
+) -> dict[str, list[str]]:
+    if appearance_components is None:
+        return {}
+    raw_components = appearance_components.get("components")
+    if not isinstance(raw_components, list):
+        raise PartIdQwenError("appearance-components document has no components")
+    result: dict[str, list[str]] = {}
+    assigned: set[str] = set()
+    for index, raw in enumerate(raw_components):
+        component_id = raw.get("component_id") if isinstance(raw, Mapping) else None
+        members = raw.get("member_part_ids") if isinstance(raw, Mapping) else None
+        if (
+            not isinstance(component_id, str)
+            or not component_id
+            or component_id in result
+            or not isinstance(members, list)
+            or len(members) < 2
+            or not all(isinstance(part_id, str) for part_id in members)
+            or len(set(members)) != len(members)
+        ):
+            raise PartIdQwenError(
+                f"appearance component {index} has an invalid identity scope"
+            )
+        member_set = set(members)
+        if not member_set <= observed_part_ids:
+            raise PartIdQwenError(
+                f"appearance component {component_id} contains an unobserved Part-ID"
+            )
+        if assigned & member_set:
+            raise PartIdQwenError("appearance components overlap in Part-ID identity")
+        assigned.update(member_set)
+        result[component_id] = sorted(member_set)
+    return result
+
+
+def _apply_component_identity_consensus(
+    *,
+    selections: Sequence[Mapping[str, Any]],
+    component_members: Mapping[str, Sequence[str]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    by_id = {
+        str(row["part_id"]): dict(row)
+        for row in selections
+        if isinstance(row, Mapping) and isinstance(row.get("part_id"), str)
+    }
+    audits: list[dict[str, Any]] = []
+    for component_id, members in sorted(component_members.items()):
+        if not set(members) <= set(by_id):
+            raise PartIdQwenError(
+                f"appearance component {component_id} is missing a member selection"
+            )
+        votes: dict[str, tuple[int, float]] = {}
+        before: dict[str, str] = {}
+        for part_id in members:
+            row = by_id[part_id]
+            material_id = row.get("material_id")
+            confidence = row.get("confidence")
+            if not isinstance(material_id, str) or not isinstance(
+                confidence, (int, float)
+            ):
+                raise PartIdQwenError(
+                    f"appearance component {component_id} has an invalid selection"
+                )
+            before[part_id] = material_id
+            count, total = votes.get(material_id, (0, 0.0))
+            votes[material_id] = (count + 1, total + float(confidence))
+        winner = min(
+            votes,
+            key=lambda material_id: (
+                -votes[material_id][0],
+                -votes[material_id][1],
+                material_id,
+            ),
+        )
+        winner_support = [
+            by_id[part_id]
+            for part_id in members
+            if by_id[part_id]["material_id"] == winner
+        ]
+        exact_support = sum(
+            row.get("match_type") == "EXACT_LIBRARY_MATCH"
+            and float(row.get("confidence", 0.0)) >= 0.8
+            for row in winner_support
+        )
+        consensus_match_type = (
+            "EXACT_LIBRARY_MATCH"
+            if exact_support > len(members) / 2.0
+            else "CORRESPONDING_MATERIAL"
+        )
+        for part_id in members:
+            row = by_id[part_id]
+            row["pre_component_consensus_material_id"] = row["material_id"]
+            row["pre_component_consensus_match_type"] = row.get("match_type")
+            row["material_id"] = winner
+            row["match_type"] = consensus_match_type
+            row["component_id"] = component_id
+            row["component_identity_consensus_applied"] = True
+        audits.append(
+            {
+                "component_id": component_id,
+                "member_part_ids": list(members),
+                "member_material_ids_before_consensus": before,
+                "selected_material_id": winner,
+                "match_type": consensus_match_type,
+                "vote_count": votes[winner][0],
+                "member_count": len(members),
+                "exact_shared_material_enforced": True,
+            }
+        )
+    return (
+        [by_id[str(row["part_id"])] for row in selections],
+        {
+            "schema_version": "qwen-component-material-identity-consensus/v1",
+            "components": audits,
+            "summary": {
+                "component_count": len(audits),
+                "constrained_part_count": sum(
+                    len(row["member_part_ids"]) for row in audits
+                ),
+                "all_components_share_one_exact_mdl": all(
+                    row["exact_shared_material_enforced"] for row in audits
+                ),
+            },
+        },
+    )
 
 
 def run_part_id_qwen_rerank(
@@ -1617,6 +2207,7 @@ def run_part_id_qwen_rerank(
     candidate_count: int = 4,
     allow_color_tuning: bool = False,
     require_material_family_prediction: bool = False,
+    appearance_components: Mapping[str, Any] | None = None,
     entity_label: str = "exact CAD Part-ID",
 ) -> dict[str, Any]:
     """Rerank each Part-ID shortlist without any palette-group decision."""
@@ -1643,7 +2234,7 @@ def run_part_id_qwen_rerank(
         raise PartIdQwenError("require_material_family_prediction must be boolean")
     if require_material_family_prediction and allow_color_tuning:
         raise PartIdQwenError(
-            "material-family-first selection cannot tune colour in the identity stage"
+            "material-identity-first selection cannot tune colour in the identity stage"
         )
     parts = evidence.get("parts")
     groups = retrieval.get("groups")
@@ -1685,11 +2276,22 @@ def run_part_id_qwen_rerank(
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = output_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
+    identity_evidence_dir = output_dir / "identity_evidence_grayscale"
     material_predictions: list[dict[str, Any]] = []
     material_prediction_batches: list[dict[str, Any]] = []
+    component_members = _validated_appearance_component_memberships(
+        appearance_components if require_material_family_prediction else None,
+        observed_part_ids=set(part_by_id),
+    )
+    part_to_component = {
+        part_id: component_id
+        for component_id, members in component_members.items()
+        for part_id in members
+    }
     if require_material_family_prediction:
         prediction_items: list[dict[str, Any]] = []
-        for part_id in sorted(part_by_id):
+
+        def prediction_views(part_id: str, *, maximum: int) -> list[dict[str, str]]:
             part = part_by_id[part_id]
             selected_observations = [
                 observation
@@ -1724,23 +2326,80 @@ def run_part_id_qwen_rerank(
                     row["view_id"],
                 )
             )
-            trusted_views = trusted_views[:MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH]
+            trusted_views = trusted_views[:maximum]
+            grayscale_views: list[dict[str, str]] = []
+            for index, row in enumerate(trusted_views, start=1):
+                output = identity_evidence_dir / (
+                    f"{part_id}_{row['view_id']}_{index:02d}.png"
+                )
+                _write_grayscale_identity_crop(Path(row["crop"]), output)
+                grayscale_views.append(
+                    {"view_id": row["view_id"], "crop": str(output)}
+                )
+            return grayscale_views
+
+        for component_id, members in sorted(component_members.items()):
+            representative_members = list(members)[:MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH]
+            trusted_views = [
+                prediction_views(part_id, maximum=1)[0]
+                for part_id in representative_members
+            ]
+            prediction_items.append(
+                {
+                    "part_id": component_id,
+                    "views": trusted_views,
+                    "descriptor": {
+                        "prediction_scope": "appearance_component",
+                        "member_part_ids": list(members),
+                        "member_descriptors": {
+                            part_id: part_by_id[part_id].get("descriptor", {})
+                            for part_id in representative_members
+                        },
+                    },
+                }
+            )
+        for part_id in sorted(set(part_by_id) - set(part_to_component)):
             prediction_items.append(
                 {
                     "part_id": part_id,
-                    "views": trusted_views,
-                    "selected_view_id": selected_view_id,
-                    "descriptor": part.get("descriptor", {}),
+                    "views": prediction_views(
+                        part_id, maximum=MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH
+                    ),
+                    "descriptor": part_by_id[part_id].get("descriptor", {}),
                 }
             )
-        material_predictions, material_prediction_batches = _predict_material_families(
+        target_predictions, material_prediction_batches = _predict_material_families(
             items=prediction_items,
             runner=runner,
             model=model,
-            allowed_families=_catalog_family_options(catalog_by_id),
+            identity_options=_catalog_identity_options(catalog_by_id),
             batch_size=batch_size,
             raw_dir=raw_dir,
         )
+        target_prediction_by_id = {
+            str(row["part_id"]): row for row in target_predictions
+        }
+        for component_id, members in sorted(component_members.items()):
+            prediction = target_prediction_by_id[component_id]
+            for part_id in members:
+                material_predictions.append(
+                    {
+                        **prediction,
+                        "part_id": part_id,
+                        "prediction_scope": "appearance_component",
+                        "component_id": component_id,
+                        "component_member_part_ids": list(members),
+                    }
+                )
+        for part_id in sorted(set(part_by_id) - set(part_to_component)):
+            material_predictions.append(
+                {
+                    **target_prediction_by_id[part_id],
+                    "prediction_scope": "independent_part_id",
+                    "component_id": None,
+                }
+            )
+        material_predictions.sort(key=lambda row: str(row["part_id"]))
     prediction_by_id = {str(row["part_id"]): row for row in material_predictions}
     jobs: list[dict[str, Any]] = []
     gate_audits: list[dict[str, Any]] = []
@@ -1762,32 +2421,47 @@ def run_part_id_qwen_rerank(
         if require_material_family_prediction:
             if not isinstance(prediction, Mapping):
                 raise PartIdQwenError(
-                    f"Part-ID {part_id} has no material-family prediction"
+                    f"Part-ID {part_id} has no material-identity prediction"
                 )
-            ranking = _family_filtered_ranking(
+            ranking = _identity_filtered_ranking(
                 ranking=ranking,
                 catalog_by_id=catalog_by_id,
                 prediction=prediction,
             )
-        target = _target_appearance(selected_observations[0])
-        shortlist = _compatibility_shortlist(
-            ranking=ranking,
-            catalog_by_id=catalog_by_id,
-            profiles_by_id=profiles_by_id,
-            target=target,
-            candidate_count=candidate_count,
-            allow_color_tuning=allow_color_tuning,
+        target = (
+            None
+            if require_material_family_prediction
+            else _target_appearance(selected_observations[0])
         )
+        if require_material_family_prediction:
+            shortlist = _identity_shortlist(
+                ranking,
+                candidate_count=candidate_count,
+            )
+        else:
+            shortlist = _compatibility_shortlist(
+                ranking=ranking,
+                catalog_by_id=catalog_by_id,
+                profiles_by_id=profiles_by_id,
+                target=target,
+                candidate_count=candidate_count,
+                allow_color_tuning=allow_color_tuning,
+            )
         if len(shortlist) < (1 if require_material_family_prediction else 2):
             raise PartIdQwenError(
                 f"Part-ID {part_id} has too few visually compatible candidates"
             )
-        shortlist, library_gap_fallback = _promote_library_gap_candidates(
-            shortlist,
-            candidate_count=candidate_count,
-            target=target,
-            allow_color_tuning=allow_color_tuning,
-        )
+        if require_material_family_prediction:
+            library_gap_fallback = any(
+                row.get("library_gap_fallback") is True for row in shortlist
+            )
+        else:
+            shortlist, library_gap_fallback = _promote_library_gap_candidates(
+                shortlist,
+                candidate_count=candidate_count,
+                target=target,
+                allow_color_tuning=allow_color_tuning,
+            )
         allowed_material_ids = [
             str(row["material_id"])
             for row in shortlist
@@ -1816,7 +2490,11 @@ def run_part_id_qwen_rerank(
             candidates.append(
                 {
                     "candidate_index": candidate_index,
-                    **_candidate_summary(row, catalog_by_id[material_id]),
+                    **_candidate_summary(
+                        row,
+                        catalog_by_id[material_id],
+                        withhold_color=require_material_family_prediction,
+                    ),
                     "original_retrieval_rank": row.get("original_retrieval_rank"),
                     "compatibility_rank": row.get("compatibility_rank"),
                     "visual_compatibility_score": row.get("visual_compatibility_score"),
@@ -1839,6 +2517,8 @@ def run_part_id_qwen_rerank(
                     "library_gap_fallback_tier": row.get("library_gap_fallback_tier"),
                     "relaxed_constraints": row.get("relaxed_constraints"),
                     "conditional_h1_evaluation": row.get("conditional_h1_evaluation"),
+                    "identity_match_tier": row.get("identity_match_tier"),
+                    "color_evidence_used": row.get("color_evidence_used"),
                 }
             )
         jobs.append(
@@ -1871,6 +2551,19 @@ def run_part_id_qwen_rerank(
                     and prediction.get("status") == "APPLYABLE"
                     else None
                 ),
+                "authorized_physical_identity": (
+                    {
+                        "physical_substrate": prediction.get(
+                            "physical_substrate"
+                        ),
+                        "surface_treatment": prediction.get("surface_treatment"),
+                        "optical_behavior": prediction.get("optical_behavior"),
+                        "surface_finish": prediction.get("surface_finish"),
+                    }
+                    if isinstance(prediction, Mapping)
+                    and prediction.get("status") == "APPLYABLE"
+                    else None
+                ),
                 "authorized_material_ids": [
                     str(row["material_id"])
                     for row in shortlist
@@ -1896,6 +2589,8 @@ def run_part_id_qwen_rerank(
                         "library_gap_fallback_tier": row["library_gap_fallback_tier"],
                         "relaxed_constraints": row["relaxed_constraints"],
                         "conditional_h1_evaluation": row["conditional_h1_evaluation"],
+                        "identity_match_tier": row.get("identity_match_tier"),
+                        "color_evidence_used": row.get("color_evidence_used"),
                     }
                     for row in shortlist
                 ],
@@ -1921,6 +2616,7 @@ def run_part_id_qwen_rerank(
                 candidates=job["candidates"],
                 render_paths=render_paths,
                 output=comparison_dir / f"{job['part_id']}.png",
+                grayscale=require_material_family_prediction,
             )
             job["comparison_sheet"] = str(sheet)
     selections: list[dict[str, Any]] = []
@@ -1944,7 +2640,13 @@ def run_part_id_qwen_rerank(
             raw_path.write_text(generated.text, encoding="utf-8")
             try:
                 document, parse_audit = parse_plan_content_with_audit(generated.text)
-                validated = _validate_batch(document, expected=batch)
+                validated = _validate_batch(
+                    document,
+                    expected=batch,
+                    require_material_identity_match=(
+                        require_material_family_prediction
+                    ),
+                )
             except Exception as exc:
                 final_error = exc
                 _write(
@@ -1984,23 +2686,42 @@ def run_part_id_qwen_rerank(
                 f"Qwen Part-ID batch {batch_index} failed twice: {final_error}"
             )
     qwen_selections = [dict(row) for row in selections]
-    selections, selective_regression = _apply_part_id_selective_regression(
-        jobs=jobs,
-        qwen_selections=qwen_selections,
-    )
     if require_material_family_prediction:
+        selections, component_identity_consensus = (
+            _apply_component_identity_consensus(
+                selections=selections,
+                component_members=component_members,
+            )
+        )
+        selective_regression = {
+            "schema_version": SELECTIVE_REGRESSION_SCHEMA_VERSION,
+            "status": "DISABLED_IDENTITY_STAGE_IGNORES_COLOR",
+            "parts": [],
+            "summary": {
+                "part_count": len(selections),
+                "qwen_choice_retained_count": len(selections),
+                "fresh_local_baseline_selected_count": 0,
+                "exact_cover": True,
+            },
+        }
         for selection in selections:
             part_id = str(selection["part_id"])
             prediction = prediction_by_id[part_id]
-            selected_record = catalog_by_id[str(selection["material_id"])]
             prediction_applyable = prediction.get("status") == "APPLYABLE"
-            if prediction_applyable and (
-                str(selected_record.get("family", "")).strip().casefold()
-                != prediction["catalog_family"]
-            ):
-                raise PartIdQwenError(
-                    f"material selection escaped predicted family for {part_id}"
-                )
+            if prediction_applyable:
+                authorized_material_ids = {
+                    str(row["material_id"])
+                    for row in _identity_filtered_ranking(
+                        ranking=retrieval_by_id[part_id]["fused_ranking"],
+                        catalog_by_id=catalog_by_id,
+                        prediction=prediction,
+                    )
+                }
+                if str(selection["material_id"]) not in authorized_material_ids:
+                    raise PartIdQwenError(
+                        f"material selection escaped predicted physical identity "
+                        f"for {part_id}"
+                    )
             selection_confidence = float(selection.get("confidence", 0.0))
             selection["selection_confidence"] = selection_confidence
             selection["confidence"] = (
@@ -2009,6 +2730,20 @@ def run_part_id_qwen_rerank(
                 else 0.0
             )
             selection["material_prediction"] = dict(prediction)
+    else:
+        selections, selective_regression = _apply_part_id_selective_regression(
+            jobs=jobs,
+            qwen_selections=qwen_selections,
+        )
+        component_identity_consensus = {
+            "schema_version": "qwen-component-material-identity-consensus/v1",
+            "components": [],
+            "summary": {
+                "component_count": 0,
+                "constrained_part_count": 0,
+                "all_components_share_one_exact_mdl": True,
+            },
+        }
     choices = {row["part_id"]: row["material_id"] for row in selections}
     if set(choices) != set(part_by_id):
         raise PartIdQwenError("Qwen Part-ID rerank did not exactly cover its jobs")
@@ -2029,9 +2764,10 @@ def run_part_id_qwen_rerank(
         ),
         "selection_order": (
             [
-                "material_family_prediction",
-                "exact_catalog_family_filter",
-                "exact_mdl_visual_selection",
+                "physical_material_identity_prediction_without_color",
+                "exact_substrate_treatment_optical_filter",
+                "exact_material_or_corresponding_material_selection_without_color",
+                "appearance_component_exact_mdl_consensus",
             ]
             if require_material_family_prediction
             else ["visual_candidate_selection"]
@@ -2043,8 +2779,13 @@ def run_part_id_qwen_rerank(
         ),
         "qwen_raw_selections": qwen_selections,
         "part_id_selective_regression": selective_regression,
+        "component_identity_consensus": component_identity_consensus,
         "visual_compatibility_gate": {
-            "policy": ("perceptual_color_texture_transmission_gate/v2"),
+            "policy": (
+                "physical_identity_without_color/v1"
+                if require_material_family_prediction
+                else "perceptual_color_texture_transmission_gate/v2"
+            ),
             "observation_bank": str(bank_root) if bank_root is not None else None,
             "parts": gate_audits,
         },
@@ -2055,8 +2796,16 @@ def run_part_id_qwen_rerank(
             "observed_part_count": len(part_by_id),
             "selection_count": len(selections),
             "exact_cover_of_observed_parts": len(selections) == len(part_by_id),
-            "material_library_gap_fallback_count": sum(
-                job.get("library_gap_fallback") is not None for job in jobs
+            "material_library_gap_fallback_count": (
+                sum(
+                    row.get("match_type") == "CORRESPONDING_MATERIAL"
+                    and row.get("confidence", 0.0) > 0.0
+                    for row in selections
+                )
+                if require_material_family_prediction
+                else sum(
+                    job.get("library_gap_fallback") is not None for job in jobs
+                )
             ),
             "selective_regression_changed_count": (
                 selective_regression["summary"]["fresh_local_baseline_selected_count"]
@@ -2070,6 +2819,21 @@ def run_part_id_qwen_rerank(
                 for row in material_predictions
             ),
             "physical_cross_family_fallback_count": 0,
+            "component_identity_count": len(component_members),
+            "component_identity_constrained_part_count": sum(
+                len(members) for members in component_members.values()
+            ),
+            "color_evidence_used_for_identity_count": 0,
+            "exact_library_match_count": sum(
+                row.get("match_type") == "EXACT_LIBRARY_MATCH"
+                and row.get("confidence", 0.0) > 0.0
+                for row in selections
+            ),
+            "corresponding_material_count": sum(
+                row.get("match_type") == "CORRESPONDING_MATERIAL"
+                and row.get("confidence", 0.0) > 0.0
+                for row in selections
+            ),
         },
     }
     return {
@@ -2085,6 +2849,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--retrieval", type=Path, required=True)
     parser.add_argument("--catalog", type=Path, required=True)
+    parser.add_argument(
+        "--appearance-components",
+        type=Path,
+        help=(
+            "sealed same-surface appearance components whose members must share "
+            "one physical identity and exact MDL"
+        ),
+    )
     parser.add_argument("--model-path", type=Path, required=True)
     parser.add_argument("--model-name", default="qwen3.5-local-part-id-reranker")
     parser.add_argument("--output-dir", type=Path, required=True)
@@ -2103,8 +2875,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--require-material-family-prediction",
         action="store_true",
         help=(
-            "predict a physical catalog family before candidate selection and "
-            "forbid cross-family MDL choices"
+            "predict physical substrate/treatment/optical identity before candidate "
+            "selection, prefer an exact library material, and otherwise choose a "
+            "corresponding material without using colour"
         ),
     )
     parser.add_argument("--max-new-tokens", type=int, default=1024)
@@ -2127,6 +2900,11 @@ def main(argv: list[str] | None = None) -> int:
     evidence_path = args.evidence.expanduser().resolve(strict=True)
     retrieval_path = args.retrieval.expanduser().resolve(strict=True)
     catalog_path = args.catalog.expanduser().resolve(strict=True)
+    appearance_components_path = (
+        args.appearance_components.expanduser().resolve(strict=True)
+        if args.appearance_components is not None
+        else None
+    )
     model_path = args.model_path.expanduser().resolve(strict=True)
     output_dir = args.output_dir.expanduser().resolve()
     output = args.output.expanduser().resolve()
@@ -2145,6 +2923,11 @@ def main(argv: list[str] | None = None) -> int:
             evidence=_read(evidence_path, "Part-ID evidence"),
             retrieval=_read(retrieval_path, "Part-ID retrieval"),
             catalog=_read(catalog_path, "material catalog"),
+            appearance_components=(
+                _read(appearance_components_path, "appearance components")
+                if appearance_components_path is not None
+                else None
+            ),
             runner=runner,
             model=args.model_name,
             output_dir=output_dir,

@@ -3121,8 +3121,28 @@ def build_part_id_material_plan(
                 not in {"APPLYABLE", "INSUFFICIENT_EVIDENCE"}
                 or not isinstance(prediction.get("catalog_family"), str)
                 or not prediction["catalog_family"]
+                or not isinstance(prediction.get("physical_substrate"), str)
+                or not prediction["physical_substrate"]
+                or not isinstance(prediction.get("surface_treatment"), str)
+                or not prediction["surface_treatment"]
+                or not isinstance(prediction.get("optical_behavior"), str)
+                or not prediction["optical_behavior"]
                 or not isinstance(prediction.get("surface_finish"), str)
                 or not prediction["surface_finish"]
+                or prediction.get("identity_resolution")
+                not in {
+                    "exact_material",
+                    "corresponding_material",
+                    "insufficient_evidence",
+                }
+                or isinstance(prediction.get("substrate_confidence"), bool)
+                or not isinstance(
+                    prediction.get("substrate_confidence"), (int, float)
+                )
+                or isinstance(prediction.get("treatment_confidence"), bool)
+                or not isinstance(
+                    prediction.get("treatment_confidence"), (int, float)
+                )
                 or isinstance(prediction.get("confidence"), bool)
                 or not isinstance(prediction.get("confidence"), (int, float))
                 or not math.isfinite(float(prediction["confidence"]))

@@ -17,6 +17,7 @@ from qwen_material_pipeline.evidence.appearance_component_material import (
 from qwen_material_pipeline.workflows.appearance_component_qwen import (
     run_component_qwen_rerank,
 )
+from qwen_material_pipeline.workflows.part_id_qwen import BATCH_SCHEMA_VERSION
 
 
 class _Generation:
@@ -34,7 +35,7 @@ class _ComponentRunner:
         return _Generation(
             json.dumps(
                 {
-                    "schema_version": "qwen-part-id-material-rerank-batch/v2",
+                    "schema_version": BATCH_SCHEMA_VERSION,
                     "selections": [
                         {
                             "part_id": "AC_green",

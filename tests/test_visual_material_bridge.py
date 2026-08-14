@@ -53,15 +53,34 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                     {
                         "part_id": "P0001",
                         "catalog_family": "paint",
+                        "physical_substrate": "metal",
+                        "surface_treatment": "paint",
+                        "optical_behavior": "opaque",
                         "surface_finish": "matte",
+                        "substrate_confidence": 0.91,
+                        "treatment_confidence": 0.90,
                         "confidence": 0.91,
+                        "identity_resolution": "exact_material",
                         "status": "APPLYABLE",
                     }
                 ]
             },
             choices={"P0001": paint},
             confidences={"P0001": 0.88},
-            catalog_document={"materials": [{"material_id": paint, "family": "paint"}]},
+            catalog_document={
+                "materials": [
+                    {
+                        "material_id": paint,
+                        "family": "paint",
+                        "surface_semantics": {
+                            "compatible_substrates": ["metal", "polymer", "wood"],
+                            "surface_treatment": "paint",
+                            "optical_behavior": "opaque",
+                            "confidence": "high",
+                        },
+                    }
+                ]
+            },
         )
 
         self.assertEqual(result["P0001"]["catalog_family"], "paint")
@@ -77,8 +96,14 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                         {
                             "part_id": "P0001",
                             "catalog_family": "paint",
+                            "physical_substrate": "metal",
+                            "surface_treatment": "paint",
+                            "optical_behavior": "opaque",
                             "surface_finish": "matte",
+                            "substrate_confidence": 0.91,
+                            "treatment_confidence": 0.90,
                             "confidence": 0.91,
+                            "identity_resolution": "exact_material",
                             "status": "APPLYABLE",
                         }
                     ]
@@ -86,7 +111,18 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                 choices={"P0001": glass},
                 confidences={"P0001": 0.88},
                 catalog_document={
-                    "materials": [{"material_id": glass, "family": "glass"}]
+                    "materials": [
+                        {
+                            "material_id": glass,
+                            "family": "glass",
+                            "surface_semantics": {
+                                "compatible_substrates": ["glass"],
+                                "surface_treatment": "bare",
+                                "optical_behavior": "transparent",
+                                "confidence": "high",
+                            },
+                        }
+                    ]
                 },
             )
 
@@ -99,8 +135,14 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                         {
                             "part_id": "P0001",
                             "catalog_family": "unknown",
+                            "physical_substrate": "unknown",
+                            "surface_treatment": "unknown",
+                            "optical_behavior": "unknown",
                             "surface_finish": "unknown",
+                            "substrate_confidence": 0.30,
+                            "treatment_confidence": 0.20,
                             "confidence": 0.30,
+                            "identity_resolution": "insufficient_evidence",
                             "status": "INSUFFICIENT_EVIDENCE",
                         }
                     ]
@@ -108,8 +150,64 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                 choices={"P0001": paint},
                 confidences={"P0001": 0.30},
                 catalog_document={
-                    "materials": [{"material_id": paint, "family": "paint"}]
+                    "materials": [
+                        {
+                            "material_id": paint,
+                            "family": "paint",
+                            "surface_semantics": {
+                                "compatible_substrates": ["metal"],
+                                "surface_treatment": "paint",
+                                "optical_behavior": "opaque",
+                                "confidence": "high",
+                            },
+                        }
+                    ]
                 },
+            )
+
+    def test_identity_first_component_must_share_one_exact_mdl(self) -> None:
+        matte = "mdl:Paint_Matte.mdl#Paint_Matte"
+        satin = "mdl:Paint_Satin.mdl#Paint_Satin"
+        predictions = [
+            {
+                "part_id": part_id,
+                "catalog_family": "paint",
+                "physical_substrate": "metal",
+                "surface_treatment": "paint",
+                "optical_behavior": "opaque",
+                "surface_finish": "matte",
+                "substrate_confidence": 0.9,
+                "treatment_confidence": 0.9,
+                "confidence": 0.9,
+                "identity_resolution": "exact_material",
+                "status": "APPLYABLE",
+                "component_id": "AC_1",
+                "component_member_part_ids": ["P0001", "P0002"],
+            }
+            for part_id in ("P0001", "P0002")
+        ]
+        catalog = {
+            "materials": [
+                {
+                    "material_id": material_id,
+                    "family": "paint",
+                    "surface_semantics": {
+                        "compatible_substrates": ["metal", "polymer", "wood"],
+                        "surface_treatment": "paint",
+                        "optical_behavior": "opaque",
+                        "confidence": "high",
+                    },
+                }
+                for material_id in (matte, satin)
+            ]
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "share one exact"):
+            _validate_catalog_family_first_result(
+                qwen_document={"material_predictions": predictions},
+                choices={"P0001": matte, "P0002": satin},
+                confidences={"P0001": 0.8, "P0002": 0.8},
+                catalog_document=catalog,
             )
 
     def test_part_id_lock_ignores_palette_group_disagreement_contract(self) -> None:

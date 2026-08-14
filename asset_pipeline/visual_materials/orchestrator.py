@@ -1301,7 +1301,7 @@ def _validate_catalog_family_first_result(
     raw_predictions = qwen_document.get("material_predictions")
     if not isinstance(raw_predictions, list):
         raise RuntimeError(
-            "Part-ID Qwen result contains no material-family predictions"
+            "Part-ID Qwen result contains no material-identity predictions"
         )
     predictions: dict[str, dict[str, Any]] = {}
     for raw_prediction in raw_predictions:
@@ -1312,7 +1312,7 @@ def _validate_catalog_family_first_result(
         )
         if not isinstance(part_id, str) or part_id in predictions:
             raise RuntimeError(
-                "Part-ID Qwen result has invalid material-family predictions"
+                "Part-ID Qwen result has invalid material-identity predictions"
             )
         predictions[part_id] = copy.deepcopy(dict(raw_prediction))
     if set(predictions) != set(choices) or set(confidences) != set(choices):
@@ -1328,6 +1328,48 @@ def _validate_catalog_family_first_result(
         for row in raw_catalog_materials
         if isinstance(row, Mapping) and isinstance(row.get("material_id"), str)
     }
+
+    def identity_semantics(
+        material_id: str,
+    ) -> tuple[set[str], str, str, str]:
+        record = catalog_by_id[material_id]
+        semantics = record.get("surface_semantics")
+        substrates = (
+            semantics.get("compatible_substrates")
+            if isinstance(semantics, Mapping)
+            else None
+        )
+        treatment = (
+            semantics.get("surface_treatment")
+            if isinstance(semantics, Mapping)
+            else None
+        )
+        optical = (
+            semantics.get("optical_behavior")
+            if isinstance(semantics, Mapping)
+            else None
+        )
+        semantic_confidence = (
+            semantics.get("confidence") if isinstance(semantics, Mapping) else None
+        )
+        if (
+            not isinstance(substrates, list)
+            or not substrates
+            or not all(isinstance(value, str) for value in substrates)
+            or not isinstance(treatment, str)
+            or not isinstance(optical, str)
+            or not isinstance(semantic_confidence, str)
+        ):
+            raise RuntimeError(
+                f"NVIDIA MDL {material_id} has invalid physical identity semantics"
+            )
+        return (
+            {value.casefold() for value in substrates},
+            treatment.casefold(),
+            optical.casefold(),
+            semantic_confidence.casefold(),
+        )
+
     for part_id, material_id in choices.items():
         if not isinstance(material_id, str):
             raise RuntimeError(f"Part-ID {part_id} has an invalid MDL choice")
@@ -1338,17 +1380,52 @@ def _validate_catalog_family_first_result(
                 f"Part-ID {part_id} selected a material outside the catalog"
             )
         if prediction.get("status") == "APPLYABLE":
-            predicted_family = prediction.get("catalog_family")
-            selected_family = selected_catalog_row.get("family")
+            substrate = prediction.get("physical_substrate")
+            treatment = prediction.get("surface_treatment")
+            optical = prediction.get("optical_behavior")
+            identity_resolution = prediction.get("identity_resolution")
             if (
-                not isinstance(predicted_family, str)
-                or not isinstance(selected_family, str)
-                or selected_family.strip().casefold()
-                != predicted_family.strip().casefold()
+                not isinstance(substrate, str)
+                or not isinstance(treatment, str)
+                or not isinstance(optical, str)
+                or identity_resolution
+                not in {"exact_material", "corresponding_material"}
+            ):
+                raise RuntimeError(
+                    f"Part-ID {part_id} has an incomplete physical identity prediction"
+                )
+            substrate = substrate.casefold()
+            treatment = treatment.casefold()
+            optical = optical.casefold()
+            selected_substrates, selected_treatment, selected_optical, selected_confidence = (
+                identity_semantics(material_id)
+            )
+            exact_treatment_exists = any(
+                substrate in candidate_substrates
+                and candidate_treatment == treatment
+                and candidate_optical == optical
+                and candidate_confidence != "low"
+                for candidate_material_id in catalog_by_id
+                for (
+                    candidate_substrates,
+                    candidate_treatment,
+                    candidate_optical,
+                    candidate_confidence,
+                ) in [identity_semantics(candidate_material_id)]
+            )
+            if (
+                substrate not in selected_substrates
+                or selected_optical != optical
+                or selected_confidence == "low"
+                or (
+                    identity_resolution == "exact_material"
+                    and exact_treatment_exists
+                    and selected_treatment != treatment
+                )
             ):
                 raise RuntimeError(
                     f"Part-ID {part_id} selected an MDL outside its predicted "
-                    "material family"
+                    "physical material identity"
                 )
         elif prediction.get("status") == "INSUFFICIENT_EVIDENCE":
             if confidences[part_id] != 0.0:
@@ -1359,6 +1436,38 @@ def _validate_catalog_family_first_result(
         else:
             raise RuntimeError(
                 f"Part-ID {part_id} has an invalid material-prediction status"
+            )
+    component_groups: dict[str, list[str]] = {}
+    for part_id, prediction in predictions.items():
+        component_id = prediction.get("component_id")
+        if component_id is None:
+            continue
+        if not isinstance(component_id, str) or not component_id:
+            raise RuntimeError("Part-ID prediction has an invalid component identity")
+        component_groups.setdefault(component_id, []).append(part_id)
+    for component_id, member_ids in component_groups.items():
+        expected_members = sorted(member_ids)
+        contracts = {
+            (
+                predictions[part_id].get("physical_substrate"),
+                predictions[part_id].get("surface_treatment"),
+                predictions[part_id].get("optical_behavior"),
+                predictions[part_id].get("surface_finish"),
+            )
+            for part_id in member_ids
+        }
+        declared_members = {
+            tuple(predictions[part_id].get("component_member_part_ids", []))
+            for part_id in member_ids
+        }
+        if (
+            len(contracts) != 1
+            or declared_members != {tuple(expected_members)}
+            or len({choices[part_id] for part_id in member_ids}) != 1
+        ):
+            raise RuntimeError(
+                f"appearance component {component_id} does not share one exact "
+                "physical material identity and MDL"
             )
     return predictions
 
@@ -1849,7 +1958,34 @@ def _run_policy_part_id_stage(
         ):
             part_id_qwen_command.append("--allow-mdl-color-tuning")
         if config.material_prediction_mode == "catalog_family_first":
-            part_id_qwen_command.append("--require-material-family-prediction")
+            _require_file(
+                appearance_components_report,
+                "material-identity-first appearance-component evidence",
+            )
+            try:
+                identity_component_document = filter_components_for_material_evidence(
+                    appearance_components=read_object(
+                        appearance_components_report,
+                        "material-identity-first appearance components",
+                    ),
+                    part_id_evidence=evidence_document,
+                )
+            except AppearanceComponentMaterialError as exc:
+                raise RuntimeError(
+                    "Unable to bind material-identity components to final Part-ID "
+                    f"evidence: {exc}"
+                ) from exc
+            write_object(
+                appearance_component_material_memberships,
+                identity_component_document,
+            )
+            part_id_qwen_command.extend(
+                [
+                    "--require-material-family-prediction",
+                    "--appearance-components",
+                    str(appearance_component_material_memberships),
+                ]
+            )
         _run_stage(
             "part_id_qwen_rerank",
             part_id_qwen_command,
@@ -1894,7 +2030,7 @@ def _run_policy_part_id_stage(
                 confidences=qwen_part_confidences,
                 catalog_document=read_object(
                     effective_catalog,
-                    "material-family-first NVIDIA MDL catalog",
+                    "material-identity-first NVIDIA MDL catalog",
                 ),
             )
         appearance_component_document: dict[str, Any] | None = None
@@ -2124,7 +2260,7 @@ def _run_policy_part_id_stage(
             prediction_summary = qwen_part_document.get("summary", {})
             log_message(
                 log_cb,
-                "Material-family-first Part-ID assignment completed: "
+                "Material-identity-first Part-ID assignment completed: "
                 f"{prediction_summary.get('material_prediction_applyable_count', 0)} "
                 "predictions were applyable; "
                 f"{prediction_summary.get('material_prediction_insufficient_evidence_count', 0)} "
@@ -5322,7 +5458,7 @@ def _run_material_selection_stage(
     # REVIEW/limited result, render a small set of exact NVIDIA exports for the
     # dominant, reliably classified material group.  Every candidate uses
     # library defaults, changes one canonical group only, and must satisfy both
-    # the material-family contract and every registered reference view.
+    # the material-identity contract and every registered reference view.
     elif run_exact_mdl_tournament:
         exact_mdl_tournament_status = "RUNNING"
         material_candidate_dir = analysis_dir / "material_candidates"

@@ -11,10 +11,14 @@ from PIL import Image
 from qwen_material_pipeline.workflows.part_id_qwen import (
     BATCH_SCHEMA_VERSION,
     MATERIAL_FAMILY_PREDICTION_BATCH_SCHEMA_VERSION,
+    MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION,
     PartIdQwenError,
+    _apply_component_identity_consensus,
     _apply_part_id_selective_regression,
     _compatibility_shortlist,
     _family_filtered_ranking,
+    _identity_filtered_ranking,
+    _identity_shortlist,
     _promote_library_gap_candidates,
     _target_appearance,
     _validate_batch,
@@ -83,9 +87,12 @@ class _MaterialFamilyFirstRunner:
                         "predictions": [
                             {
                                 "part_id": "P0001",
-                                "catalog_family": "paint",
+                                "physical_substrate": "metal",
+                                "surface_treatment": "paint",
+                                "optical_behavior": "opaque",
                                 "surface_finish": "matte",
-                                "confidence": 0.93,
+                                "substrate_confidence": 0.93,
+                                "treatment_confidence": 0.92,
                             }
                         ],
                     }
@@ -94,11 +101,14 @@ class _MaterialFamilyFirstRunner:
         return _Generation(
             json.dumps(
                 {
-                    "schema_version": BATCH_SCHEMA_VERSION,
+                    "schema_version": (
+                        MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION
+                    ),
                     "selections": [
                         {
                             "part_id": "P0001",
                             "candidate_index": 1,
+                            "match_type": "EXACT_LIBRARY_MATCH",
                             "confidence": 0.88,
                         }
                     ],
@@ -107,7 +117,76 @@ class _MaterialFamilyFirstRunner:
         )
 
 
+class _ComponentIdentityRunner:
+    model_identity = {"backend": "fake", "fingerprint": "component-identity-test"}
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate_with_metadata(self, _payload: object) -> _Generation:
+        self.calls += 1
+        if self.calls == 1:
+            return _Generation(
+                json.dumps(
+                    {
+                        "schema_version": (
+                            MATERIAL_FAMILY_PREDICTION_BATCH_SCHEMA_VERSION
+                        ),
+                        "predictions": [
+                            {
+                                "part_id": "AC_1",
+                                "physical_substrate": "metal",
+                                "surface_treatment": "paint",
+                                "optical_behavior": "opaque",
+                                "surface_finish": "matte",
+                                "substrate_confidence": 0.94,
+                                "treatment_confidence": 0.92,
+                            }
+                        ],
+                    }
+                )
+            )
+        return _Generation(
+            json.dumps(
+                {
+                    "schema_version": (
+                        MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION
+                    ),
+                    "selections": [
+                        {
+                            "part_id": "P0001",
+                            "candidate_index": 1,
+                            "match_type": "CORRESPONDING_MATERIAL",
+                            "confidence": 0.7,
+                        },
+                        {
+                            "part_id": "P0002",
+                            "candidate_index": 2,
+                            "match_type": "EXACT_LIBRARY_MATCH",
+                            "confidence": 0.9,
+                        },
+                    ],
+                }
+            )
+        )
+
+
 class PartIdQwenTests(unittest.TestCase):
+    @staticmethod
+    def _surface_semantics(
+        substrate: str,
+        treatment: str = "bare",
+        optical: str = "opaque",
+        finish: str = "unknown",
+    ) -> dict[str, object]:
+        return {
+            "compatible_substrates": [substrate],
+            "surface_treatment": treatment,
+            "optical_behavior": optical,
+            "finish": finish,
+            "confidence": "high",
+        }
+
     def test_material_family_first_predicts_then_selects_only_same_family(
         self,
     ) -> None:
@@ -131,18 +210,39 @@ class PartIdQwenTests(unittest.TestCase):
                         "display_name": "Paint Matte",
                         "family": "paint",
                         "finishes": ["matte"],
+                        "surface_semantics": {
+                            "compatible_substrates": ["metal", "polymer", "wood"],
+                            "surface_treatment": "paint",
+                            "optical_behavior": "opaque",
+                            "finish": "matte",
+                            "confidence": "high",
+                        },
                     },
                     {
                         "material_id": paint_gloss,
                         "display_name": "Paint Gloss",
                         "family": "paint",
                         "finishes": ["glossy"],
+                        "surface_semantics": {
+                            "compatible_substrates": ["metal", "polymer", "wood"],
+                            "surface_treatment": "paint",
+                            "optical_behavior": "opaque",
+                            "finish": "glossy",
+                            "confidence": "high",
+                        },
                     },
                     {
                         "material_id": green_glass,
                         "display_name": "Green Glass",
                         "family": "glass",
                         "finishes": ["smooth"],
+                        "surface_semantics": {
+                            "compatible_substrates": ["glass"],
+                            "surface_treatment": "bare",
+                            "optical_behavior": "transparent",
+                            "finish": "smooth",
+                            "confidence": "high",
+                        },
                     },
                 ]
             }
@@ -200,13 +300,18 @@ class PartIdQwenTests(unittest.TestCase):
             sum(row.get("type") == "image_url" for row in prediction_content),
             2,
         )
+        selection_prompt = runner.payloads[1]["messages"][1]["content"][-1]["text"]
+        self.assertIn('"visual_retrieval_scores_withheld": true', selection_prompt)
+        self.assertIn('"original_retrieval_rank": null', selection_prompt)
+        self.assertIn('"color_score": null', selection_prompt)
         self.assertEqual(result["material_prediction_mode"], "catalog_family_first")
         self.assertEqual(
             result["selection_order"],
             [
-                "material_family_prediction",
-                "exact_catalog_family_filter",
-                "exact_mdl_visual_selection",
+                "physical_material_identity_prediction_without_color",
+                "exact_substrate_treatment_optical_filter",
+                "exact_material_or_corresponding_material_selection_without_color",
+                "appearance_component_exact_mdl_consensus",
             ],
         )
         self.assertEqual(result["material_predictions"][0]["catalog_family"], "paint")
@@ -222,7 +327,7 @@ class PartIdQwenTests(unittest.TestCase):
         )
         self.assertEqual(result["summary"]["physical_cross_family_fallback_count"], 0)
 
-    def test_material_family_filter_requires_complete_family_catalog_coverage(
+    def test_material_identity_filter_requires_complete_catalog_coverage(
         self,
     ) -> None:
         paint_matte = "mdl:Paint_Matte.mdl#Paint_Matte"
@@ -231,15 +336,316 @@ class PartIdQwenTests(unittest.TestCase):
             _family_filtered_ranking(
                 ranking=[{"rank": 1, "material_id": paint_matte}],
                 catalog_by_id={
-                    paint_matte: {"material_id": paint_matte, "family": "paint"},
-                    paint_gloss: {"material_id": paint_gloss, "family": "paint"},
+                    paint_matte: {
+                        "material_id": paint_matte,
+                        "family": "paint",
+                        "surface_semantics": {
+                            "compatible_substrates": ["metal"],
+                            "surface_treatment": "paint",
+                            "optical_behavior": "opaque",
+                            "finish": "matte",
+                            "confidence": "high",
+                        },
+                    },
+                    paint_gloss: {
+                        "material_id": paint_gloss,
+                        "family": "paint",
+                        "surface_semantics": {
+                            "compatible_substrates": ["metal"],
+                            "surface_treatment": "paint",
+                            "optical_behavior": "opaque",
+                            "finish": "glossy",
+                            "confidence": "high",
+                        },
+                    },
                 },
                 prediction={
                     "catalog_family": "paint",
+                    "physical_substrate": "metal",
+                    "surface_treatment": "paint",
+                    "optical_behavior": "opaque",
                     "surface_finish": "matte",
                     "confidence": 0.9,
+                    "substrate_confidence": 0.9,
+                    "treatment_confidence": 0.9,
+                    "identity_resolution": "exact_material",
+                    "status": "APPLYABLE",
                 },
             )
+
+    def test_identity_filter_rejects_rubber_and_veneer_misfiled_as_plastic(
+        self,
+    ) -> None:
+        plastic = "mdl:Plastic.mdl#Plastic"
+        abs_plastic = "mdl:Plastic_ABS.mdl#Plastic_ABS"
+        rubber = "mdl:Rubber_Textured.mdl#Rubber_Textured"
+        veneer = "mdl:Veneer.mdl#Veneer_OU_Walnut"
+        catalog = {
+            plastic: {
+                "material_id": plastic,
+                "family": "plastic",
+                "surface_semantics": self._surface_semantics("polymer"),
+            },
+            abs_plastic: {
+                "material_id": abs_plastic,
+                "family": "plastic",
+                "surface_semantics": self._surface_semantics("polymer"),
+            },
+            rubber: {
+                "material_id": rubber,
+                "family": "plastic",
+                "surface_semantics": self._surface_semantics("elastomer"),
+            },
+            veneer: {
+                "material_id": veneer,
+                "family": "plastic",
+                "surface_semantics": self._surface_semantics("wood"),
+            },
+        }
+        ranking = [
+            {"rank": index, "material_id": material_id}
+            for index, material_id in enumerate(
+                (rubber, veneer, plastic, abs_plastic), start=1
+            )
+        ]
+
+        filtered = _identity_filtered_ranking(
+            ranking=ranking,
+            catalog_by_id=catalog,
+            prediction={
+                "part_id": "P0001",
+                "catalog_family": "plastic",
+                "physical_substrate": "polymer",
+                "surface_treatment": "bare",
+                "optical_behavior": "opaque",
+                "surface_finish": "unknown",
+                "confidence": 0.9,
+                "substrate_confidence": 0.9,
+                "treatment_confidence": 0.9,
+                "identity_resolution": "exact_material",
+                "status": "APPLYABLE",
+            },
+        )
+
+        self.assertEqual(
+            {row["material_id"] for row in filtered},
+            {plastic, abs_plastic},
+        )
+
+    def test_identity_shortlist_ignores_rgb_rank_and_samples_treatments(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "material_id": "mdl:Z_Bare.mdl#Z_Bare",
+                "rank": 99,
+                "color_score": 0.01,
+                "catalog_surface_semantics": {"surface_treatment": "bare"},
+                "predicted_finish_match": False,
+                "identity_match_tier": "corresponding_material_fallback",
+            },
+            {
+                "material_id": "mdl:A_Paint.mdl#A_Paint",
+                "rank": 1,
+                "color_score": 0.99,
+                "catalog_surface_semantics": {"surface_treatment": "paint"},
+                "predicted_finish_match": False,
+                "identity_match_tier": "corresponding_material_fallback",
+            },
+            {
+                "material_id": "mdl:B_Bare.mdl#B_Bare",
+                "rank": 2,
+                "color_score": 0.98,
+                "catalog_surface_semantics": {"surface_treatment": "bare"},
+                "predicted_finish_match": False,
+                "identity_match_tier": "corresponding_material_fallback",
+            },
+        ]
+
+        shortlist = _identity_shortlist(rows, candidate_count=2)
+
+        self.assertEqual(
+            [row["material_id"] for row in shortlist],
+            ["mdl:B_Bare.mdl#B_Bare", "mdl:A_Paint.mdl#A_Paint"],
+        )
+        self.assertEqual(
+            [row["original_retrieval_rank"] for row in shortlist], [None, None]
+        )
+        self.assertTrue(all(row["color_evidence_used"] is False for row in shortlist))
+
+    def test_identity_filter_collapses_color_variants_to_generic_material(
+        self,
+    ) -> None:
+        generic = "mdl:Aluminum_Anodized.mdl#Aluminum_Anodized"
+        black = "mdl:Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
+        blue = "mdl:Aluminum_Anodized_Blue.mdl#Aluminum_Anodized_Blue"
+        bare = "mdl:Iron.mdl#Iron"
+        anodized = self._surface_semantics("metal", "anodized")
+        catalog = {
+            generic: {"material_id": generic, "surface_semantics": anodized},
+            black: {"material_id": black, "surface_semantics": anodized},
+            blue: {"material_id": blue, "surface_semantics": anodized},
+            bare: {
+                "material_id": bare,
+                "surface_semantics": self._surface_semantics("metal"),
+            },
+        }
+        filtered = _identity_filtered_ranking(
+            ranking=[
+                {"rank": 1, "material_id": black},
+                {"rank": 2, "material_id": blue},
+                {"rank": 3, "material_id": generic},
+                {"rank": 4, "material_id": bare},
+            ],
+            catalog_by_id=catalog,
+            prediction={
+                "part_id": "P0001",
+                "catalog_family": "metal",
+                "physical_substrate": "metal",
+                "surface_treatment": "anodized",
+                "optical_behavior": "opaque",
+                "surface_finish": "unknown",
+                "confidence": 0.9,
+                "substrate_confidence": 0.9,
+                "treatment_confidence": 0.9,
+                "identity_resolution": "exact_material",
+                "status": "APPLYABLE",
+            },
+        )
+
+        self.assertEqual([row["material_id"] for row in filtered], [generic])
+
+    def test_component_consensus_enforces_one_exact_mdl(self) -> None:
+        selections, audit = _apply_component_identity_consensus(
+            selections=[
+                {"part_id": "P1", "material_id": "mdl:A", "confidence": 0.7},
+                {"part_id": "P2", "material_id": "mdl:B", "confidence": 0.9},
+                {"part_id": "P3", "material_id": "mdl:A", "confidence": 0.6},
+            ],
+            component_members={"AC_1": ["P1", "P2", "P3"]},
+        )
+
+        self.assertEqual({row["material_id"] for row in selections}, {"mdl:A"})
+        self.assertEqual(audit["summary"]["component_count"], 1)
+        self.assertTrue(audit["summary"]["all_components_share_one_exact_mdl"])
+
+    def test_component_is_predicted_once_and_receives_one_exact_mdl(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            part_rows = []
+            retrieval_groups = []
+            matte = "mdl:Paint_Matte.mdl#Paint_Matte"
+            satin = "mdl:Paint_Satin.mdl#Paint_Satin"
+            rubber = "mdl:Rubber_Textured.mdl#Rubber_Textured"
+            for index, part_id in enumerate(("P0001", "P0002"), start=1):
+                crop = root / f"{part_id}.png"
+                Image.fromarray(
+                    np.full((20, 20, 3), (20 * index, 100, 40), dtype=np.uint8)
+                ).save(crop)
+                part_rows.append(
+                    {
+                        "part_id": part_id,
+                        "status": "observed",
+                        "descriptor": {"surface_class": "dielectric"},
+                        "observations": [
+                            {
+                                "view_id": "front",
+                                "crop": str(crop),
+                                "selected_for_material_inference": True,
+                            }
+                        ],
+                    }
+                )
+                retrieval_groups.append(
+                    {
+                        "group_id": part_id,
+                        "fused_ranking": [
+                            {"rank": 1, "material_id": matte},
+                            {"rank": 2, "material_id": satin},
+                            {"rank": 3, "material_id": rubber},
+                        ],
+                    }
+                )
+            paint_semantics = {
+                "compatible_substrates": ["metal", "polymer", "wood"],
+                "surface_treatment": "paint",
+                "optical_behavior": "opaque",
+                "finish": "matte",
+                "confidence": "high",
+            }
+            runner = _ComponentIdentityRunner()
+            result = run_part_id_qwen_rerank(
+                evidence={
+                    "schema_version": "qwen-part-id-reference-evidence/v1",
+                    "integrity": {"document_sha256": "evidence"},
+                    "parts": part_rows,
+                },
+                retrieval={"groups": retrieval_groups},
+                catalog={
+                    "materials": [
+                        {
+                            "material_id": matte,
+                            "family": "paint",
+                            "finishes": ["matte"],
+                            "surface_semantics": paint_semantics,
+                        },
+                        {
+                            "material_id": satin,
+                            "family": "paint",
+                            "finishes": ["satin"],
+                            "surface_semantics": {
+                                **paint_semantics,
+                                "finish": "satin",
+                            },
+                        },
+                        {
+                            "material_id": rubber,
+                            "family": "plastic",
+                            "surface_semantics": self._surface_semantics(
+                                "elastomer"
+                            ),
+                        },
+                    ]
+                },
+                appearance_components={
+                    "components": [
+                        {
+                            "component_id": "AC_1",
+                            "member_part_ids": ["P0001", "P0002"],
+                        }
+                    ]
+                },
+                runner=runner,
+                model="fake",
+                output_dir=root / "qwen",
+                batch_size=2,
+                candidate_count=2,
+                require_material_family_prediction=True,
+            )
+
+            grayscale = np.asarray(
+                Image.open(
+                    root
+                    / "qwen"
+                    / "identity_evidence_grayscale"
+                    / "P0001_front_01.png"
+                )
+            )
+
+        self.assertEqual(runner.calls, 2)
+        self.assertEqual(set(result["choices"].values()), {satin})
+        self.assertEqual(
+            {row["component_id"] for row in result["material_predictions"]},
+            {"AC_1"},
+        )
+        self.assertEqual(
+            result["component_identity_consensus"]["summary"][
+                "constrained_part_count"
+            ],
+            2,
+        )
+        self.assertTrue(np.array_equal(grayscale[:, :, 0], grayscale[:, :, 1]))
+        self.assertTrue(np.array_equal(grayscale[:, :, 1], grayscale[:, :, 2]))
 
     def test_tiny_chromatic_part_keeps_color_authority_in_selection(
         self,
