@@ -218,6 +218,60 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                 catalog_document=catalog,
             )
 
+    def test_identity_first_refined_scope_must_match_prediction_scope(self) -> None:
+        paint = "mdl:Paint_Matte.mdl#Paint_Matte"
+        predictions = [
+            {
+                "part_id": part_id,
+                "catalog_family": "paint",
+                "physical_substrate": "metal",
+                "material_species": "paint",
+                "surface_treatment": "paint",
+                "optical_behavior": "opaque",
+                "surface_finish": "matte",
+                "substrate_confidence": 0.9,
+                "species_confidence": 0.9,
+                "treatment_confidence": 0.9,
+                "confidence": 0.9,
+                "identity_resolution": "exact_material",
+                "status": "APPLYABLE",
+                "component_id": "AC_1",
+                "component_member_part_ids": ["P0001", "P0002"],
+            }
+            for part_id in ("P0001", "P0002")
+        ]
+        with self.assertRaisesRegex(RuntimeError, "prediction scopes differ"):
+            _validate_catalog_family_first_result(
+                qwen_document={
+                    "material_predictions": predictions,
+                    "component_membership_refinement": {
+                        "status": "COMPLETED",
+                        "components": [
+                            {
+                                "component_id": "AC_1",
+                                "refined_member_part_ids": ["P0001", "P0003"],
+                            }
+                        ],
+                    },
+                },
+                choices={"P0001": paint, "P0002": paint},
+                confidences={"P0001": 0.8, "P0002": 0.8},
+                catalog_document={
+                    "materials": [
+                        {
+                            "material_id": paint,
+                            "family": "paint",
+                            "surface_semantics": {
+                                "compatible_substrates": ["metal"],
+                                "surface_treatment": "paint",
+                                "optical_behavior": "opaque",
+                                "confidence": "high",
+                            },
+                        }
+                    ]
+                },
+            )
+
     def test_part_id_lock_ignores_palette_group_disagreement_contract(self) -> None:
         self.assertFalse(_palette_group_disagreement_contract_applies("part_id"))
         self.assertTrue(_palette_group_disagreement_contract_applies("palette_group"))

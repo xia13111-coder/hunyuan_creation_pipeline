@@ -1490,6 +1490,44 @@ def _validate_catalog_family_first_result(
                 f"appearance component {component_id} does not share one exact "
                 "physical material identity and MDL"
             )
+    refinement = qwen_document.get("component_membership_refinement")
+    if isinstance(refinement, Mapping) and refinement.get("status") == "COMPLETED":
+        raw_components = refinement.get("components")
+        if not isinstance(raw_components, list):
+            raise RuntimeError(
+                "Part-ID Qwen component refinement has no component records"
+            )
+        refined_groups: dict[str, list[str]] = {}
+        for raw_component in raw_components:
+            component_id = (
+                raw_component.get("component_id")
+                if isinstance(raw_component, Mapping)
+                else None
+            )
+            member_ids = (
+                raw_component.get("refined_member_part_ids")
+                if isinstance(raw_component, Mapping)
+                else None
+            )
+            if (
+                not isinstance(component_id, str)
+                or component_id in refined_groups
+                or not isinstance(member_ids, list)
+                or len(member_ids) < 2
+                or not all(isinstance(part_id, str) for part_id in member_ids)
+                or len(set(member_ids)) != len(member_ids)
+            ):
+                raise RuntimeError(
+                    "Part-ID Qwen component refinement has an invalid identity scope"
+                )
+            refined_groups[component_id] = sorted(member_ids)
+        if refined_groups != {
+            component_id: sorted(member_ids)
+            for component_id, member_ids in component_groups.items()
+        }:
+            raise RuntimeError(
+                "Part-ID Qwen component refinement and prediction scopes differ"
+            )
     return predictions
 
 

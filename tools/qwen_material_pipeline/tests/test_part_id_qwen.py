@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,7 @@ from qwen_material_pipeline.workflows.part_id_qwen import (
     _physical_pbr_evidence,
     _promote_library_gap_candidates,
     _rank_identity_candidates_with_pbr,
+    _refine_component_memberships_with_final_evidence,
     _target_appearance,
     _validate_batch,
     run_part_id_qwen_rerank,
@@ -421,6 +423,7 @@ class PartIdQwenTests(unittest.TestCase):
             result["selection_order"],
             [
                 "physical_material_identity_prediction_without_color",
+                "final_evidence_component_membership_refinement",
                 "exact_substrate_species_treatment_optical_filter",
                 "full_catalog_specific_preset_preservation",
                 "exact_preset_confirmation_with_bounded_color_evidence",
@@ -972,6 +975,177 @@ class PartIdQwenTests(unittest.TestCase):
         self.assertEqual({row["material_id"] for row in selections}, {"mdl:A"})
         self.assertEqual(audit["summary"]["component_count"], 1)
         self.assertTrue(audit["summary"]["all_components_share_one_exact_mdl"])
+
+    def test_final_evidence_expands_only_same_coating_and_assembly_branch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            registry_path = root / "registry.json"
+            registry = {
+                "default_prim": "/Asset",
+                "parts": [
+                    {
+                        "part_id": "P1",
+                        "prim_path": "/Asset/Asset/Housing/P1/Mesh",
+                    },
+                    {
+                        "part_id": "P2",
+                        "prim_path": "/Asset/Asset/Housing/P2/Mesh",
+                    },
+                    {
+                        "part_id": "P3",
+                        "prim_path": "/Asset/Asset/Housing/P3/Mesh",
+                    },
+                    {
+                        "part_id": "P4",
+                        "prim_path": "/Asset/Asset/Other/P4/Mesh",
+                    },
+                    {
+                        "part_id": "P5",
+                        "prim_path": "/Asset/Asset/Housing/P5/Mesh",
+                    },
+                ],
+            }
+            registry_path.write_text(json.dumps(registry))
+            registry_sha = hashlib.sha256(registry_path.read_bytes()).hexdigest()
+
+            def part(
+                part_id: str,
+                box: list[int],
+                *,
+                surface_class: str = "dielectric",
+            ) -> dict[str, object]:
+                return {
+                    "part_id": part_id,
+                    "descriptor": {
+                        "surface_class": surface_class,
+                        "median_rgb": [0.20, 0.42, 0.23],
+                        "robust_color_evidence": {
+                            "sample_count": 2048,
+                            "inlier_fraction": 0.95,
+                            "robust_reference_srgb": [0.20, 0.42, 0.23],
+                        },
+                    },
+                    "observations": [
+                        {
+                            "view_id": "front",
+                            "target_box_xyxy": box,
+                            "trusted_foreground_pixels": 2048,
+                            "camera_alignment_evidence_weight": 0.8,
+                        }
+                    ],
+                }
+
+            parts = {
+                row["part_id"]: row
+                for row in (
+                    part("P1", [0, 0, 50, 50]),
+                    part("P2", [50, 0, 100, 50]),
+                    part("P3", [98, 0, 150, 50]),
+                    # Same photo appearance and location, but a different CAD
+                    # branch is not sufficient membership authority.
+                    part("P4", [98, 0, 150, 50]),
+                    # Same assembly and location, but a conductor is not the
+                    # same physical coating as the dielectric housing seed.
+                    part("P5", [98, 0, 150, 50], surface_class="conductor"),
+                )
+            }
+            refined, audit = _refine_component_memberships_with_final_evidence(
+                appearance_components={
+                    "inputs": {
+                        "rendered_registry": str(registry_path),
+                        "rendered_registry_sha256": registry_sha,
+                    },
+                    "components": [
+                        {
+                            "component_id": "AC_green",
+                            "member_part_ids": ["P1", "P2"],
+                            "canonical_reference_rgb": [0.20, 0.42, 0.23],
+                        }
+                    ],
+                },
+                component_members={"AC_green": ["P1", "P2"]},
+                part_by_id=parts,
+            )
+
+        self.assertEqual(refined["AC_green"], ["P1", "P2", "P3"])
+        self.assertEqual(audit["summary"]["added_member_count"], 1)
+        self.assertEqual(
+            audit["components"][0]["added_members"][0]["part_id"], "P3"
+        )
+        self.assertGreaterEqual(
+            audit["components"][0]["added_members"][0]["spatial_support"],
+            0.60,
+        )
+
+    def test_final_evidence_never_resolves_ambiguous_component_membership(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            registry_path = root / "registry.json"
+            registry = {
+                "default_prim": "/Asset",
+                "parts": [
+                    {
+                        "part_id": part_id,
+                        "prim_path": f"/Asset/Asset/Housing/{part_id}/Mesh",
+                    }
+                    for part_id in ("P1", "P2", "P3", "P4", "P5")
+                ],
+            }
+            registry_path.write_text(json.dumps(registry))
+            registry_sha = hashlib.sha256(registry_path.read_bytes()).hexdigest()
+            parts = {
+                part_id: {
+                    "part_id": part_id,
+                    "descriptor": {
+                        "surface_class": "dielectric",
+                        "median_rgb": [0.2, 0.4, 0.2],
+                        "robust_color_evidence": {
+                            "sample_count": 1024,
+                            "inlier_fraction": 0.9,
+                            "robust_reference_srgb": [0.2, 0.4, 0.2],
+                        },
+                    },
+                    "observations": [
+                        {
+                            "view_id": "front",
+                            "target_box_xyxy": [0, 0, 100, 100],
+                            "trusted_foreground_pixels": 1024,
+                            "camera_alignment_evidence_weight": 0.8,
+                        }
+                    ],
+                }
+                for part_id in ("P1", "P2", "P3", "P4", "P5")
+            }
+            refined, audit = _refine_component_memberships_with_final_evidence(
+                appearance_components={
+                    "inputs": {
+                        "rendered_registry": str(registry_path),
+                        "rendered_registry_sha256": registry_sha,
+                    },
+                    "components": [
+                        {
+                            "component_id": "AC_1",
+                            "member_part_ids": ["P1", "P2"],
+                            "canonical_reference_rgb": [0.2, 0.4, 0.2],
+                        },
+                        {
+                            "component_id": "AC_2",
+                            "member_part_ids": ["P4", "P5"],
+                            "canonical_reference_rgb": [0.2, 0.4, 0.2],
+                        },
+                    ],
+                },
+                component_members={"AC_1": ["P1", "P2"], "AC_2": ["P4", "P5"]},
+                part_by_id=parts,
+            )
+
+        self.assertNotIn("P3", refined["AC_1"])
+        self.assertNotIn("P3", refined["AC_2"])
+        self.assertEqual(audit["ambiguous_part_ids"], ["P3"])
 
     def test_component_consensus_never_overwrites_conflicting_exact_presets(
         self,

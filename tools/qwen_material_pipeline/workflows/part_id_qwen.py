@@ -50,6 +50,10 @@ MINIMUM_MATERIAL_SPECIES_CONFIDENCE = 0.75
 MINIMUM_EXACT_TREATMENT_CONFIDENCE = 0.85
 MINIMUM_COMPONENT_EXACT_PRESET_CONFIDENCE = 0.80
 EXACT_LIBRARY_PRESET_MAXIMUM_DELTA_E = 25.0
+MINIMUM_COMPONENT_REFINEMENT_PIXELS = 256
+MINIMUM_COMPONENT_REFINEMENT_INLIER_FRACTION = 0.75
+MAXIMUM_COMPONENT_REFINEMENT_DELTA_E = 18.0
+MINIMUM_COMPONENT_REFINEMENT_SPATIAL_SUPPORT = 0.60
 MAXIMUM_DIRECT_EXACT_PBR_ERROR = 0.12
 MINIMUM_DIRECT_EXACT_PBR_MARGIN = 0.08
 MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH = 4
@@ -178,6 +182,14 @@ def _canonical_sha256(value: Any) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _write(path: Path, value: Mapping[str, Any]) -> Path:
@@ -2725,6 +2737,414 @@ def _payload(
     }
 
 
+def _component_refinement_rgb(part: Mapping[str, Any]) -> list[float] | None:
+    descriptor = part.get("descriptor")
+    if not isinstance(descriptor, Mapping):
+        return None
+    robust = descriptor.get("robust_color_evidence")
+    value = (
+        robust.get("robust_reference_srgb")
+        if isinstance(robust, Mapping)
+        else None
+    )
+    if value is None:
+        value = descriptor.get("median_rgb")
+    if (
+        not isinstance(value, list)
+        or len(value) != 3
+        or any(
+            isinstance(channel, bool)
+            or not isinstance(channel, (int, float))
+            or not math.isfinite(float(channel))
+            or not 0.0 <= float(channel) <= 1.0
+            for channel in value
+        )
+    ):
+        return None
+    return [float(channel) for channel in value]
+
+
+def _component_refinement_bbox(observation: Mapping[str, Any]) -> list[float] | None:
+    value = observation.get("target_box_xyxy")
+    if value is None:
+        value = observation.get("projected_box_xyxy")
+    if (
+        not isinstance(value, list)
+        or len(value) != 4
+        or any(
+            isinstance(coordinate, bool)
+            or not isinstance(coordinate, (int, float))
+            or not math.isfinite(float(coordinate))
+            for coordinate in value
+        )
+    ):
+        return None
+    left, top, right, bottom = (float(coordinate) for coordinate in value)
+    if right <= left or bottom <= top:
+        return None
+    return [left, top, right, bottom]
+
+
+def _component_refinement_bbox_gap(
+    first: Sequence[float],
+    second: Sequence[float],
+) -> float:
+    left_a, top_a, right_a, bottom_a = first
+    left_b, top_b, right_b, bottom_b = second
+    dx = max(0.0, left_a - right_b, left_b - right_a)
+    dy = max(0.0, top_a - bottom_b, top_b - bottom_a)
+    return float(math.hypot(dx, dy))
+
+
+def _component_refinement_proximity_limit(
+    first: Sequence[float],
+    second: Sequence[float],
+) -> float:
+    sizes = (
+        first[2] - first[0],
+        first[3] - first[1],
+        second[2] - second[0],
+        second[3] - second[1],
+    )
+    return float(max(10.0, min(36.0, 0.06 * max(sizes))))
+
+
+def _component_refinement_assembly_branch(
+    prim_path: str,
+    *,
+    default_prim: str | None,
+) -> str | None:
+    parts = [part for part in prim_path.split("/") if part]
+    if not parts:
+        return None
+    root = (
+        default_prim.strip("/").split("/")[-1]
+        if isinstance(default_prim, str) and default_prim.strip("/")
+        else parts[0]
+    )
+    while parts and parts[0] == root:
+        parts.pop(0)
+    return parts[0] if parts else None
+
+
+def _component_refinement_observation_weight(
+    observation: Mapping[str, Any],
+) -> float:
+    weight = observation.get("camera_alignment_evidence_weight")
+    pixels = observation.get("trusted_foreground_pixels")
+    if (
+        isinstance(weight, bool)
+        or not isinstance(weight, (int, float))
+        or isinstance(pixels, bool)
+        or not isinstance(pixels, int)
+        or pixels < 1
+    ):
+        return 0.0
+    return float(
+        max(0.0, min(1.0, float(weight)))
+        * min(1.0, math.log2(max(2, pixels)) / 12.0)
+    )
+
+
+def _refine_component_memberships_with_final_evidence(
+    *,
+    appearance_components: Mapping[str, Any] | None,
+    component_members: Mapping[str, Sequence[str]],
+    part_by_id: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, list[str]], dict[str, Any]]:
+    """Expand sealed component seeds using final Part-ID evidence.
+
+    The early appearance-component pass is deliberately conservative and runs
+    before local Part-ID evidence is available.  A split housing panel can
+    therefore be marked independent even when later evidence proves that it is
+    the same continuous coating.  This late pass never invents a component: it
+    only expands an existing photo-supported seed when final colour, physical
+    surface type, CAD assembly branch, and multi-view spatial evidence all
+    agree.  Ambiguous candidates remain independent.
+    """
+
+    result = {
+        component_id: sorted(set(members))
+        for component_id, members in component_members.items()
+    }
+    disabled = {
+        "schema_version": "qwen-final-evidence-component-refinement/v1",
+        "status": "NOT_AVAILABLE",
+        "components": [],
+        "ambiguous_part_ids": [],
+        "summary": {
+            "source_component_count": len(result),
+            "source_member_count": sum(len(members) for members in result.values()),
+            "added_member_count": 0,
+            "refined_member_count": sum(len(members) for members in result.values()),
+        },
+    }
+    if appearance_components is None or not result:
+        return result, disabled
+    inputs = appearance_components.get("inputs")
+    registry_value = (
+        inputs.get("rendered_registry") if isinstance(inputs, Mapping) else None
+    )
+    registry_sha256 = (
+        inputs.get("rendered_registry_sha256")
+        if isinstance(inputs, Mapping)
+        else None
+    )
+    if not isinstance(registry_value, str) or not isinstance(registry_sha256, str):
+        return result, disabled
+    try:
+        registry_path = Path(registry_value).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise PartIdQwenError(
+            f"appearance-component rendered registry is unavailable: {exc}"
+        ) from exc
+    if not registry_path.is_file() or _sha256_file(registry_path) != registry_sha256:
+        raise PartIdQwenError(
+            "appearance-component rendered registry failed its file seal"
+        )
+    registry = _read(registry_path, "appearance-component rendered registry")
+    raw_registry_parts = registry.get("parts")
+    if not isinstance(raw_registry_parts, list):
+        raise PartIdQwenError("appearance-component rendered registry has no parts")
+    registry_by_id: dict[str, Mapping[str, Any]] = {}
+    for raw in raw_registry_parts:
+        part_id = raw.get("part_id") if isinstance(raw, Mapping) else None
+        prim_path = raw.get("prim_path") if isinstance(raw, Mapping) else None
+        if (
+            not isinstance(part_id, str)
+            or not isinstance(prim_path, str)
+            or part_id in registry_by_id
+        ):
+            raise PartIdQwenError(
+                "appearance-component rendered registry has invalid Part IDs"
+            )
+        registry_by_id[part_id] = raw
+    if not set(part_by_id) <= set(registry_by_id):
+        raise PartIdQwenError(
+            "final Part-ID evidence is not covered by the rendered registry"
+        )
+    raw_components = appearance_components.get("components")
+    component_metadata = {
+        str(raw["component_id"]): raw
+        for raw in raw_components
+        if isinstance(raw, Mapping) and isinstance(raw.get("component_id"), str)
+    } if isinstance(raw_components, list) else {}
+    default_prim = registry.get("default_prim")
+    assigned = {
+        part_id for members in result.values() for part_id in members
+    }
+    candidate_matches: dict[str, list[dict[str, Any]]] = {}
+    for part_id in sorted(set(part_by_id) - assigned):
+        part = part_by_id[part_id]
+        descriptor = part.get("descriptor")
+        robust = (
+            descriptor.get("robust_color_evidence")
+            if isinstance(descriptor, Mapping)
+            else None
+        )
+        sample_count = robust.get("sample_count") if isinstance(robust, Mapping) else None
+        inlier_fraction = (
+            robust.get("inlier_fraction") if isinstance(robust, Mapping) else None
+        )
+        candidate_rgb = _component_refinement_rgb(part)
+        candidate_surface = (
+            descriptor.get("surface_class")
+            if isinstance(descriptor, Mapping)
+            else None
+        )
+        registry_row = registry_by_id[part_id]
+        candidate_branch = _component_refinement_assembly_branch(
+            str(registry_row["prim_path"]),
+            default_prim=default_prim if isinstance(default_prim, str) else None,
+        )
+        if (
+            candidate_rgb is None
+            or not isinstance(candidate_surface, str)
+            or not candidate_surface
+            or isinstance(sample_count, bool)
+            or not isinstance(sample_count, int)
+            or sample_count < MINIMUM_COMPONENT_REFINEMENT_PIXELS
+            or isinstance(inlier_fraction, bool)
+            or not isinstance(inlier_fraction, (int, float))
+            or float(inlier_fraction)
+            < MINIMUM_COMPONENT_REFINEMENT_INLIER_FRACTION
+            or candidate_branch is None
+        ):
+            continue
+        matches: list[dict[str, Any]] = []
+        for component_id, members in sorted(result.items()):
+            metadata = component_metadata.get(component_id)
+            canonical_rgb = (
+                metadata.get("canonical_reference_rgb")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if (
+                not isinstance(canonical_rgb, list)
+                or len(canonical_rgb) != 3
+                or any(
+                    isinstance(channel, bool)
+                    or not isinstance(channel, (int, float))
+                    for channel in canonical_rgb
+                )
+            ):
+                continue
+            seed_surfaces = {
+                str(seed_descriptor["surface_class"])
+                for member in members
+                for seed_descriptor in [part_by_id[member].get("descriptor")]
+                if isinstance(seed_descriptor, Mapping)
+                and isinstance(seed_descriptor.get("surface_class"), str)
+            }
+            if seed_surfaces != {candidate_surface}:
+                continue
+            member_branches = {
+                branch
+                for member in members
+                for branch in [
+                    _component_refinement_assembly_branch(
+                        str(registry_by_id[member]["prim_path"]),
+                        default_prim=(
+                            default_prim if isinstance(default_prim, str) else None
+                        ),
+                    )
+                ]
+                if branch is not None
+            }
+            if candidate_branch not in member_branches:
+                continue
+            delta_e = srgb_delta_e(candidate_rgb, canonical_rgb)
+            if delta_e > MAXIMUM_COMPONENT_REFINEMENT_DELTA_E:
+                continue
+            best_by_view: dict[str, tuple[float, str, float]] = {}
+            for candidate_observation in part.get("observations", []):
+                if not isinstance(candidate_observation, Mapping):
+                    continue
+                view_id = candidate_observation.get("view_id")
+                candidate_bbox = _component_refinement_bbox(candidate_observation)
+                if not isinstance(view_id, str) or candidate_bbox is None:
+                    continue
+                for member in members:
+                    for member_observation in part_by_id[member].get(
+                        "observations", []
+                    ):
+                        if (
+                            not isinstance(member_observation, Mapping)
+                            or member_observation.get("view_id") != view_id
+                        ):
+                            continue
+                        member_bbox = _component_refinement_bbox(member_observation)
+                        if member_bbox is None:
+                            continue
+                        gap = _component_refinement_bbox_gap(
+                            candidate_bbox, member_bbox
+                        )
+                        if gap > _component_refinement_proximity_limit(
+                            candidate_bbox, member_bbox
+                        ):
+                            continue
+                        support = min(
+                            _component_refinement_observation_weight(
+                                candidate_observation
+                            ),
+                            _component_refinement_observation_weight(
+                                member_observation
+                            ),
+                        )
+                        current = best_by_view.get(view_id)
+                        if current is None or (support, member, -gap) > (
+                            current[0], current[1], -current[2]
+                        ):
+                            best_by_view[view_id] = (support, member, gap)
+            spatial_support = sum(row[0] for row in best_by_view.values())
+            if spatial_support < MINIMUM_COMPONENT_REFINEMENT_SPATIAL_SUPPORT:
+                continue
+            matches.append(
+                {
+                    "component_id": component_id,
+                    "assembly_branch": candidate_branch,
+                    "surface_class": candidate_surface,
+                    "sample_count": sample_count,
+                    "inlier_fraction": round(float(inlier_fraction), 8),
+                    "color_delta_e": round(float(delta_e), 8),
+                    "spatial_support": round(float(spatial_support), 8),
+                    "supporting_views": {
+                        view_id: {
+                            "support": round(values[0], 8),
+                            "adjacent_member_part_id": values[1],
+                            "bbox_gap_px": round(values[2], 8),
+                        }
+                        for view_id, values in sorted(best_by_view.items())
+                    },
+                }
+            )
+        if matches:
+            candidate_matches[part_id] = matches
+    additions: list[dict[str, Any]] = []
+    ambiguous: list[str] = []
+    for part_id, matches in sorted(candidate_matches.items()):
+        if len(matches) != 1:
+            ambiguous.append(part_id)
+            continue
+        match = matches[0]
+        component_id = str(match["component_id"])
+        result[component_id] = sorted([*result[component_id], part_id])
+        additions.append({"part_id": part_id, **match})
+    component_audits = []
+    additions_by_component = {
+        component_id: [
+            row for row in additions if row["component_id"] == component_id
+        ]
+        for component_id in result
+    }
+    for component_id, members in sorted(result.items()):
+        source_members = sorted(set(component_members[component_id]))
+        component_audits.append(
+            {
+                "component_id": component_id,
+                "source_member_part_ids": source_members,
+                "refined_member_part_ids": list(members),
+                "added_members": additions_by_component[component_id],
+            }
+        )
+    return (
+        result,
+        {
+            "schema_version": "qwen-final-evidence-component-refinement/v1",
+            "status": "COMPLETED",
+            "rendered_registry": str(registry_path),
+            "rendered_registry_sha256": registry_sha256,
+            "policy": {
+                "existing_photo_supported_seed_required": True,
+                "final_part_id_evidence_required": True,
+                "same_cad_assembly_branch_required": True,
+                "same_physical_surface_class_required": True,
+                "minimum_sample_count": MINIMUM_COMPONENT_REFINEMENT_PIXELS,
+                "minimum_inlier_fraction": (
+                    MINIMUM_COMPONENT_REFINEMENT_INLIER_FRACTION
+                ),
+                "maximum_color_delta_e": MAXIMUM_COMPONENT_REFINEMENT_DELTA_E,
+                "minimum_multiview_spatial_support": (
+                    MINIMUM_COMPONENT_REFINEMENT_SPATIAL_SUPPORT
+                ),
+                "ambiguous_candidates_remain_independent": True,
+            },
+            "components": component_audits,
+            "ambiguous_part_ids": ambiguous,
+            "summary": {
+                "source_component_count": len(result),
+                "source_member_count": sum(
+                    len(members) for members in component_members.values()
+                ),
+                "added_member_count": len(additions),
+                "refined_member_count": sum(
+                    len(members) for members in result.values()
+                ),
+            },
+        },
+    )
+
+
 def _validated_appearance_component_memberships(
     appearance_components: Mapping[str, Any] | None,
     *,
@@ -2987,6 +3407,17 @@ def run_part_id_qwen_rerank(
     component_members = _validated_appearance_component_memberships(
         appearance_components if require_material_family_prediction else None,
         observed_part_ids=set(part_by_id),
+    )
+    component_members, component_membership_refinement = (
+        _refine_component_memberships_with_final_evidence(
+            appearance_components=(
+                appearance_components
+                if require_material_family_prediction
+                else None
+            ),
+            component_members=component_members,
+            part_by_id=part_by_id,
+        )
     )
     part_to_component = {
         part_id: component_id
@@ -3743,6 +4174,7 @@ def run_part_id_qwen_rerank(
         "selection_order": (
             [
                 "physical_material_identity_prediction_without_color",
+                "final_evidence_component_membership_refinement",
                 "exact_substrate_species_treatment_optical_filter",
                 "full_catalog_specific_preset_preservation",
                 "exact_preset_confirmation_with_bounded_color_evidence",
@@ -3771,6 +4203,7 @@ def run_part_id_qwen_rerank(
         "direct_exact_library_assignments": direct_assignment_audits,
         "part_id_selective_regression": selective_regression,
         "component_identity_consensus": component_identity_consensus,
+        "component_membership_refinement": component_membership_refinement,
         "visual_compatibility_gate": {
             "policy": (
                 "physical_identity_species_then_exact_authored_preset/v6"
