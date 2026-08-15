@@ -174,6 +174,111 @@ class _ComponentIdentityRunner:
         )
 
 
+class _SpecificPresetRunner:
+    model_identity = {"backend": "fake", "fingerprint": "specific-preset-test"}
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate_with_metadata(self, _payload: object) -> _Generation:
+        self.calls += 1
+        if self.calls == 1:
+            return _Generation(
+                json.dumps(
+                    {
+                        "schema_version": MATERIAL_FAMILY_PREDICTION_BATCH_SCHEMA_VERSION,
+                        "predictions": [
+                            {
+                                "part_id": "P0001",
+                                "physical_substrate": "metal",
+                                "surface_treatment": "unknown",
+                                "optical_behavior": "opaque",
+                                "surface_finish": "matte",
+                                "substrate_confidence": 0.94,
+                                "treatment_confidence": 0.35,
+                            }
+                        ],
+                    }
+                )
+            )
+        return _Generation(
+            json.dumps(
+                {
+                    "schema_version": MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION,
+                    "selections": [
+                        {
+                            "part_id": "P0001",
+                            "candidate_index": 1,
+                            "match_type": "EXACT_LIBRARY_MATCH",
+                            "confidence": 0.92,
+                        }
+                    ],
+                }
+            )
+        )
+
+
+class _TwoStageCorrespondingRunner:
+    model_identity = {"backend": "fake", "fingerprint": "two-stage-test"}
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.payloads: list[object] = []
+
+    def generate_with_metadata(self, payload: object) -> _Generation:
+        self.calls += 1
+        self.payloads.append(payload)
+        if self.calls == 1:
+            return _Generation(
+                json.dumps(
+                    {
+                        "schema_version": MATERIAL_FAMILY_PREDICTION_BATCH_SCHEMA_VERSION,
+                        "predictions": [
+                            {
+                                "part_id": "P0001",
+                                "physical_substrate": "metal",
+                                "surface_treatment": "unknown",
+                                "optical_behavior": "opaque",
+                                "surface_finish": "matte",
+                                "substrate_confidence": 0.94,
+                                "treatment_confidence": 0.35,
+                            }
+                        ],
+                    }
+                )
+            )
+        if self.calls == 2:
+            return _Generation(
+                json.dumps(
+                    {
+                        "schema_version": MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION,
+                        "selections": [
+                            {
+                                "part_id": "P0001",
+                                "candidate_index": 1,
+                                "match_type": "CORRESPONDING_MATERIAL",
+                                "confidence": 0.86,
+                            }
+                        ],
+                    }
+                )
+            )
+        return _Generation(
+            json.dumps(
+                {
+                    "schema_version": BATCH_SCHEMA_VERSION,
+                    "selections": [
+                        {
+                            "part_id": "P0001",
+                            "candidate_index": 1,
+                            "confidence": 0.82,
+                        }
+                    ],
+                }
+            )
+        )
+
+
 class PartIdQwenTests(unittest.TestCase):
     @staticmethod
     def _surface_semantics(
@@ -309,9 +414,10 @@ class PartIdQwenTests(unittest.TestCase):
             [
                 "physical_material_identity_prediction_without_color",
                 "exact_substrate_treatment_optical_filter",
-                "full_catalog_mvinverse_pbr_exact_match_or_direct_assignment",
-                "qwen_corresponding_material_selection_only_when_unresolved",
-                "appearance_component_exact_mdl_consensus",
+                "full_catalog_specific_preset_preservation",
+                "exact_preset_confirmation_with_bounded_color_evidence",
+                "independent_grayscale_corresponding_material_selection_when_unresolved",
+                "component_consensus_without_overwriting_protected_exact_presets",
             ],
         )
         self.assertEqual(result["material_predictions"][0]["catalog_family"], "paint")
@@ -321,7 +427,6 @@ class PartIdQwenTests(unittest.TestCase):
             result["selections"][0]["selection_authority"],
             "unique_full_catalog_physical_contract",
         )
-        self.assertEqual(result["qwen_raw_selections"], [])
         self.assertEqual(
             result["summary"]["direct_exact_library_assignment_count"], 1
         )
@@ -380,6 +485,172 @@ class PartIdQwenTests(unittest.TestCase):
                     "status": "APPLYABLE",
                 },
             )
+
+    def test_exact_specific_library_preset_is_preserved_and_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            crop = root / "P0001.png"
+            Image.fromarray(
+                np.full((24, 24, 3), (18, 20, 22), dtype=np.uint8)
+            ).save(crop)
+            generic = "mdl:Aluminum_Anodized.mdl#Aluminum_Anodized"
+            black = (
+                "mdl:Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
+            )
+            blue = "mdl:Aluminum_Anodized_Blue.mdl#Aluminum_Anodized_Blue"
+            semantics = self._surface_semantics(
+                "metal",
+                "anodized",
+                finish="matte",
+            )
+            runner = _SpecificPresetRunner()
+
+            result = run_part_id_qwen_rerank(
+                evidence={
+                    "schema_version": "qwen-part-id-reference-evidence/v1",
+                    "integrity": {"document_sha256": "evidence"},
+                    "parts": [
+                        {
+                            "part_id": "P0001",
+                            "status": "observed",
+                            "descriptor": {"surface_class": "conductor"},
+                            "observations": [
+                                {
+                                    "view_id": "front",
+                                    "crop": str(crop),
+                                    "selected_for_material_inference": True,
+                                }
+                            ],
+                        }
+                    ],
+                },
+                retrieval={
+                    "groups": [
+                        {
+                            "group_id": "P0001",
+                            "fused_ranking": [
+                                {"rank": 1, "material_id": black},
+                                {"rank": 2, "material_id": generic},
+                                {"rank": 3, "material_id": blue},
+                            ],
+                        }
+                    ]
+                },
+                catalog={
+                    "materials": [
+                        {
+                            "material_id": material_id,
+                            "family": "metal",
+                            "finishes": ["matte"],
+                            "surface_semantics": semantics,
+                        }
+                        for material_id in (generic, black, blue)
+                    ]
+                },
+                runner=runner,
+                model="fake",
+                output_dir=root / "qwen",
+                batch_size=1,
+                candidate_count=3,
+                require_material_family_prediction=True,
+            )
+
+        self.assertEqual(runner.calls, 2)
+        self.assertEqual(result["choices"], {"P0001": black})
+        self.assertEqual(
+            result["selections"][0]["match_type"],
+            "EXACT_LIBRARY_MATCH",
+        )
+        self.assertEqual(result["summary"]["exact_library_match_count"], 1)
+        self.assertEqual(
+            result["summary"]["color_evidence_used_for_identity_count"], 1
+        )
+
+    def test_unconfirmed_specific_preset_uses_independent_grayscale_fallback(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            crop = root / "P0001.png"
+            Image.fromarray(
+                np.full((24, 24, 3), (18, 20, 22), dtype=np.uint8)
+            ).save(crop)
+            generic = "mdl:Aluminum_Anodized.mdl#Aluminum_Anodized"
+            black = "mdl:Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
+            blue = "mdl:Aluminum_Anodized_Blue.mdl#Aluminum_Anodized_Blue"
+            semantics = self._surface_semantics(
+                "metal", "anodized", finish="matte"
+            )
+            runner = _TwoStageCorrespondingRunner()
+            result = run_part_id_qwen_rerank(
+                evidence={
+                    "schema_version": "qwen-part-id-reference-evidence/v1",
+                    "integrity": {"document_sha256": "evidence"},
+                    "parts": [
+                        {
+                            "part_id": "P0001",
+                            "status": "observed",
+                            "descriptor": {"surface_class": "conductor"},
+                            "observations": [
+                                {
+                                    "view_id": "front",
+                                    "crop": str(crop),
+                                    "selected_for_material_inference": True,
+                                }
+                            ],
+                        }
+                    ],
+                },
+                retrieval={
+                    "groups": [
+                        {
+                            "group_id": "P0001",
+                            "fused_ranking": [
+                                {"rank": 1, "material_id": black},
+                                {"rank": 2, "material_id": generic},
+                                {"rank": 3, "material_id": blue},
+                            ],
+                        }
+                    ]
+                },
+                catalog={
+                    "materials": [
+                        {
+                            "material_id": material_id,
+                            "family": "metal",
+                            "finishes": ["matte"],
+                            "surface_semantics": semantics,
+                        }
+                        for material_id in (generic, black, blue)
+                    ]
+                },
+                runner=runner,
+                model="fake",
+                output_dir=root / "qwen",
+                batch_size=1,
+                candidate_count=3,
+                require_material_family_prediction=True,
+            )
+
+        self.assertEqual(runner.calls, 3)
+        self.assertEqual(result["choices"], {"P0001": generic})
+        selection = result["selections"][0]
+        self.assertEqual(selection["match_type"], "CORRESPONDING_MATERIAL")
+        self.assertEqual(
+            selection["selection_authority"],
+            "grayscale_corresponding_material_second_pass",
+        )
+        self.assertEqual(
+            selection["exact_preset_decision"]["material_id"], generic
+        )
+        self.assertEqual(
+            result["corresponding_material_qwen_selections"][0]["material_id"],
+            generic,
+        )
+        fallback_prompt = runner.payloads[2]["messages"][1]["content"][-1]["text"]
+        self.assertIn("Color is forbidden evidence", fallback_prompt)
+        self.assertNotIn(black, fallback_prompt)
+        self.assertNotIn(blue, fallback_prompt)
 
     def test_identity_filter_rejects_rubber_and_veneer_misfiled_as_plastic(
         self,
@@ -440,7 +711,7 @@ class PartIdQwenTests(unittest.TestCase):
             {plastic, abs_plastic},
         )
 
-    def test_identity_shortlist_ignores_rgb_rank_and_samples_treatments(
+    def test_identity_shortlist_uses_rgb_only_to_surface_exact_preset_candidates(
         self,
     ) -> None:
         rows = [
@@ -474,10 +745,10 @@ class PartIdQwenTests(unittest.TestCase):
 
         self.assertEqual(
             [row["material_id"] for row in shortlist],
-            ["mdl:B_Bare.mdl#B_Bare", "mdl:A_Paint.mdl#A_Paint"],
+            ["mdl:A_Paint.mdl#A_Paint", "mdl:B_Bare.mdl#B_Bare"],
         )
         self.assertEqual(
-            [row["original_retrieval_rank"] for row in shortlist], [None, None]
+            [row["original_retrieval_rank"] for row in shortlist], [1, 2]
         )
         self.assertTrue(all(row["color_evidence_used"] is False for row in shortlist))
 
@@ -572,7 +843,7 @@ class PartIdQwenTests(unittest.TestCase):
 
         self.assertIsNone(match)
 
-    def test_identity_filter_collapses_color_variants_to_generic_material(
+    def test_identity_filter_preserves_specific_presets_and_marks_generic_fallback(
         self,
     ) -> None:
         generic = "mdl:Aluminum_Anodized.mdl#Aluminum_Anodized"
@@ -612,7 +883,20 @@ class PartIdQwenTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual([row["material_id"] for row in filtered], [generic])
+        self.assertEqual(
+            {row["material_id"] for row in filtered},
+            {generic, black, blue},
+        )
+        by_id = {row["material_id"]: row for row in filtered}
+        self.assertFalse(by_id[generic]["specific_library_preset"])
+        self.assertTrue(by_id[black]["specific_library_preset"])
+        self.assertTrue(by_id[blue]["specific_library_preset"])
+        self.assertTrue(
+            all(
+                row["generic_identity_material_id"] == generic
+                for row in filtered
+            )
+        )
 
     def test_component_consensus_enforces_one_exact_mdl(self) -> None:
         selections, audit = _apply_component_identity_consensus(
@@ -627,6 +911,45 @@ class PartIdQwenTests(unittest.TestCase):
         self.assertEqual({row["material_id"] for row in selections}, {"mdl:A"})
         self.assertEqual(audit["summary"]["component_count"], 1)
         self.assertTrue(audit["summary"]["all_components_share_one_exact_mdl"])
+
+    def test_component_consensus_never_overwrites_conflicting_exact_presets(
+        self,
+    ) -> None:
+        selections, audit = _apply_component_identity_consensus(
+            selections=[
+                {
+                    "part_id": "P1",
+                    "material_id": "mdl:Black",
+                    "match_type": "EXACT_LIBRARY_MATCH",
+                    "confidence": 0.92,
+                },
+                {
+                    "part_id": "P2",
+                    "material_id": "mdl:Blue",
+                    "match_type": "EXACT_LIBRARY_MATCH",
+                    "confidence": 0.91,
+                },
+                {
+                    "part_id": "P3",
+                    "material_id": "mdl:Generic",
+                    "match_type": "CORRESPONDING_MATERIAL",
+                    "confidence": 0.75,
+                },
+            ],
+            component_members={"AC_1": ["P1", "P2", "P3"]},
+        )
+
+        self.assertEqual(
+            {row["part_id"]: row["material_id"] for row in selections},
+            {"P1": "mdl:Black", "P2": "mdl:Blue", "P3": "mdl:Generic"},
+        )
+        component = audit["components"][0]
+        self.assertEqual(
+            component["consensus_mode"],
+            "CONFLICTING_EXACT_PRESETS_PRESERVED",
+        )
+        self.assertFalse(component["exact_shared_material_enforced"])
+        self.assertFalse(audit["summary"]["all_components_share_one_exact_mdl"])
 
     def test_component_is_predicted_once_and_receives_one_exact_mdl(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -889,6 +1212,107 @@ class PartIdQwenTests(unittest.TestCase):
             "bounded_top_candidate_fallback",
         )
         self.assertEqual(selections[0]["material_id"], "mdl:Top.mdl#Top")
+
+    def test_corresponding_specific_preset_normalizes_to_generic_identity(
+        self,
+    ) -> None:
+        expected = [
+            {
+                "part_id": "P0001",
+                "candidates": [
+                    {
+                        "candidate_index": 1,
+                        "material_id": "mdl:Aluminum_Anodized_Black",
+                        "selection_allowed": True,
+                        "specific_library_preset": True,
+                        "generic_identity_material_id": (
+                            "mdl:Aluminum_Anodized"
+                        ),
+                    },
+                    {
+                        "candidate_index": 2,
+                        "material_id": "mdl:Aluminum_Anodized",
+                        "selection_allowed": True,
+                        "specific_library_preset": False,
+                    },
+                ],
+            }
+        ]
+
+        selections = _validate_batch(
+            {
+                "schema_version": MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION,
+                "selections": [
+                    {
+                        "part_id": "P0001",
+                        "candidate_index": 1,
+                        "match_type": "CORRESPONDING_MATERIAL",
+                        "confidence": 0.8,
+                    }
+                ],
+            },
+            expected=expected,
+            require_material_identity_match=True,
+        )
+
+        self.assertEqual(selections[0]["candidate_index"], 2)
+        self.assertEqual(
+            selections[0]["material_id"],
+            "mdl:Aluminum_Anodized",
+        )
+        self.assertEqual(
+            selections[0]["index_resolution"],
+            "specific_preset_to_generic_corresponding_fallback",
+        )
+
+    def test_exact_preset_with_measured_color_mismatch_is_rejected(self) -> None:
+        expected = [
+            {
+                "part_id": "P0001",
+                "candidates": [
+                    {
+                        "candidate_index": 1,
+                        "material_id": "mdl:Paint_Matte_Finish",
+                        "selection_allowed": True,
+                        "specific_library_preset": True,
+                        "generic_identity_material_id": "mdl:Paint_Matte",
+                        "exact_preset_color_gate_passed": False,
+                        "exact_preset_color_delta_e": 48.0,
+                    },
+                    {
+                        "candidate_index": 2,
+                        "material_id": "mdl:Paint_Matte",
+                        "selection_allowed": True,
+                        "specific_library_preset": False,
+                    },
+                ],
+            }
+        ]
+
+        selections = _validate_batch(
+            {
+                "schema_version": MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION,
+                "selections": [
+                    {
+                        "part_id": "P0001",
+                        "candidate_index": 1,
+                        "match_type": "EXACT_LIBRARY_MATCH",
+                        "confidence": 0.91,
+                    }
+                ],
+            },
+            expected=expected,
+            require_material_identity_match=True,
+        )
+
+        self.assertEqual(selections[0]["material_id"], "mdl:Paint_Matte")
+        self.assertEqual(
+            selections[0]["match_type"], "CORRESPONDING_MATERIAL"
+        )
+        self.assertEqual(
+            selections[0]["index_resolution"],
+            "exact_preset_color_gate_rejected_to_generic",
+        )
 
     def test_selective_regression_is_fresh_per_part_and_color_first(self) -> None:
         jobs = [
