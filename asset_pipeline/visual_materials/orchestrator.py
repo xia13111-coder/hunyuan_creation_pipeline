@@ -1491,13 +1491,13 @@ def _validate_catalog_family_first_result(
                 "physical material identity and MDL"
             )
     refinement = qwen_document.get("component_membership_refinement")
+    refined_groups: dict[str, list[str]] = {}
     if isinstance(refinement, Mapping) and refinement.get("status") == "COMPLETED":
         raw_components = refinement.get("components")
         if not isinstance(raw_components, list):
             raise RuntimeError(
                 "Part-ID Qwen component refinement has no component records"
             )
-        refined_groups: dict[str, list[str]] = {}
         for raw_component in raw_components:
             component_id = (
                 raw_component.get("component_id")
@@ -1521,13 +1521,159 @@ def _validate_catalog_family_first_result(
                     "Part-ID Qwen component refinement has an invalid identity scope"
                 )
             refined_groups[component_id] = sorted(member_ids)
-        if refined_groups != {
+    repeated = qwen_document.get("repeated_assembly_role_consistency")
+    if isinstance(repeated, Mapping) and repeated.get("status") == "COMPLETED":
+        raw_scopes = repeated.get("final_component_scopes")
+        raw_structures = repeated.get("structures")
+        if not isinstance(raw_scopes, list) or not isinstance(raw_structures, list):
+            raise RuntimeError(
+                "Part-ID Qwen repeated-assembly audit is incomplete"
+            )
+        final_scopes: dict[str, tuple[str, list[str]]] = {}
+        for raw_scope in raw_scopes:
+            component_id = (
+                raw_scope.get("component_id")
+                if isinstance(raw_scope, Mapping)
+                else None
+            )
+            prediction_scope = (
+                raw_scope.get("prediction_scope")
+                if isinstance(raw_scope, Mapping)
+                else None
+            )
+            member_ids = (
+                raw_scope.get("member_part_ids")
+                if isinstance(raw_scope, Mapping)
+                else None
+            )
+            if (
+                not isinstance(component_id, str)
+                or component_id in final_scopes
+                or prediction_scope
+                not in {"appearance_component", "repeated_assembly_role"}
+                or not isinstance(member_ids, list)
+                or len(member_ids) < 2
+                or not all(isinstance(part_id, str) for part_id in member_ids)
+                or len(set(member_ids)) != len(member_ids)
+            ):
+                raise RuntimeError(
+                    "Part-ID Qwen repeated-assembly audit has an invalid final scope"
+                )
+            final_scopes[component_id] = (
+                str(prediction_scope),
+                sorted(member_ids),
+            )
+        if {
+            component_id: members
+            for component_id, (_scope, members) in final_scopes.items()
+        } != {
             component_id: sorted(member_ids)
             for component_id, member_ids in component_groups.items()
         }:
             raise RuntimeError(
-                "Part-ID Qwen component refinement and prediction scopes differ"
+                "Part-ID Qwen repeated-assembly and prediction scopes differ"
             )
+        for component_id, (prediction_scope, member_ids) in final_scopes.items():
+            if any(
+                predictions[part_id].get("prediction_scope") != prediction_scope
+                for part_id in member_ids
+            ):
+                raise RuntimeError(
+                    "Part-ID Qwen repeated-assembly prediction kind is inconsistent"
+                )
+        role_additions: dict[str, set[str]] = {}
+        created_role_members: dict[str, set[str]] = {}
+        allowed_role_statuses = {
+            "EXTENDED_EXISTING_COMPONENT",
+            "CREATED_ROLE_COMPONENT",
+            "ALREADY_CONSTRAINED",
+            "PHYSICAL_SURFACE_CONFLICT",
+            "GEOMETRY_IDENTITY_CONFLICT",
+            "AMBIGUOUS_EXISTING_COMPONENTS",
+        }
+        for raw_structure in raw_structures:
+            raw_roles = (
+                raw_structure.get("roles")
+                if isinstance(raw_structure, Mapping)
+                else None
+            )
+            if not isinstance(raw_roles, list):
+                raise RuntimeError(
+                    "Part-ID Qwen repeated-assembly structure has no roles"
+                )
+            for raw_role in raw_roles:
+                status = (
+                    raw_role.get("status")
+                    if isinstance(raw_role, Mapping)
+                    else None
+                )
+                member_ids = (
+                    raw_role.get("observed_member_part_ids")
+                    if isinstance(raw_role, Mapping)
+                    else None
+                )
+                if (
+                    status not in allowed_role_statuses
+                    or not isinstance(member_ids, list)
+                    or len(member_ids) < 2
+                    or not all(isinstance(part_id, str) for part_id in member_ids)
+                    or len(set(member_ids)) != len(member_ids)
+                ):
+                    raise RuntimeError(
+                        "Part-ID Qwen repeated-assembly role record is invalid"
+                    )
+                if status not in {
+                    "EXTENDED_EXISTING_COMPONENT",
+                    "CREATED_ROLE_COMPONENT",
+                    "ALREADY_CONSTRAINED",
+                }:
+                    continue
+                component_id = raw_role.get("component_id")
+                added_ids = raw_role.get("added_member_part_ids")
+                if (
+                    not isinstance(component_id, str)
+                    or component_id not in final_scopes
+                    or not isinstance(added_ids, list)
+                    or not all(isinstance(part_id, str) for part_id in added_ids)
+                    or len(set(added_ids)) != len(added_ids)
+                    or not set(member_ids) <= set(final_scopes[component_id][1])
+                    or not set(added_ids) <= set(member_ids)
+                ):
+                    raise RuntimeError(
+                        "Part-ID Qwen repeated-assembly role binding is invalid"
+                    )
+                role_additions.setdefault(component_id, set()).update(added_ids)
+                if status == "CREATED_ROLE_COMPONENT":
+                    created_role_members[component_id] = set(member_ids)
+        expected_final_groups = {
+            component_id: set(member_ids)
+            for component_id, member_ids in refined_groups.items()
+        }
+        for component_id, additions in role_additions.items():
+            expected_final_groups.setdefault(component_id, set()).update(additions)
+        for component_id, members in created_role_members.items():
+            if component_id in refined_groups:
+                raise RuntimeError(
+                    "Part-ID Qwen repeated role collides with an appearance component"
+                )
+            expected_final_groups[component_id] = set(members)
+        if {
+            component_id: sorted(members)
+            for component_id, members in expected_final_groups.items()
+        } != {
+            component_id: members
+            for component_id, (_scope, members) in final_scopes.items()
+        }:
+            raise RuntimeError(
+                "Part-ID Qwen repeated-role additions do not reproduce final scopes"
+            )
+    elif refined_groups != {
+        component_id: sorted(member_ids)
+        for component_id, member_ids in component_groups.items()
+    }:
+        raise RuntimeError(
+            "Part-ID Qwen component refinement and prediction scopes differ"
+        )
     return predictions
 
 

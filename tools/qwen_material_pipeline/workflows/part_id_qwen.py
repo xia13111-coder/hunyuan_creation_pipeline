@@ -8,6 +8,7 @@ import colorsys
 import hashlib
 import json
 import math
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -54,6 +55,8 @@ MINIMUM_COMPONENT_REFINEMENT_PIXELS = 256
 MINIMUM_COMPONENT_REFINEMENT_INLIER_FRACTION = 0.75
 MAXIMUM_COMPONENT_REFINEMENT_DELTA_E = 18.0
 MINIMUM_COMPONENT_REFINEMENT_SPATIAL_SUPPORT = 0.60
+MINIMUM_REPEATED_ASSEMBLY_INSTANCE_COUNT = 2
+MINIMUM_REPEATED_ASSEMBLY_PART_COUNT = 3
 MAXIMUM_DIRECT_EXACT_PBR_ERROR = 0.12
 MINIMUM_DIRECT_EXACT_PBR_MARGIN = 0.08
 MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH = 4
@@ -3145,6 +3148,430 @@ def _refine_component_memberships_with_final_evidence(
     )
 
 
+def _sealed_registry_from_final_evidence(
+    *,
+    evidence: Mapping[str, Any],
+) -> tuple[Path, dict[str, Any], str] | None:
+    """Load the exact CAD registry sealed into final Part-ID evidence."""
+
+    inputs = evidence.get("inputs")
+    if not isinstance(inputs, list):
+        return None
+    matches = [
+        row
+        for row in inputs
+        if isinstance(row, Mapping) and row.get("label") == "rendered_registry"
+    ]
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise PartIdQwenError(
+            "final Part-ID evidence has duplicate rendered-registry inputs"
+        )
+    path_value = matches[0].get("path")
+    document_sha256 = matches[0].get("document_sha256")
+    if not isinstance(path_value, str) or not isinstance(document_sha256, str):
+        raise PartIdQwenError(
+            "final Part-ID evidence has an invalid rendered-registry seal"
+        )
+    try:
+        path = Path(path_value).expanduser().resolve(strict=True)
+    except OSError as exc:
+        raise PartIdQwenError(
+            f"final Part-ID rendered registry is unavailable: {exc}"
+        ) from exc
+    if not path.is_file():
+        raise PartIdQwenError("final Part-ID rendered registry is not a file")
+    registry = _read(path, "final Part-ID rendered registry")
+    if _canonical_sha256(registry) != document_sha256:
+        raise PartIdQwenError(
+            "final Part-ID rendered registry failed its document seal"
+        )
+    return path, registry, document_sha256
+
+
+def _registry_part_rows_for_repeated_assemblies(
+    registry: Mapping[str, Any],
+) -> list[tuple[tuple[str, ...], dict[str, Any]]]:
+    raw_parts = registry.get("parts")
+    if not isinstance(raw_parts, list) or not raw_parts:
+        raise PartIdQwenError("rendered registry has no CAD Part-ID rows")
+    rows: list[tuple[tuple[str, ...], dict[str, Any]]] = []
+    part_ids: set[str] = set()
+    prim_paths: set[str] = set()
+    for raw in raw_parts:
+        part_id = raw.get("part_id") if isinstance(raw, Mapping) else None
+        prim_path = raw.get("prim_path") if isinstance(raw, Mapping) else None
+        geometry_sha256 = (
+            raw.get("geometry_content_sha256")
+            if isinstance(raw, Mapping)
+            else None
+        )
+        point_count = raw.get("point_count") if isinstance(raw, Mapping) else None
+        face_count = raw.get("face_count") if isinstance(raw, Mapping) else None
+        segments = (
+            tuple(segment for segment in prim_path.split("/") if segment)
+            if isinstance(prim_path, str)
+            else ()
+        )
+        if (
+            not isinstance(part_id, str)
+            or not part_id
+            or part_id in part_ids
+            or not isinstance(prim_path, str)
+            or not prim_path.startswith("/")
+            or prim_path in prim_paths
+            or len(segments) < 2
+            or not isinstance(geometry_sha256, str)
+            or len(geometry_sha256) != 64
+            or isinstance(point_count, bool)
+            or not isinstance(point_count, int)
+            or point_count < 1
+            or isinstance(face_count, bool)
+            or not isinstance(face_count, int)
+            or face_count < 1
+        ):
+            raise PartIdQwenError(
+                "rendered registry has an invalid CAD geometry identity row"
+            )
+        part_ids.add(part_id)
+        prim_paths.add(prim_path)
+        rows.append((segments, dict(raw)))
+    return rows
+
+
+def _repeated_subtree_signature(
+    *,
+    root: tuple[str, ...],
+    descendants: Sequence[tuple[tuple[str, ...], Mapping[str, Any]]],
+) -> tuple[tuple[tuple[str, ...], str, int, int], ...]:
+    return tuple(
+        sorted(
+            (
+                path[len(root) :],
+                str(row["geometry_content_sha256"]),
+                int(row["point_count"]),
+                int(row["face_count"]),
+            )
+            for path, row in descendants
+        )
+    )
+
+
+def _repeated_role_surface_classes(
+    *,
+    member_part_ids: Sequence[str],
+    part_by_id: Mapping[str, Mapping[str, Any]],
+) -> set[str]:
+    known: set[str] = set()
+    for part_id in member_part_ids:
+        descriptor = part_by_id[part_id].get("descriptor")
+        surface = (
+            descriptor.get("surface_class")
+            if isinstance(descriptor, Mapping)
+            else None
+        )
+        if isinstance(surface, str) and surface not in {"", "unknown"}:
+            known.add(surface)
+    return known
+
+
+def _apply_repeated_assembly_role_constraints(
+    *,
+    evidence: Mapping[str, Any],
+    part_by_id: Mapping[str, Mapping[str, Any]],
+    component_members: Mapping[str, Sequence[str]],
+) -> tuple[dict[str, list[str]], dict[str, Any], set[str], dict[str, str]]:
+    """Constrain homologous roles inside exact repeated CAD subassemblies.
+
+    CAD conversion flattens prototype instances into distinct prim branches.
+    Per-Part image inference can therefore assign different materials to four
+    copies of the same valve, switch or cartridge.  This pass discovers exact
+    repeated sibling subtrees from their relative hierarchy and geometry
+    hashes, then joins only matching relative roles.  It never joins two known
+    physical surface classes and never propagates into an unobserved Part-ID.
+    """
+
+    result = {
+        component_id: sorted(set(members))
+        for component_id, members in component_members.items()
+    }
+    scope_by_component = {
+        component_id: "appearance_component" for component_id in result
+    }
+    unavailable = {
+        "schema_version": "qwen-repeated-assembly-role-consistency/v1",
+        "status": "NOT_AVAILABLE",
+        "structures": [],
+        "final_component_scopes": [
+            {
+                "component_id": component_id,
+                "prediction_scope": scope_by_component[component_id],
+                "member_part_ids": list(members),
+            }
+            for component_id, members in sorted(result.items())
+        ],
+        "summary": {
+            "repeated_structure_count": 0,
+            "candidate_role_count": 0,
+            "constrained_role_count": 0,
+            "new_role_component_count": 0,
+            "extended_component_count": 0,
+            "constrained_part_count": 0,
+        },
+    }
+    sealed_registry = _sealed_registry_from_final_evidence(evidence=evidence)
+    if sealed_registry is None:
+        return result, unavailable, set(), scope_by_component
+    registry_path, registry, registry_sha256 = sealed_registry
+    rows = _registry_part_rows_for_repeated_assemblies(registry)
+    registry_part_ids = {str(row["part_id"]) for _path, row in rows}
+    if not set(part_by_id) <= registry_part_ids:
+        raise PartIdQwenError(
+            "observed Part-ID evidence is not covered by the sealed CAD registry"
+        )
+
+    # For every parent, collect the descendant Part-ID rows of each immediate
+    # child.  Exact sibling subtrees are candidate repeated CAD instances.
+    children_by_parent: dict[
+        tuple[str, ...],
+        dict[str, list[tuple[tuple[str, ...], dict[str, Any]]]],
+    ] = defaultdict(lambda: defaultdict(list))
+    for path, row in rows:
+        for prefix_length in range(1, len(path)):
+            parent = path[:prefix_length]
+            child = path[prefix_length]
+            children_by_parent[parent][child].append((path, row))
+
+    repeated_candidates: list[
+        tuple[
+            tuple[str, ...],
+            tuple[tuple[tuple[str, ...], list[tuple[tuple[str, ...], dict[str, Any]]]], ...],
+            tuple[tuple[tuple[str, ...], str, int, int], ...],
+        ]
+    ] = []
+    for parent, child_rows in children_by_parent.items():
+        instances_by_signature: dict[
+            tuple[tuple[tuple[str, ...], str, int, int], ...],
+            list[tuple[tuple[str, ...], list[tuple[tuple[str, ...], dict[str, Any]]]]],
+        ] = defaultdict(list)
+        for child, descendants in child_rows.items():
+            if len(descendants) < MINIMUM_REPEATED_ASSEMBLY_PART_COUNT:
+                continue
+            root = (*parent, child)
+            signature = _repeated_subtree_signature(
+                root=root,
+                descendants=descendants,
+            )
+            instances_by_signature[signature].append((root, descendants))
+        for signature, instances in instances_by_signature.items():
+            if len(instances) < MINIMUM_REPEATED_ASSEMBLY_INSTANCE_COUNT:
+                continue
+            repeated_candidates.append(
+                (parent, tuple(sorted(instances, key=lambda row: row[0])), signature)
+            )
+
+    # Prefer the largest outer repeated assembly.  Nested identical children
+    # are already represented as roles of that outer assembly and must not
+    # create overlapping identity components.
+    repeated_candidates.sort(
+        key=lambda row: (len(row[0]), -len(row[2]), row[0], row[1][0][0])
+    )
+    selected_structures: list[
+        tuple[
+            tuple[str, ...],
+            tuple[tuple[tuple[str, ...], list[tuple[tuple[str, ...], dict[str, Any]]]], ...],
+            tuple[tuple[tuple[str, ...], str, int, int], ...],
+        ]
+    ] = []
+    occupied_instance_roots: list[tuple[str, ...]] = []
+    for candidate in repeated_candidates:
+        roots = [instance[0] for instance in candidate[1]]
+        if any(
+            root[: len(occupied)] == occupied
+            for root in roots
+            for occupied in occupied_instance_roots
+        ):
+            continue
+        selected_structures.append(candidate)
+        occupied_instance_roots.extend(roots)
+
+    structures: list[dict[str, Any]] = []
+    strict_components: set[str] = set()
+    candidate_role_count = 0
+    constrained_role_count = 0
+    new_role_component_count = 0
+    extended_components: set[str] = set()
+    constrained_parts: set[str] = set()
+    for parent, instances, signature in selected_structures:
+        signature_document = [
+            {
+                "relative_prim_path": "/".join(relative_path),
+                "geometry_content_sha256": geometry_sha256,
+                "point_count": point_count,
+                "face_count": face_count,
+            }
+            for relative_path, geometry_sha256, point_count, face_count in signature
+        ]
+        structure_sha256 = _canonical_sha256(
+            {
+                "parent_path": "/" + "/".join(parent),
+                "instance_root_paths": [
+                    "/" + "/".join(root) for root, _rows in instances
+                ],
+                "role_signature": signature_document,
+            }
+        )
+        roles_by_path: dict[
+            tuple[str, ...], list[Mapping[str, Any]]
+        ] = defaultdict(list)
+        for root, descendants in instances:
+            for path, row in descendants:
+                roles_by_path[path[len(root) :]].append(row)
+        role_audits: list[dict[str, Any]] = []
+        for relative_path, role_rows in sorted(roles_by_path.items()):
+            observed_members = sorted(
+                str(row["part_id"])
+                for row in role_rows
+                if str(row["part_id"]) in part_by_id
+            )
+            if len(observed_members) < MINIMUM_REPEATED_ASSEMBLY_INSTANCE_COUNT:
+                continue
+            candidate_role_count += 1
+            geometry_ids = {
+                str(row["geometry_content_sha256"]) for row in role_rows
+            }
+            known_surfaces = _repeated_role_surface_classes(
+                member_part_ids=observed_members,
+                part_by_id=part_by_id,
+            )
+            role_sha256 = _canonical_sha256(
+                {
+                    "structure_sha256": structure_sha256,
+                    "relative_prim_path": "/".join(relative_path),
+                    "geometry_content_sha256": sorted(geometry_ids),
+                    "member_part_ids": observed_members,
+                }
+            )
+            base_audit = {
+                "role_id": f"CAD_ROLE_{role_sha256[:16]}",
+                "relative_prim_path": "/".join(relative_path),
+                "geometry_content_sha256": sorted(geometry_ids),
+                "observed_member_part_ids": observed_members,
+                "known_surface_classes": sorted(known_surfaces),
+            }
+            if len(geometry_ids) != 1:
+                role_audits.append(
+                    {**base_audit, "status": "GEOMETRY_IDENTITY_CONFLICT"}
+                )
+                continue
+            if len(known_surfaces) > 1:
+                role_audits.append(
+                    {**base_audit, "status": "PHYSICAL_SURFACE_CONFLICT"}
+                )
+                continue
+            overlapping_components = sorted(
+                component_id
+                for component_id, members in result.items()
+                if set(members) & set(observed_members)
+            )
+            if len(overlapping_components) > 1:
+                role_audits.append(
+                    {
+                        **base_audit,
+                        "status": "AMBIGUOUS_EXISTING_COMPONENTS",
+                        "overlapping_component_ids": overlapping_components,
+                    }
+                )
+                continue
+            if overlapping_components:
+                component_id = overlapping_components[0]
+                existing = set(result[component_id])
+                additions = sorted(set(observed_members) - existing)
+                if additions:
+                    result[component_id] = sorted(existing | set(observed_members))
+                    status = "EXTENDED_EXISTING_COMPONENT"
+                    extended_components.add(component_id)
+                else:
+                    status = "ALREADY_CONSTRAINED"
+            else:
+                component_id = str(base_audit["role_id"])
+                if component_id in result:
+                    raise PartIdQwenError(
+                        "repeated CAD role generated a duplicate component ID"
+                    )
+                additions = list(observed_members)
+                result[component_id] = list(observed_members)
+                scope_by_component[component_id] = "repeated_assembly_role"
+                status = "CREATED_ROLE_COMPONENT"
+                new_role_component_count += 1
+            strict_components.add(component_id)
+            constrained_role_count += 1
+            constrained_parts.update(observed_members)
+            role_audits.append(
+                {
+                    **base_audit,
+                    "status": status,
+                    "component_id": component_id,
+                    "added_member_part_ids": additions,
+                }
+            )
+        structures.append(
+            {
+                "structure_id": f"CAD_STRUCTURE_{structure_sha256[:16]}",
+                "parent_path": "/" + "/".join(parent),
+                "instance_root_paths": [
+                    "/" + "/".join(root) for root, _rows in instances
+                ],
+                "instance_count": len(instances),
+                "part_count_per_instance": len(signature),
+                "structure_signature_sha256": structure_sha256,
+                "roles": role_audits,
+            }
+        )
+
+    final_scopes = [
+        {
+            "component_id": component_id,
+            "prediction_scope": scope_by_component[component_id],
+            "member_part_ids": list(members),
+        }
+        for component_id, members in sorted(result.items())
+    ]
+    return (
+        result,
+        {
+            "schema_version": "qwen-repeated-assembly-role-consistency/v1",
+            "status": "COMPLETED",
+            "rendered_registry": str(registry_path),
+            "rendered_registry_document_sha256": registry_sha256,
+            "policy": {
+                "minimum_instance_count": MINIMUM_REPEATED_ASSEMBLY_INSTANCE_COUNT,
+                "minimum_part_count_per_instance": (
+                    MINIMUM_REPEATED_ASSEMBLY_PART_COUNT
+                ),
+                "exact_relative_hierarchy_required": True,
+                "exact_geometry_content_sha256_required": True,
+                "same_known_physical_surface_class_required": True,
+                "unobserved_members_never_propagated": True,
+                "largest_outer_repeated_subtree_wins": True,
+            },
+            "structures": structures,
+            "final_component_scopes": final_scopes,
+            "summary": {
+                "repeated_structure_count": len(structures),
+                "candidate_role_count": candidate_role_count,
+                "constrained_role_count": constrained_role_count,
+                "new_role_component_count": new_role_component_count,
+                "extended_component_count": len(extended_components),
+                "constrained_part_count": len(constrained_parts),
+            },
+        },
+        strict_components,
+        scope_by_component,
+    )
+
+
 def _validated_appearance_component_memberships(
     appearance_components: Mapping[str, Any] | None,
     *,
@@ -3188,7 +3615,13 @@ def _apply_component_identity_consensus(
     *,
     selections: Sequence[Mapping[str, Any]],
     component_members: Mapping[str, Sequence[str]],
+    strict_consensus_component_ids: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    strict_components = set(strict_consensus_component_ids or set())
+    if not strict_components <= set(component_members):
+        raise PartIdQwenError(
+            "strict component consensus cites an unknown material component"
+        )
     by_id = {
         str(row["part_id"]): dict(row)
         for row in selections
@@ -3238,11 +3671,27 @@ def _apply_component_identity_consensus(
             consensus_match_type = "EXACT_LIBRARY_MATCH"
             consensus_mode = "PROTECTED_EXACT_PRESET_PROPAGATED"
             consensus_applied = True
-        elif len(protected_exact_ids) > 1:
+        elif len(protected_exact_ids) > 1 and component_id not in strict_components:
             winner = None
             consensus_match_type = None
             consensus_mode = "CONFLICTING_EXACT_PRESETS_PRESERVED"
             consensus_applied = False
+        elif len(protected_exact_ids) > 1:
+            winner = min(
+                votes,
+                key=lambda material_id: (
+                    -votes[material_id][0],
+                    -votes[material_id][1],
+                    material_id,
+                ),
+            )
+            consensus_match_type = (
+                "EXACT_LIBRARY_MATCH"
+                if winner in protected_exact_ids
+                else "CORRESPONDING_MATERIAL"
+            )
+            consensus_mode = "REPEATED_ROLE_JOINT_CONSENSUS"
+            consensus_applied = True
         else:
             winner = min(
                 votes,
@@ -3280,6 +3729,11 @@ def _apply_component_identity_consensus(
                         row["selection_authority"] = (
                             "appearance_component_protected_exact_preset"
                         )
+                elif consensus_mode == "REPEATED_ROLE_JOINT_CONSENSUS":
+                    row["index_resolution"] = "repeated_assembly_role_consensus"
+                    row["selection_authority"] = (
+                        "repeated_assembly_role_joint_consensus"
+                    )
         audits.append(
             {
                 "component_id": component_id,
@@ -3419,6 +3873,37 @@ def run_part_id_qwen_rerank(
             part_by_id=part_by_id,
         )
     )
+    if require_material_family_prediction:
+        (
+            component_members,
+            repeated_assembly_role_consistency,
+            strict_consensus_component_ids,
+            component_scope_by_id,
+        ) = _apply_repeated_assembly_role_constraints(
+            evidence=evidence,
+            part_by_id=part_by_id,
+            component_members=component_members,
+        )
+    else:
+        strict_consensus_component_ids = set()
+        component_scope_by_id = {
+            component_id: "appearance_component"
+            for component_id in component_members
+        }
+        repeated_assembly_role_consistency = {
+            "schema_version": "qwen-repeated-assembly-role-consistency/v1",
+            "status": "NOT_APPLICABLE",
+            "structures": [],
+            "final_component_scopes": [],
+            "summary": {
+                "repeated_structure_count": 0,
+                "candidate_role_count": 0,
+                "constrained_role_count": 0,
+                "new_role_component_count": 0,
+                "extended_component_count": 0,
+                "constrained_part_count": 0,
+            },
+        }
     part_to_component = {
         part_id: component_id
         for component_id, members in component_members.items()
@@ -3485,7 +3970,7 @@ def run_part_id_qwen_rerank(
                     "part_id": component_id,
                     "views": trusted_views,
                     "descriptor": {
-                        "prediction_scope": "appearance_component",
+                        "prediction_scope": component_scope_by_id[component_id],
                         "member_part_ids": list(members),
                         "member_descriptors": {
                             part_id: part_by_id[part_id].get("descriptor", {})
@@ -3522,7 +4007,7 @@ def run_part_id_qwen_rerank(
                     {
                         **prediction,
                         "part_id": part_id,
-                        "prediction_scope": "appearance_component",
+                        "prediction_scope": component_scope_by_id[component_id],
                         "component_id": component_id,
                         "component_member_part_ids": list(members),
                     }
@@ -4097,6 +4582,7 @@ def run_part_id_qwen_rerank(
             _apply_component_identity_consensus(
                 selections=selections,
                 component_members=component_members,
+                strict_consensus_component_ids=strict_consensus_component_ids,
             )
         )
         selective_regression = {
@@ -4175,11 +4661,12 @@ def run_part_id_qwen_rerank(
             [
                 "physical_material_identity_prediction_without_color",
                 "final_evidence_component_membership_refinement",
+                "repeated_cad_assembly_role_consistency",
                 "exact_substrate_species_treatment_optical_filter",
                 "full_catalog_specific_preset_preservation",
                 "exact_preset_confirmation_with_bounded_color_evidence",
                 "independent_grayscale_corresponding_material_selection_when_unresolved",
-                "component_consensus_without_overwriting_protected_exact_presets",
+                "component_and_repeated_role_exact_mdl_consensus",
             ]
             if require_material_family_prediction
             else ["visual_candidate_selection"]
@@ -4204,6 +4691,9 @@ def run_part_id_qwen_rerank(
         "part_id_selective_regression": selective_regression,
         "component_identity_consensus": component_identity_consensus,
         "component_membership_refinement": component_membership_refinement,
+        "repeated_assembly_role_consistency": (
+            repeated_assembly_role_consistency
+        ),
         "visual_compatibility_gate": {
             "policy": (
                 "physical_identity_species_then_exact_authored_preset/v6"
@@ -4253,6 +4743,16 @@ def run_part_id_qwen_rerank(
             "component_identity_count": len(component_members),
             "component_identity_constrained_part_count": sum(
                 len(members) for members in component_members.values()
+            ),
+            "repeated_assembly_role_count": (
+                repeated_assembly_role_consistency["summary"][
+                    "constrained_role_count"
+                ]
+            ),
+            "repeated_assembly_role_constrained_part_count": (
+                repeated_assembly_role_consistency["summary"][
+                    "constrained_part_count"
+                ]
             ),
             "color_evidence_used_for_identity_count": sum(
                 row.get("match_type") == "EXACT_LIBRARY_MATCH"

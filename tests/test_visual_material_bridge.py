@@ -272,6 +272,95 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                 },
             )
 
+    def test_repeated_role_audit_must_exactly_bind_joint_prediction_scope(
+        self,
+    ) -> None:
+        paint = "mdl:Paint_Matte.mdl#Paint_Matte"
+        role_id = "CAD_ROLE_1"
+        predictions = [
+            {
+                "part_id": part_id,
+                "catalog_family": "paint",
+                "physical_substrate": "polymer",
+                "material_species": "paint",
+                "surface_treatment": "paint",
+                "optical_behavior": "opaque",
+                "surface_finish": "matte",
+                "substrate_confidence": 0.9,
+                "species_confidence": 0.9,
+                "treatment_confidence": 0.9,
+                "confidence": 0.9,
+                "identity_resolution": "exact_material",
+                "status": "APPLYABLE",
+                "prediction_scope": "repeated_assembly_role",
+                "component_id": role_id,
+                "component_member_part_ids": ["P0001", "P0002"],
+            }
+            for part_id in ("P0001", "P0002")
+        ]
+        repeated = {
+            "status": "COMPLETED",
+            "final_component_scopes": [
+                {
+                    "component_id": role_id,
+                    "prediction_scope": "repeated_assembly_role",
+                    "member_part_ids": ["P0001", "P0002"],
+                }
+            ],
+            "structures": [
+                {
+                    "roles": [
+                        {
+                            "status": "CREATED_ROLE_COMPONENT",
+                            "observed_member_part_ids": ["P0001", "P0002"],
+                            "component_id": role_id,
+                            "added_member_part_ids": ["P0001", "P0002"],
+                        }
+                    ]
+                }
+            ],
+        }
+        catalog = {
+            "materials": [
+                {
+                    "material_id": paint,
+                    "family": "paint",
+                    "surface_semantics": {
+                        "compatible_substrates": ["metal", "polymer", "wood"],
+                        "surface_treatment": "paint",
+                        "optical_behavior": "opaque",
+                        "confidence": "high",
+                    },
+                }
+            ]
+        }
+
+        result = _validate_catalog_family_first_result(
+            qwen_document={
+                "material_predictions": predictions,
+                "repeated_assembly_role_consistency": repeated,
+            },
+            choices={"P0001": paint, "P0002": paint},
+            confidences={"P0001": 0.8, "P0002": 0.8},
+            catalog_document=catalog,
+        )
+        self.assertEqual(set(result), {"P0001", "P0002"})
+
+        repeated["final_component_scopes"][0]["member_part_ids"] = [
+            "P0001",
+            "P0003",
+        ]
+        with self.assertRaisesRegex(RuntimeError, "prediction scopes differ"):
+            _validate_catalog_family_first_result(
+                qwen_document={
+                    "material_predictions": predictions,
+                    "repeated_assembly_role_consistency": repeated,
+                },
+                choices={"P0001": paint, "P0002": paint},
+                confidences={"P0001": 0.8, "P0002": 0.8},
+                catalog_document=catalog,
+            )
+
     def test_part_id_lock_ignores_palette_group_disagreement_contract(self) -> None:
         self.assertFalse(_palette_group_disagreement_contract_applies("part_id"))
         self.assertTrue(_palette_group_disagreement_contract_applies("palette_group"))

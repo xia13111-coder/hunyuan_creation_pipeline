@@ -16,6 +16,7 @@ from qwen_material_pipeline.workflows.part_id_qwen import (
     PartIdQwenError,
     _apply_component_identity_consensus,
     _apply_part_id_selective_regression,
+    _apply_repeated_assembly_role_constraints,
     _compatibility_shortlist,
     _direct_exact_library_match,
     _family_filtered_ranking,
@@ -424,11 +425,12 @@ class PartIdQwenTests(unittest.TestCase):
             [
                 "physical_material_identity_prediction_without_color",
                 "final_evidence_component_membership_refinement",
+                "repeated_cad_assembly_role_consistency",
                 "exact_substrate_species_treatment_optical_filter",
                 "full_catalog_specific_preset_preservation",
                 "exact_preset_confirmation_with_bounded_color_evidence",
                 "independent_grayscale_corresponding_material_selection_when_unresolved",
-                "component_consensus_without_overwriting_protected_exact_presets",
+                "component_and_repeated_role_exact_mdl_consensus",
             ],
         )
         self.assertEqual(result["material_predictions"][0]["catalog_family"], "paint")
@@ -1146,6 +1148,140 @@ class PartIdQwenTests(unittest.TestCase):
         self.assertNotIn("P3", refined["AC_1"])
         self.assertNotIn("P3", refined["AC_2"])
         self.assertEqual(audit["ambiguous_part_ids"], ["P3"])
+
+    def test_repeated_cad_instances_share_each_homologous_material_role(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            registry_path = root / "registry.json"
+            registry_parts = []
+            part_by_id: dict[str, dict[str, object]] = {}
+            body_ids: list[str] = []
+            cap_ids: list[str] = []
+            tip_ids: list[str] = []
+            for instance_index, instance in enumerate(("Pen_A", "Pen_B", "Pen_C")):
+                for role, prefix, geometry in (
+                    ("Body", "B", "a" * 64),
+                    ("Cap", "C", "b" * 64),
+                    ("Tip", "T", "c" * 64),
+                ):
+                    part_id = f"{prefix}{instance_index + 1}"
+                    registry_parts.append(
+                        {
+                            "part_id": part_id,
+                            "prim_path": f"/Asset/Assembly/{instance}/{role}/Mesh",
+                            "geometry_content_sha256": geometry,
+                            "point_count": 128,
+                            "face_count": 64,
+                        }
+                    )
+                    surface = (
+                        "conductor"
+                        if role == "Tip" and instance_index == 0
+                        else "dielectric"
+                    )
+                    part_by_id[part_id] = {
+                        "part_id": part_id,
+                        "descriptor": {"surface_class": surface},
+                        "observations": [],
+                    }
+                    {"Body": body_ids, "Cap": cap_ids, "Tip": tip_ids}[
+                        role
+                    ].append(part_id)
+            registry = {
+                "schema_version": "qwen-material-parts/v1",
+                "parts": registry_parts,
+            }
+            registry_path.write_text(json.dumps(registry))
+            document_sha256 = hashlib.sha256(
+                json.dumps(
+                    registry,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            components, audit, strict_ids, scopes = (
+                _apply_repeated_assembly_role_constraints(
+                    evidence={
+                        "inputs": [
+                            {
+                                "label": "rendered_registry",
+                                "path": str(registry_path),
+                                "document_sha256": document_sha256,
+                            }
+                        ]
+                    },
+                    part_by_id=part_by_id,
+                    component_members={"AC_body": body_ids},
+                )
+            )
+
+        self.assertEqual(audit["summary"]["repeated_structure_count"], 1)
+        self.assertEqual(audit["summary"]["candidate_role_count"], 3)
+        self.assertEqual(audit["summary"]["constrained_role_count"], 2)
+        self.assertEqual(audit["summary"]["new_role_component_count"], 1)
+        self.assertEqual(components["AC_body"], body_ids)
+        role_components = {
+            component_id: members
+            for component_id, members in components.items()
+            if component_id != "AC_body"
+        }
+        self.assertEqual(list(role_components.values()), [cap_ids])
+        role_component_id = next(iter(role_components))
+        self.assertEqual(scopes[role_component_id], "repeated_assembly_role")
+        self.assertEqual(strict_ids, {"AC_body", role_component_id})
+        role_statuses = {
+            role["relative_prim_path"]: role["status"]
+            for role in audit["structures"][0]["roles"]
+        }
+        self.assertEqual(role_statuses["Body/Mesh"], "ALREADY_CONSTRAINED")
+        self.assertEqual(role_statuses["Cap/Mesh"], "CREATED_ROLE_COMPONENT")
+        self.assertEqual(role_statuses["Tip/Mesh"], "PHYSICAL_SURFACE_CONFLICT")
+
+    def test_repeated_role_strict_consensus_resolves_noisy_exact_presets(
+        self,
+    ) -> None:
+        selections, audit = _apply_component_identity_consensus(
+            selections=[
+                {
+                    "part_id": "P1",
+                    "material_id": "mdl:Matte",
+                    "match_type": "EXACT_LIBRARY_MATCH",
+                    "confidence": 0.92,
+                },
+                {
+                    "part_id": "P2",
+                    "material_id": "mdl:Chrome",
+                    "match_type": "EXACT_LIBRARY_MATCH",
+                    "confidence": 0.85,
+                },
+                {
+                    "part_id": "P3",
+                    "material_id": "mdl:Matte",
+                    "match_type": "CORRESPONDING_MATERIAL",
+                    "confidence": 0.75,
+                },
+                {
+                    "part_id": "P4",
+                    "material_id": "mdl:Matte",
+                    "match_type": "CORRESPONDING_MATERIAL",
+                    "confidence": 0.75,
+                },
+            ],
+            component_members={"CAD_ROLE_1": ["P1", "P2", "P3", "P4"]},
+            strict_consensus_component_ids={"CAD_ROLE_1"},
+        )
+
+        self.assertEqual({row["material_id"] for row in selections}, {"mdl:Matte"})
+        self.assertEqual(
+            audit["components"][0]["consensus_mode"],
+            "REPEATED_ROLE_JOINT_CONSENSUS",
+        )
+        self.assertTrue(
+            audit["components"][0]["exact_shared_material_enforced"]
+        )
 
     def test_component_consensus_never_overwrites_conflicting_exact_presets(
         self,
