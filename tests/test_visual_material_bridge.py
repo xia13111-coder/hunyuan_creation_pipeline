@@ -1442,6 +1442,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         self.assertEqual(config.quality_lighting_profile, "material-neutral")
         self.assertFalse(config.immutable_mdl_after_selection)
         self.assertEqual(config.material_prediction_mode, "disabled")
+        self.assertFalse(config.material_identity_local_context)
         self.assertEqual(
             config.material_selection_objective,
             "semantic_compatible_visual",
@@ -1498,6 +1499,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                     "immutable_after_selection": True,
                     "parameter_candidate_mode": "disabled",
                     "prediction_mode": "catalog_family_first",
+                    "identity_local_context": True,
                     "selection_objective": "semantic_compatible_visual",
                 }
             )
@@ -1507,6 +1509,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             config = load_visual_material_config(config_path)
 
         self.assertEqual(config.material_prediction_mode, "catalog_family_first")
+        self.assertTrue(config.material_identity_local_context)
         self.assertEqual(config.material_assignment_unit, "part_id")
         self.assertTrue(config.immutable_mdl_after_selection)
         self.assertEqual(config.material_parameter_candidate_mode, "disabled")

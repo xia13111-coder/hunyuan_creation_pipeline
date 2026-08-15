@@ -109,6 +109,7 @@ class VisualMaterialConfig:
     immutable_mdl_after_selection: bool = False
     material_parameter_candidate_mode: str = "disabled"
     material_prediction_mode: str = "disabled"
+    material_identity_local_context: bool = False
     exact_mdl_tournament_max_candidates: int = 12
     exact_mdl_tournament_all_groups: bool = True
     exact_mdl_tournament_minimum_score_improvement: float = 0.015
@@ -441,6 +442,7 @@ def load_visual_material_config(
                 "assignment_unit",
                 "parameter_candidate_mode",
                 "prediction_mode",
+                "identity_local_context",
                 "exact_mdl_tournament_max_candidates",
                 "exact_mdl_tournament_all_groups",
                 "exact_mdl_tournament_minimum_score_improvement",
@@ -563,6 +565,18 @@ def load_visual_material_config(
         "config.materials.prediction_mode",
         MATERIAL_PREDICTION_MODES,
     )
+    material_identity_local_context = require_bool(
+        materials.get("identity_local_context", False),
+        "config.materials.identity_local_context",
+    )
+    if (
+        material_identity_local_context
+        and material_prediction_mode != "catalog_family_first"
+    ):
+        raise ValueError(
+            "materials.identity_local_context requires "
+            "materials.prediction_mode='catalog_family_first'"
+        )
     siglip_top_k = require_at_least_two(
         retrieval.get("siglip_top_k"),
         "config.retrieval.siglip_top_k",
@@ -907,6 +921,7 @@ def load_visual_material_config(
             MATERIAL_PARAMETER_CANDIDATE_MODES,
         ),
         material_prediction_mode=material_prediction_mode,
+        material_identity_local_context=material_identity_local_context,
         exact_mdl_tournament_max_candidates=require_at_least_two(
             materials.get("exact_mdl_tournament_max_candidates", 12),
             "config.materials.exact_mdl_tournament_max_candidates",

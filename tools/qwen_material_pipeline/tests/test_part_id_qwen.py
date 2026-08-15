@@ -28,6 +28,7 @@ from qwen_material_pipeline.workflows.part_id_qwen import (
     _refine_component_memberships_with_final_evidence,
     _target_appearance,
     _validate_batch,
+    _write_grayscale_identity_crop,
     run_part_id_qwen_rerank,
 )
 
@@ -421,6 +422,10 @@ class PartIdQwenTests(unittest.TestCase):
         )
         self.assertEqual(result["material_prediction_mode"], "catalog_family_first")
         self.assertEqual(
+            result["material_identity_evidence_mode"],
+            "isolated_target_only",
+        )
+        self.assertEqual(
             result["selection_order"],
             [
                 "physical_material_identity_prediction_without_color",
@@ -452,6 +457,46 @@ class PartIdQwenTests(unittest.TestCase):
             result["visual_compatibility_gate"]["parts"][0]["authorized_material_ids"],
         )
         self.assertEqual(result["summary"]["physical_cross_family_fallback_count"], 0)
+
+    def test_local_context_identity_sheet_is_grayscale_and_auditable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            isolated = root / "isolated.png"
+            context = root / "context.png"
+            output = root / "sheet.png"
+            Image.fromarray(
+                np.full((18, 30, 3), (220, 30, 15), dtype=np.uint8)
+            ).save(isolated)
+            Image.fromarray(
+                np.full((30, 54, 3), (10, 180, 60), dtype=np.uint8)
+            ).save(context)
+
+            _write_grayscale_identity_crop(
+                isolated,
+                output,
+                context_source=context,
+            )
+
+            with Image.open(output) as sheet:
+                self.assertEqual(sheet.size, (512, 280))
+                array = np.asarray(sheet)
+            self.assertTrue(np.array_equal(array[..., 0], array[..., 1]))
+            self.assertTrue(np.array_equal(array[..., 1], array[..., 2]))
+
+    def test_local_context_requires_material_family_prediction(self) -> None:
+        with self.assertRaisesRegex(
+            PartIdQwenError,
+            "requires material-family prediction",
+        ):
+            run_part_id_qwen_rerank(
+                evidence={"schema_version": "qwen-part-id-reference-evidence/v1"},
+                retrieval={},
+                catalog={},
+                runner=_Runner(),
+                model="fake",
+                output_dir=Path("unused"),
+                material_identity_local_context=True,
+            )
 
     def test_material_identity_filter_requires_complete_catalog_coverage(
         self,

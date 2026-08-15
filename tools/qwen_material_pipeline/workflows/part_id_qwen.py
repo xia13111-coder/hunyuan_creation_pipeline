@@ -204,15 +204,58 @@ def _write(path: Path, value: Mapping[str, Any]) -> Path:
     return path
 
 
-def _write_grayscale_identity_crop(source: Path, output: Path) -> Path:
+def _write_grayscale_identity_crop(
+    source: Path,
+    output: Path,
+    *,
+    context_source: Path | None = None,
+) -> Path:
+    """Write target-isolated and local-context grayscale identity evidence.
+
+    An isolated crop prevents neighbouring colours from deciding the target
+    material, but it also removes the manufacturing context needed to tell a
+    thin steel linkage from dark ABS.  Dense mechanisms need both signals.
+    The left panel is therefore the isolated CAD Part-ID and the right panel
+    is the sealed local photo crop containing its projected target box.  Both
+    panels are grayscale so colour remains unavailable to identity inference.
+    """
+
     try:
         resolved = source.expanduser().resolve(strict=True)
         with Image.open(resolved) as opened:
-            grayscale = ImageOps.grayscale(opened).convert("RGB")
+            isolated = ImageOps.grayscale(opened).convert("L")
+        context = None
+        if context_source is not None:
+            context_path = context_source.expanduser().resolve(strict=True)
+            with Image.open(context_path) as opened:
+                context = ImageOps.grayscale(opened).convert("L")
     except (OSError, ValueError) as exc:
         raise PartIdQwenError(
             f"unable to prepare grayscale material-identity evidence: {source}: {exc}"
         ) from exc
+    if context is None:
+        grayscale = isolated.convert("RGB")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        grayscale.save(output)
+        return output
+
+    tile_size = 256
+    label_height = 24
+    sheet = Image.new("L", (tile_size * 2, tile_size + label_height), 128)
+    draw = ImageDraw.Draw(sheet)
+    font = ImageFont.load_default()
+    draw.text((8, 7), "TARGET PART", fill=245, font=font)
+    draw.text((tile_size + 8, 7), "LOCAL ASSEMBLY CONTEXT", fill=245, font=font)
+    for index, panel in enumerate((isolated, context)):
+        fitted = ImageOps.contain(
+            panel,
+            (tile_size - 8, tile_size - 8),
+            method=Image.Resampling.BICUBIC,
+        )
+        x = index * tile_size + (tile_size - fitted.width) // 2
+        y = label_height + (tile_size - fitted.height) // 2
+        sheet.paste(fitted, (x, y))
+    grayscale = sheet.convert("RGB")
     output.parent.mkdir(parents=True, exist_ok=True)
     grayscale.save(output)
     return output
@@ -545,21 +588,43 @@ def _material_prediction_payload(
             raise PartIdQwenError(
                 f"material prediction target {item['part_id']} has no views"
             )
+        local_context = (
+            item.get("evidence_layout")
+            == "isolated_target_with_local_context"
+        )
+        target_instruction = (
+            (
+                f"MATERIAL IDENTITY TARGET {item['part_id']}. Each following "
+                "grayscale evidence sheet has TARGET PART isolated on the left "
+                "and LOCAL ASSEMBLY CONTEXT on the right. Classify only the left "
+                "target. Use the right panel only to understand its construction "
+                "and load-bearing role; never transfer a neighbour's appearance. "
+                "Base metal-versus-polymer evidence on manufacturing geometry: "
+                "uniform sheet thickness, bends or flanges, drilled fastener "
+                "interfaces, machined/cast edges and rigid load paths support "
+                "metal; molded ribs, snap fits, parting seams and organic wall "
+                "transitions support polymer. Dark or matte appearance alone is "
+                "not polymer evidence. Colour has deliberately been removed. "
+                "Descriptor: "
+            )
+            if local_context
+            else (
+                f"MATERIAL IDENTITY TARGET {item['part_id']}. All following "
+                "images are grayscale, neutral-background crops of the same "
+                "physical surface from trusted views or linked CAD parts. "
+                "Colour has deliberately been removed. Descriptor: "
+            )
+        )
         content.append(
             {
                 "type": "text",
-                "text": (
-                    f"MATERIAL IDENTITY TARGET {item['part_id']}. All following "
-                    "images are grayscale, neutral-background crops of the same "
-                    "physical surface from trusted views or linked CAD parts. "
-                    "Colour has deliberately been removed. Descriptor: "
-                    + json.dumps(
+                "text": target_instruction
+                + json.dumps(
                         _color_free_identity_descriptor(
                             item.get("descriptor", {})
                         ),
                         ensure_ascii=False,
-                    )
-                ),
+                    ),
             }
         )
         for view in views:
@@ -3786,6 +3851,7 @@ def run_part_id_qwen_rerank(
     candidate_count: int = 4,
     allow_color_tuning: bool = False,
     require_material_family_prediction: bool = False,
+    material_identity_local_context: bool = False,
     appearance_components: Mapping[str, Any] | None = None,
     entity_label: str = "exact CAD Part-ID",
 ) -> dict[str, Any]:
@@ -3811,6 +3877,12 @@ def run_part_id_qwen_rerank(
         raise PartIdQwenError("entity_label must be a non-empty string")
     if not isinstance(require_material_family_prediction, bool):
         raise PartIdQwenError("require_material_family_prediction must be boolean")
+    if not isinstance(material_identity_local_context, bool):
+        raise PartIdQwenError("material_identity_local_context must be boolean")
+    if material_identity_local_context and not require_material_family_prediction:
+        raise PartIdQwenError(
+            "material_identity_local_context requires material-family prediction"
+        )
     if require_material_family_prediction and allow_color_tuning:
         raise PartIdQwenError(
             "material-identity-first selection cannot tune colour in the identity stage"
@@ -3912,7 +3984,12 @@ def run_part_id_qwen_rerank(
     if require_material_family_prediction:
         prediction_items: list[dict[str, Any]] = []
 
-        def prediction_views(part_id: str, *, maximum: int) -> list[dict[str, str]]:
+        def prediction_views(
+            part_id: str,
+            *,
+            maximum: int,
+            include_local_context: bool,
+        ) -> list[dict[str, str]]:
             part = part_by_id[part_id]
             selected_observations = [
                 observation
@@ -3927,13 +4004,18 @@ def run_part_id_qwen_rerank(
             trusted_views = [
                 {
                     "view_id": str(candidate["view_id"]),
-                    "crop": candidate.get("isolated_crop", candidate["crop"]),
+                    "crop": candidate.get("isolated_crop") or candidate.get("crop"),
+                    "context_crop": candidate.get("crop"),
                 }
                 for candidate in part["observations"]
                 if isinstance(candidate, Mapping)
                 and isinstance(candidate.get("view_id"), str)
                 and isinstance(
-                    candidate.get("isolated_crop", candidate.get("crop")), str
+                    candidate.get("isolated_crop") or candidate.get("crop"), str
+                )
+                and (
+                    not include_local_context
+                    or isinstance(candidate.get("crop"), str)
                 )
             ]
             if not trusted_views:
@@ -3953,7 +4035,15 @@ def run_part_id_qwen_rerank(
                 output = identity_evidence_dir / (
                     f"{part_id}_{row['view_id']}_{index:02d}.png"
                 )
-                _write_grayscale_identity_crop(Path(row["crop"]), output)
+                _write_grayscale_identity_crop(
+                    Path(row["crop"]),
+                    output,
+                    context_source=(
+                        Path(row["context_crop"])
+                        if include_local_context
+                        else None
+                    ),
+                )
                 grayscale_views.append(
                     {"view_id": row["view_id"], "crop": str(output)}
                 )
@@ -3962,13 +4052,18 @@ def run_part_id_qwen_rerank(
         for component_id, members in sorted(component_members.items()):
             representative_members = list(members)[:MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH]
             trusted_views = [
-                prediction_views(part_id, maximum=1)[0]
+                prediction_views(
+                    part_id,
+                    maximum=1,
+                    include_local_context=False,
+                )[0]
                 for part_id in representative_members
             ]
             prediction_items.append(
                 {
                     "part_id": component_id,
                     "views": trusted_views,
+                    "evidence_layout": "isolated_target",
                     "descriptor": {
                         "prediction_scope": component_scope_by_id[component_id],
                         "member_part_ids": list(members),
@@ -3984,7 +4079,14 @@ def run_part_id_qwen_rerank(
                 {
                     "part_id": part_id,
                     "views": prediction_views(
-                        part_id, maximum=MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH
+                        part_id,
+                        maximum=MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH,
+                        include_local_context=material_identity_local_context,
+                    ),
+                    "evidence_layout": (
+                        "isolated_target_with_local_context"
+                        if material_identity_local_context
+                        else "isolated_target"
                     ),
                     "descriptor": part_by_id[part_id].get("descriptor", {}),
                 }
@@ -4657,6 +4759,15 @@ def run_part_id_qwen_rerank(
         "material_prediction_mode": (
             "catalog_family_first" if require_material_family_prediction else "disabled"
         ),
+        "material_identity_evidence_mode": (
+            "disabled"
+            if not require_material_family_prediction
+            else (
+                "isolated_target_with_local_context_for_independent_parts"
+                if material_identity_local_context
+                else "isolated_target_only"
+            )
+        ),
         "selection_order": (
             [
                 "physical_material_identity_prediction_without_color",
@@ -4828,6 +4939,15 @@ def build_parser() -> argparse.ArgumentParser:
             "corresponding material without using colour"
         ),
     )
+    parser.add_argument(
+        "--material-identity-local-context",
+        action="store_true",
+        help=(
+            "augment independent Part-ID grayscale identity evidence with a "
+            "separate local-assembly context panel; component evidence remains "
+            "target-isolated"
+        ),
+    )
     parser.add_argument("--max-new-tokens", type=int, default=1024)
     parser.add_argument(
         "--dtype",
@@ -4885,6 +5005,7 @@ def main(argv: list[str] | None = None) -> int:
             require_material_family_prediction=(
                 args.require_material_family_prediction
             ),
+            material_identity_local_context=args.material_identity_local_context,
         )
     finally:
         runner.unload()

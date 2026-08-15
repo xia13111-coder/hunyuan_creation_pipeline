@@ -2191,6 +2191,8 @@ def _run_policy_part_id_stage(
                     str(appearance_component_material_memberships),
                 ]
             )
+            if config.material_identity_local_context:
+                part_id_qwen_command.append("--material-identity-local-context")
         _run_stage(
             "part_id_qwen_rerank",
             part_id_qwen_command,
@@ -2215,6 +2217,18 @@ def _run_policy_part_id_stage(
             ):
                 raise RuntimeError(
                     "Part-ID Qwen material-prediction mode does not match the config"
+                )
+            expected_identity_evidence_mode = (
+                "isolated_target_with_local_context_for_independent_parts"
+                if config.material_identity_local_context
+                else "isolated_target_only"
+            )
+            if qwen_part_document.get("material_identity_evidence_mode") != (
+                expected_identity_evidence_mode
+            ):
+                raise RuntimeError(
+                    "Part-ID Qwen material-identity evidence mode does not match "
+                    "the config"
                 )
         qwen_part_choices = qwen_part_document.get("choices")
         if not isinstance(qwen_part_choices, dict):
@@ -7629,6 +7643,7 @@ def _run_finalize_assignment_stage(
         "immutable_mdl_after_selection": config.immutable_mdl_after_selection,
         "material_parameter_candidate_mode": (config.material_parameter_candidate_mode),
         "material_prediction_mode": config.material_prediction_mode,
+        "material_identity_local_context": config.material_identity_local_context,
         "part_id_parameter_tournament": (
             str(part_id_parameter_tournament_audit.resolve(strict=True))
             if part_id_parameter_tournament_audit.is_file()
