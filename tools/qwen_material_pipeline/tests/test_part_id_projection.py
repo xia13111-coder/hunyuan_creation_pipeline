@@ -12,6 +12,7 @@ from PIL import Image
 
 from qwen_material_pipeline.evidence.part_id_projection import (
     _apply_exact_cad_instance_material_propagation,
+    _apply_source_material_binding_propagation,
     _register_similarity_mask,
     _select_material_observation_index,
     build_part_id_material_plan,
@@ -34,6 +35,97 @@ def canonical_sha256(value: object) -> str:
 
 
 class PartIdProjectionTests(unittest.TestCase):
+    def test_source_material_binding_propagates_only_unanimous_observed_material(
+        self,
+    ) -> None:
+        def registry_row(part_id: str, material: str) -> dict[str, object]:
+            return {
+                "part_id": part_id,
+                "existing_visual_material": material,
+                "existing_visual_material_properties": {
+                    "shader_id": "UsdPreviewSurface",
+                    "diffuseColor": [0.2, 0.2, 0.2],
+                },
+                "source_appearance_sha256": "a" * 64,
+                "source_subset_layout_sha256": "b" * 64,
+            }
+
+        assignments = [
+            {
+                "part_id": "P1",
+                "material_id": "mdl:Steel",
+                "confidence": 0.9,
+                "status": "auto",
+            },
+            {
+                "part_id": "P2",
+                "material_id": "mdl:Fallback",
+                "confidence": 0.0,
+                "status": "policy_fallback",
+                "provenance": {"tier": "neutral_default"},
+            },
+            {
+                "part_id": "P3",
+                "material_id": "mdl:Paint",
+                "confidence": 0.9,
+                "status": "auto",
+            },
+            {
+                "part_id": "P4",
+                "material_id": "mdl:Plastic",
+                "confidence": 0.9,
+                "status": "auto",
+            },
+            {
+                "part_id": "P5",
+                "material_id": "mdl:Fallback",
+                "confidence": 0.0,
+                "status": "policy_fallback",
+                "provenance": {"tier": "neutral_default"},
+            },
+        ]
+        audit_rows = [
+            {"part_id": "P1", "status": "independently_selected"},
+            {"part_id": "P2", "status": "unobserved_preserved"},
+            {"part_id": "P3", "status": "independently_selected"},
+            {"part_id": "P4", "status": "independently_selected"},
+            {"part_id": "P5", "status": "unobserved_preserved"},
+        ]
+        evidence = {
+            "P1": {"status": "observed"},
+            "P2": {"status": "unobserved"},
+            "P3": {"status": "observed"},
+            "P4": {"status": "observed"},
+            "P5": {"status": "unobserved"},
+        }
+        registry = {
+            "parts": [
+                registry_row("P1", "/Asset/Looks/Steel"),
+                registry_row("P2", "/Asset/Looks/Steel"),
+                registry_row("P3", "/Asset/Looks/Conflicting"),
+                registry_row("P4", "/Asset/Looks/Conflicting"),
+                registry_row("P5", "/Asset/Looks/Conflicting"),
+            ]
+        }
+
+        result = _apply_source_material_binding_propagation(
+            assignments=assignments,
+            audit_rows=audit_rows,
+            evidence_by_part=evidence,
+            part_registry=registry,
+        )
+
+        assignment_by_id = {row["part_id"]: row for row in assignments}
+        audit_by_id = {row["part_id"]: row for row in audit_rows}
+        self.assertEqual(assignment_by_id["P2"]["material_id"], "mdl:Steel")
+        self.assertEqual(
+            audit_by_id["P2"]["status"],
+            "unobserved_source_binding_propagated",
+        )
+        self.assertEqual(assignment_by_id["P5"]["material_id"], "mdl:Fallback")
+        self.assertEqual(result["summary"]["propagated_part_count"], 1)
+        self.assertEqual(result["summary"]["conflict_group_count"], 1)
+
     def test_exact_cad_instances_propagate_only_unanimous_observed_material(
         self,
     ) -> None:

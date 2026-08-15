@@ -306,6 +306,142 @@ def test_exact_instance_lineage_is_recomputed_from_registry() -> None:
         )
 
 
+def _source_binding_lineage_fixture() -> tuple[dict, dict, dict, dict, dict]:
+    base, final, _audit, registry, policy_audit = _exact_instance_lineage_fixture()
+    material_id = final["assignments"][0]["material_id"]
+    properties = {
+        "shader_id": "UsdPreviewSurface",
+        "diffuseColor": [0.2, 0.2, 0.2],
+    }
+    binding_signature = {
+        "existing_visual_material": "/Asset/Looks/Shared",
+        "existing_visual_material_properties_sha256": _sha256(properties),
+        "source_appearance_sha256": "d" * 64,
+        "source_subset_layout_sha256": "e" * 64,
+    }
+    signature_sha256 = _sha256(binding_signature)
+    final["assignments"][1]["provenance"] = {
+        "assignment_unit": "part_id",
+        "source_material_binding_propagation": True,
+        "photo_observed": False,
+        "color_parameters_authored": False,
+        "source_policy_assignment_sha256": _sha256(base["assignments"][1]),
+        "source_policy_material_id": "mdl:Fallback",
+        "binding_signature_sha256": signature_sha256,
+        "observed_anchor_part_ids": ["P1"],
+    }
+    for row in registry["parts"]:
+        row.update(
+            {
+                "existing_visual_material": "/Asset/Looks/Shared",
+                "existing_visual_material_properties": properties,
+                "source_appearance_sha256": "d" * 64,
+                "source_subset_layout_sha256": "e" * 64,
+            }
+        )
+    binding_rows = [
+        {"part_id": part_id, "source_material_binding": binding_signature}
+        for part_id in ("P1", "P2")
+    ]
+    propagation = {
+        "schema_version": "qwen-source-material-binding-propagation/v1",
+        "status": "COMPLETED",
+        "source_material_binding_registry_sha256": _sha256(binding_rows),
+        "propagated_groups": [
+            {
+                "binding_signature_sha256": signature_sha256,
+                "binding_signature": binding_signature,
+                "member_part_ids": ["P1", "P2"],
+                "observed_anchor_part_ids": ["P1"],
+                "unobserved_member_part_ids": ["P2"],
+                "observed_material_ids": {"P1": material_id},
+                "observed_audit_statuses": {"P1": "independently_selected"},
+                "status": "PROPAGATED",
+                "material_id": material_id,
+                "propagated_part_ids": ["P2"],
+                "consistent_prior_exact_instance_part_ids": [],
+            }
+        ],
+        "conflict_groups": [],
+        "summary": {
+            "propagated_group_count": 1,
+            "propagated_part_count": 1,
+            "conflict_group_count": 0,
+            "conflict_unobserved_part_count": 0,
+        },
+    }
+    audit_unsigned = {
+        "schema_version": "qwen-part-id-material-plan-audit/v1",
+        "assignment_unit": "part_id",
+        "palette_fusion_used": False,
+        "base_plan_sha256": _sha256(base),
+        "output_plan_sha256": _sha256(final),
+        "source_material_binding_propagation": propagation,
+        "parts": [
+            {
+                "part_id": "P1",
+                "status": "independently_selected",
+                "material_id": material_id,
+            },
+            {
+                "part_id": "P2",
+                "status": "unobserved_source_binding_propagated",
+                "material_id": material_id,
+                "source_policy_material_id": "mdl:Fallback",
+                "source_policy_assignment_sha256": _sha256(
+                    base["assignments"][1]
+                ),
+                "binding_signature_sha256": signature_sha256,
+                "observed_anchor_part_ids": ["P1"],
+            },
+        ],
+        "summary": {
+            "part_count": 2,
+            "independently_selected_count": 1,
+            "unobserved_preserved_count": 0,
+            "unobserved_source_binding_propagated_count": 1,
+            "exact_cover": True,
+        },
+    }
+    audit = {
+        **audit_unsigned,
+        "integrity": {"document_sha256": _sha256(audit_unsigned)},
+    }
+    return base, final, audit, registry, policy_audit
+
+
+def test_source_binding_lineage_is_recomputed_from_registry() -> None:
+    base, final, audit, registry, policy_audit = _source_binding_lineage_fixture()
+
+    result = _verified_part_id_policy_replacements(
+        final_plan=final,
+        final_assignments={row["part_id"]: row for row in final["assignments"]},
+        policy_plan=base,
+        policy_audit=policy_audit,
+        part_id_material_audit=audit,
+        rendered_registry=registry,
+    )
+
+    assert result["source_binding_propagated_part_ids"] == ["P2"]
+
+    tampered = copy.deepcopy(registry)
+    tampered["parts"][1]["existing_visual_material_properties"] = {
+        "shader_id": "UsdPreviewSurface",
+        "diffuseColor": [0.8, 0.8, 0.8],
+    }
+    with pytest.raises(PublishQualityGateError, match="registry"):
+        _verified_part_id_policy_replacements(
+            final_plan=final,
+            final_assignments={
+                row["part_id"]: row for row in final["assignments"]
+            },
+            policy_plan=base,
+            policy_audit=policy_audit,
+            part_id_material_audit=audit,
+            rendered_registry=tampered,
+        )
+
+
 def test_balanced_hash_bound_coverage_passes() -> None:
     report = build_publish_quality_gate(
         confidence_gate=_confidence(part_count=10, auto_count=2),
