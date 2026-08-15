@@ -2418,6 +2418,9 @@ def _run_policy_part_id_stage(
                 appearance_component_document is None
                 and config.material_prediction_mode == "disabled"
             ),
+            propagate_exact_cad_instances=(
+                config.exact_cad_instance_material_propagation
+            ),
         )
         if (
             appearance_component_document is not None
@@ -2477,6 +2480,9 @@ def _run_policy_part_id_stage(
             )
         else:
             prediction_summary = qwen_part_document.get("summary", {})
+            propagation_summary = direct_audit_document.get(
+                "exact_cad_instance_material_propagation", {}
+            ).get("summary", {})
             log_message(
                 log_cb,
                 "Material-identity-first Part-ID assignment completed: "
@@ -2484,6 +2490,10 @@ def _run_policy_part_id_stage(
                 "predictions were applyable; "
                 f"{prediction_summary.get('material_prediction_insufficient_evidence_count', 0)} "
                 "parts retained their fallback; cross-family fallback count=0. "
+                f"{propagation_summary.get('propagated_part_count', 0)} exact "
+                "CAD instances inherited a unanimous library material; "
+                f"{propagation_summary.get('conflict_unobserved_part_count', 0)} "
+                "conflicting instances remained fail-closed. "
                 "No colour parameters or appearance-component identity sharing "
                 "were allowed in this stage.",
             )
@@ -7644,6 +7654,9 @@ def _run_finalize_assignment_stage(
         "material_parameter_candidate_mode": (config.material_parameter_candidate_mode),
         "material_prediction_mode": config.material_prediction_mode,
         "material_identity_local_context": config.material_identity_local_context,
+        "exact_cad_instance_material_propagation": (
+            config.exact_cad_instance_material_propagation
+        ),
         "part_id_parameter_tournament": (
             str(part_id_parameter_tournament_audit.resolve(strict=True))
             if part_id_parameter_tournament_audit.is_file()

@@ -435,6 +435,16 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
                     f"unobserved Part-ID {part_id} changed in component tournament"
                 )
             continue
+        if row_status == "unobserved_exact_instance_propagated":
+            if (
+                row.get("material_id") != assignment.get("material_id")
+                or part_id in winner_by_part
+            ):
+                raise ComponentMdlTournamentError(
+                    f"exact CAD instance material changed in component tournament "
+                    f"for {part_id}"
+                )
+            continue
         if row_status != "independently_selected":
             raise ComponentMdlTournamentError(
                 f"Part-ID material audit has unsupported status for {part_id}"
@@ -463,10 +473,16 @@ def rebind_part_id_material_audit_for_component_mdl_tournament(
     unobserved_preserved_count = sum(
         row.get("status") == "unobserved_preserved" for row in rows_by_part.values()
     )
+    exact_instance_propagated_count = sum(
+        row.get("status") == "unobserved_exact_instance_propagated"
+        for row in rows_by_part.values()
+    )
     if (
         summary.get("part_count") != len(rows_by_part)
         or summary.get("independently_selected_count") != independently_selected_count
         or summary.get("unobserved_preserved_count") != unobserved_preserved_count
+        or summary.get("unobserved_exact_instance_propagated_count", 0)
+        != exact_instance_propagated_count
         or summary.get("exact_cover") is not True
     ):
         raise ComponentMdlTournamentError(

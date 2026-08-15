@@ -11,6 +11,7 @@ from qwen_material_pipeline.materials.publish_quality_gate import (
     PublishQualityGateError,
     build_publish_quality_gate,
     require_publish_quality_gate_passed,
+    _verified_part_id_policy_replacements,
 )
 
 
@@ -152,6 +153,157 @@ def _queue() -> dict:
         "all_discovered_significant_groups_queued": True,
         "all_candidate_bearing_significant_groups_queued": True,
     }
+
+
+def _exact_instance_lineage_fixture() -> tuple[dict, dict, dict, dict, dict]:
+    material_id = "mdl:Base/Metals/Steel_Cast.mdl#Steel_Cast"
+    signature = {
+        "geometry_content_sha256": "a" * 64,
+        "source_appearance_sha256": "b" * 64,
+        "source_subset_layout_sha256": "c" * 64,
+        "point_count": 32,
+        "face_count": 16,
+    }
+    base = {
+        "schema_version": "1.0",
+        "assignments": [
+            {
+                "part_id": part_id,
+                "material_id": "mdl:Fallback",
+                "status": "policy_fallback",
+                "provenance": {"tier": "neutral_default"},
+            }
+            for part_id in ("P1", "P2")
+        ]
+    }
+    base_by_id = {row["part_id"]: row for row in base["assignments"]}
+    final = {
+        "schema_version": "1.0",
+        "assignment_unit": "part_id",
+        "palette_fusion_used": False,
+        "part_material_groups_used": False,
+        "assignments": [
+            {
+                "part_id": "P1",
+                "material_id": material_id,
+                "status": "auto",
+                "provenance": {"assignment_unit": "part_id"},
+            },
+            {
+                "part_id": "P2",
+                "material_id": material_id,
+                "status": "review",
+                "provenance": {
+                    "assignment_unit": "part_id",
+                    "exact_cad_instance_material_propagation": True,
+                    "photo_observed": False,
+                    "color_parameters_authored": False,
+                    "source_policy_assignment_sha256": _sha256(base_by_id["P2"]),
+                    "source_policy_material_id": "mdl:Fallback",
+                    "identity_signature_sha256": _sha256(signature),
+                    "observed_anchor_part_ids": ["P1"],
+                },
+            },
+        ],
+    }
+    identity_rows = [
+        {"part_id": part_id, **signature} for part_id in ("P1", "P2")
+    ]
+    signature_sha256 = _sha256(signature)
+    propagation = {
+        "schema_version": "qwen-exact-cad-instance-material-propagation/v1",
+        "status": "COMPLETED",
+        "part_identity_registry_sha256": _sha256(identity_rows),
+        "propagated_groups": [
+            {
+                "identity_signature_sha256": signature_sha256,
+                "identity_signature": signature,
+                "member_part_ids": ["P1", "P2"],
+                "observed_anchor_part_ids": ["P1"],
+                "unobserved_member_part_ids": ["P2"],
+                "observed_material_ids": {"P1": material_id},
+                "observed_audit_statuses": {"P1": "independently_selected"},
+                "status": "PROPAGATED",
+                "material_id": material_id,
+                "propagated_part_ids": ["P2"],
+            }
+        ],
+        "conflict_groups": [],
+        "summary": {
+            "propagated_group_count": 1,
+            "propagated_part_count": 1,
+            "conflict_group_count": 0,
+            "conflict_unobserved_part_count": 0,
+        },
+    }
+    audit_unsigned = {
+        "schema_version": "qwen-part-id-material-plan-audit/v1",
+        "assignment_unit": "part_id",
+        "palette_fusion_used": False,
+        "base_plan_sha256": _sha256(base),
+        "output_plan_sha256": _sha256(final),
+        "exact_cad_instance_material_propagation": propagation,
+        "parts": [
+            {
+                "part_id": "P1",
+                "status": "independently_selected",
+                "material_id": material_id,
+            },
+            {
+                "part_id": "P2",
+                "status": "unobserved_exact_instance_propagated",
+                "material_id": material_id,
+                "source_policy_material_id": "mdl:Fallback",
+                "source_policy_assignment_sha256": _sha256(base_by_id["P2"]),
+                "identity_signature_sha256": signature_sha256,
+                "observed_anchor_part_ids": ["P1"],
+            },
+        ],
+        "summary": {
+            "part_count": 2,
+            "independently_selected_count": 1,
+            "unobserved_preserved_count": 0,
+            "unobserved_exact_instance_propagated_count": 1,
+            "exact_cover": True,
+        },
+    }
+    audit = {
+        **audit_unsigned,
+        "integrity": {"document_sha256": _sha256(audit_unsigned)},
+    }
+    registry = {
+        "parts": [
+            {"part_id": part_id, **signature} for part_id in ("P1", "P2")
+        ]
+    }
+    policy_audit = {"output_plan_sha256": _sha256(base)}
+    return base, final, audit, registry, policy_audit
+
+
+def test_exact_instance_lineage_is_recomputed_from_registry() -> None:
+    base, final, audit, registry, policy_audit = _exact_instance_lineage_fixture()
+
+    result = _verified_part_id_policy_replacements(
+        final_plan=final,
+        final_assignments={row["part_id"]: row for row in final["assignments"]},
+        policy_plan=base,
+        policy_audit=policy_audit,
+        part_id_material_audit=audit,
+        rendered_registry=registry,
+    )
+
+    assert result["exact_instance_propagated_part_ids"] == ["P2"]
+    tampered = copy.deepcopy(registry)
+    tampered["parts"][1]["geometry_content_sha256"] = "d" * 64
+    with pytest.raises(PublishQualityGateError, match="registry"):
+        _verified_part_id_policy_replacements(
+            final_plan=final,
+            final_assignments={row["part_id"]: row for row in final["assignments"]},
+            policy_plan=base,
+            policy_audit=policy_audit,
+            part_id_material_audit=audit,
+            rendered_registry=tampered,
+        )
 
 
 def test_balanced_hash_bound_coverage_passes() -> None:

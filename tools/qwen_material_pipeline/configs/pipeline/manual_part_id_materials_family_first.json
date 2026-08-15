@@ -22,6 +22,7 @@
     "parameter_candidate_mode": "disabled",
     "prediction_mode": "catalog_family_first",
     "identity_local_context": true,
+    "exact_cad_instance_material_propagation": true,
     "selection_objective": "semantic_compatible_visual",
     "exact_mdl_tournament_max_candidates": 12,
     "exact_mdl_tournament_all_groups": false,

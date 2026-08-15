@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 
 from qwen_material_pipeline.evidence.part_id_projection import (
+    _apply_exact_cad_instance_material_propagation,
     _register_similarity_mask,
     _select_material_observation_index,
     build_part_id_material_plan,
@@ -33,6 +34,104 @@ def canonical_sha256(value: object) -> str:
 
 
 class PartIdProjectionTests(unittest.TestCase):
+    def test_exact_cad_instances_propagate_only_unanimous_observed_material(
+        self,
+    ) -> None:
+        signature = {
+            "geometry_content_sha256": "a" * 64,
+            "source_appearance_sha256": "b" * 64,
+            "source_subset_layout_sha256": "c" * 64,
+            "point_count": 32,
+            "face_count": 16,
+        }
+        conflicting_signature = {
+            "geometry_content_sha256": "d" * 64,
+            "source_appearance_sha256": "e" * 64,
+            "source_subset_layout_sha256": "f" * 64,
+            "point_count": 24,
+            "face_count": 12,
+        }
+        assignments = [
+            {
+                "part_id": "P1",
+                "material_id": "mdl:Paint",
+                "confidence": 0.9,
+                "status": "auto",
+            },
+            {
+                "part_id": "P2",
+                "material_id": "mdl:Fallback",
+                "confidence": 0.0,
+                "status": "policy_fallback",
+                "provenance": {"tier": "neutral_default"},
+            },
+            {
+                "part_id": "P3",
+                "material_id": "mdl:Steel",
+                "confidence": 0.85,
+                "status": "auto",
+            },
+            {
+                "part_id": "P4",
+                "material_id": "mdl:Plastic",
+                "confidence": 0.85,
+                "status": "auto",
+            },
+            {
+                "part_id": "P5",
+                "material_id": "mdl:Fallback",
+                "confidence": 0.0,
+                "status": "policy_fallback",
+                "provenance": {"tier": "neutral_default"},
+            },
+        ]
+        audit_rows = [
+            {"part_id": "P1", "status": "independently_selected"},
+            {"part_id": "P2", "status": "unobserved_preserved"},
+            {"part_id": "P3", "status": "independently_selected"},
+            {"part_id": "P4", "status": "independently_selected"},
+            {"part_id": "P5", "status": "unobserved_preserved"},
+        ]
+        evidence = {
+            "P1": {"status": "observed"},
+            "P2": {"status": "unobserved"},
+            "P3": {"status": "observed"},
+            "P4": {"status": "observed"},
+            "P5": {"status": "unobserved"},
+        }
+        registry = {
+            "parts": [
+                {"part_id": part_id, **row}
+                for part_id, row in (
+                    ("P1", signature),
+                    ("P2", signature),
+                    ("P3", conflicting_signature),
+                    ("P4", conflicting_signature),
+                    ("P5", conflicting_signature),
+                )
+            ]
+        }
+
+        result = _apply_exact_cad_instance_material_propagation(
+            assignments=assignments,
+            audit_rows=audit_rows,
+            evidence_by_part=evidence,
+            part_registry=registry,
+        )
+
+        assignment_by_id = {row["part_id"]: row for row in assignments}
+        audit_by_id = {row["part_id"]: row for row in audit_rows}
+        self.assertEqual(assignment_by_id["P2"]["material_id"], "mdl:Paint")
+        self.assertEqual(assignment_by_id["P2"]["status"], "review")
+        self.assertEqual(
+            audit_by_id["P2"]["status"],
+            "unobserved_exact_instance_propagated",
+        )
+        self.assertEqual(assignment_by_id["P5"]["material_id"], "mdl:Fallback")
+        self.assertEqual(audit_by_id["P5"]["status"], "unobserved_preserved")
+        self.assertEqual(result["summary"]["propagated_part_count"], 1)
+        self.assertEqual(result["summary"]["conflict_group_count"], 1)
+
     def test_tiny_chromatic_component_can_propose_h1_without_mvinverse_pixel(
         self,
     ) -> None:

@@ -110,6 +110,7 @@ class VisualMaterialConfig:
     material_parameter_candidate_mode: str = "disabled"
     material_prediction_mode: str = "disabled"
     material_identity_local_context: bool = False
+    exact_cad_instance_material_propagation: bool = False
     exact_mdl_tournament_max_candidates: int = 12
     exact_mdl_tournament_all_groups: bool = True
     exact_mdl_tournament_minimum_score_improvement: float = 0.015
@@ -443,6 +444,7 @@ def load_visual_material_config(
                 "parameter_candidate_mode",
                 "prediction_mode",
                 "identity_local_context",
+                "exact_cad_instance_material_propagation",
                 "exact_mdl_tournament_max_candidates",
                 "exact_mdl_tournament_all_groups",
                 "exact_mdl_tournament_minimum_score_improvement",
@@ -569,12 +571,24 @@ def load_visual_material_config(
         materials.get("identity_local_context", False),
         "config.materials.identity_local_context",
     )
+    exact_cad_instance_material_propagation = require_bool(
+        materials.get("exact_cad_instance_material_propagation", False),
+        "config.materials.exact_cad_instance_material_propagation",
+    )
     if (
         material_identity_local_context
         and material_prediction_mode != "catalog_family_first"
     ):
         raise ValueError(
             "materials.identity_local_context requires "
+            "materials.prediction_mode='catalog_family_first'"
+        )
+    if (
+        exact_cad_instance_material_propagation
+        and material_prediction_mode != "catalog_family_first"
+    ):
+        raise ValueError(
+            "materials.exact_cad_instance_material_propagation requires "
             "materials.prediction_mode='catalog_family_first'"
         )
     siglip_top_k = require_at_least_two(
@@ -922,6 +936,9 @@ def load_visual_material_config(
         ),
         material_prediction_mode=material_prediction_mode,
         material_identity_local_context=material_identity_local_context,
+        exact_cad_instance_material_propagation=(
+            exact_cad_instance_material_propagation
+        ),
         exact_mdl_tournament_max_candidates=require_at_least_two(
             materials.get("exact_mdl_tournament_max_candidates", 12),
             "config.materials.exact_mdl_tournament_max_candidates",
