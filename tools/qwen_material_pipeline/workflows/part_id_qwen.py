@@ -35,7 +35,7 @@ MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION = (
     "qwen-part-id-material-rerank-batch/v3"
 )
 MATERIAL_FAMILY_PREDICTION_BATCH_SCHEMA_VERSION = (
-    "qwen-part-id-material-family-prediction-batch/v1"
+    "qwen-part-id-material-family-prediction-batch/v2"
 )
 SELECTIVE_REGRESSION_SCHEMA_VERSION = "qwen-part-id-selective-visual-regression/v1"
 DEFAULT_MAXIMUM_LOCAL_SCORE_REGRESSION = 0.02
@@ -46,6 +46,7 @@ COLOR_CRITICAL_MAXIMUM_DELTA_E = 25.0
 COLOR_CRITICAL_MAXIMUM_HUE_DISTANCE_DEGREES = 30.0
 COLOR_CRITICAL_MINIMUM_CANDIDATE_SATURATION = 0.10
 MINIMUM_MATERIAL_FAMILY_CONFIDENCE = 0.60
+MINIMUM_MATERIAL_SPECIES_CONFIDENCE = 0.75
 MINIMUM_EXACT_TREATMENT_CONFIDENCE = 0.85
 MINIMUM_COMPONENT_EXACT_PRESET_CONFIDENCE = 0.80
 EXACT_LIBRARY_PRESET_MAXIMUM_DELTA_E = 25.0
@@ -102,6 +103,58 @@ MATERIAL_OPTICAL_OPTIONS = frozenset(
 )
 
 
+# ``family=metal`` is not a material identity: it still permits copper,
+# chrome, aluminium and steel to replace one another.  Keep a deliberately
+# small, physical species ontology that can be inferred from NVIDIA's stable
+# authored identifier or supplied explicitly by a future catalog schema.  The
+# fallback species (metal/plastic/wood/...) remains useful when the library has
+# no more specific identity.
+_MATERIAL_SPECIES_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("aluminum", ("aluminum", "aluminium")),
+    ("copper", ("copper",)),
+    ("brass", ("brass",)),
+    ("bronze", ("bronze",)),
+    ("steel", ("steel", "stainless")),
+    ("iron", ("iron",)),
+    ("chromium", ("chrome", "chromium")),
+    ("gold", ("gold",)),
+    ("silver", ("silver",)),
+    ("rubber", ("rubber", "elastomer", "silicone", "neoprene")),
+    ("acrylic", ("acrylic",)),
+    ("abs", ("plastic_abs", "abs_plastic")),
+    ("vinyl", ("vinyl",)),
+    ("glass", ("glass", "mirror")),
+    ("paint", ("paint",)),
+    ("ceramic", ("ceramic", "porcelain")),
+    ("concrete", ("concrete",)),
+    ("stone", ("stone", "granite", "marble", "slate")),
+    ("leather", ("leather",)),
+    ("textile", ("cloth", "linen", "fabric", "carpet")),
+    ("paper", ("paper", "cardboard")),
+    ("wood", ("wood", "veneer", "walnut", "oak", "birch", "ash", "bamboo", "cherry", "mahogany", "timber", "plywood", "cork")),
+    ("plastic", ("plastic", "polymer", "polycarbonate", "polypropylene", "polyethylene")),
+)
+
+_GENERIC_MATERIAL_SPECIES = frozenset(
+    {
+        "unknown",
+        "metal",
+        "plastic",
+        "rubber",
+        "glass",
+        "paint",
+        "wood",
+        "textile",
+        "leather",
+        "ceramic",
+        "concrete",
+        "stone",
+        "paper",
+        "liquid",
+    }
+)
+
+
 class PartIdQwenError(ValueError):
     """Raised when Qwen cannot produce a bounded Part-ID decision."""
 
@@ -150,6 +203,26 @@ def _write_grayscale_identity_crop(source: Path, output: Path) -> Path:
     return output
 
 
+def _color_free_identity_descriptor(value: Any) -> Any:
+    """Remove chromatic fields before physical identity/species prediction."""
+
+    if isinstance(value, Mapping):
+        output: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key)
+            lowered = key.casefold()
+            if any(
+                token in lowered
+                for token in ("color", "colour", "rgb", "albedo", "chromatic")
+            ):
+                continue
+            output[key] = _color_free_identity_descriptor(raw_value)
+        return output
+    if isinstance(value, list):
+        return [_color_free_identity_descriptor(item) for item in value]
+    return value
+
+
 def _catalog_by_id(catalog: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     materials = catalog.get("materials")
     if not isinstance(materials, list) or not materials:
@@ -161,6 +234,47 @@ def _catalog_by_id(catalog: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
             raise PartIdQwenError("material catalog contains invalid duplicate IDs")
         result[material_id] = dict(raw)
     return result
+
+
+def _catalog_material_species(
+    material_id: str,
+    record: Mapping[str, Any],
+) -> str:
+    """Return a stable physical species for one authored catalog material.
+
+    Catalog schema v1 has only a broad family and surface semantics.  Prefer a
+    future explicit ``material_species`` value, otherwise infer the species
+    from NVIDIA's authored sub-identifier/path.  Colour tokens are never used
+    as species, so Aluminum_Anodized_Black and Aluminum_Anodized_Blue both map
+    to ``aluminum``.
+    """
+
+    semantics = record.get("surface_semantics")
+    explicit = (
+        semantics.get("material_species")
+        if isinstance(semantics, Mapping)
+        else None
+    )
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip().casefold()
+    identifier = record.get("sub_identifier")
+    if not isinstance(identifier, str) or not identifier:
+        identifier = material_id.rsplit("#", 1)[-1]
+    normalized = identifier.casefold().replace("-", "_").replace(" ", "_")
+    padded = f"_{normalized}_"
+    for species, aliases in _MATERIAL_SPECIES_PATTERNS:
+        if any(
+            f"_{alias}_" in padded
+            or padded.startswith(f"_{alias}_")
+            or normalized.startswith(f"{alias}_")
+            or normalized.endswith(f"_{alias}")
+            for alias in aliases
+        ):
+            return species
+    family = record.get("family")
+    if isinstance(family, str) and family.strip():
+        return family.strip().casefold()
+    return "unknown"
 
 
 def _catalog_family_options(
@@ -207,10 +321,15 @@ def _catalog_identity_options(
         substrates.update(value.casefold() for value in raw_substrates)
         treatments.add(treatment.casefold())
         optical_behaviors.add(optical.casefold())
-    if not substrates or not treatments or not optical_behaviors:
+    species = {
+        _catalog_material_species(material_id, record)
+        for material_id, record in catalog_by_id.items()
+    }
+    if not substrates or not treatments or not optical_behaviors or not species:
         raise PartIdQwenError("material catalog has no usable identity semantics")
     return {
         "physical_substrates": sorted(substrates | {"unknown"}),
+        "material_species": sorted(species | {"unknown"}),
         "surface_treatments": sorted(treatments | {"unknown"}),
         "optical_behaviors": sorted(optical_behaviors | {"unknown"}),
     }
@@ -262,6 +381,7 @@ def _validate_material_prediction_batch(
         raise PartIdQwenError("Qwen material-identity prediction count is invalid")
     expected_ids = {str(row["part_id"]) for row in expected}
     allowed_substrates = set(identity_options["physical_substrates"])
+    allowed_species = set(identity_options["material_species"])
     allowed_treatments = set(identity_options["surface_treatments"])
     allowed_optical = set(identity_options["optical_behaviors"])
     output: dict[str, dict[str, Any]] = {}
@@ -269,10 +389,12 @@ def _validate_material_prediction_batch(
         if not isinstance(raw, Mapping) or set(raw) != {
             "part_id",
             "physical_substrate",
+            "material_species",
             "surface_treatment",
             "optical_behavior",
             "surface_finish",
             "substrate_confidence",
+            "species_confidence",
             "treatment_confidence",
         }:
             raise PartIdQwenError(
@@ -280,10 +402,12 @@ def _validate_material_prediction_batch(
             )
         part_id = raw.get("part_id")
         substrate = raw.get("physical_substrate")
+        species = raw.get("material_species")
         treatment = raw.get("surface_treatment")
         optical = raw.get("optical_behavior")
         finish = raw.get("surface_finish")
         substrate_confidence = raw.get("substrate_confidence")
+        species_confidence = raw.get("species_confidence")
         treatment_confidence = raw.get("treatment_confidence")
         if (
             not isinstance(part_id, str)
@@ -296,6 +420,10 @@ def _validate_material_prediction_batch(
         if not isinstance(substrate, str) or substrate not in allowed_substrates:
             raise PartIdQwenError(
                 f"Qwen predicted an unsupported physical substrate for {part_id}"
+            )
+        if not isinstance(species, str) or species not in allowed_species:
+            raise PartIdQwenError(
+                f"Qwen predicted an unsupported material species for {part_id}"
             )
         if not isinstance(treatment, str) or treatment not in allowed_treatments:
             raise PartIdQwenError(
@@ -311,6 +439,7 @@ def _validate_material_prediction_batch(
             )
         for label, value in (
             ("substrate", substrate_confidence),
+            ("species", species_confidence),
             ("treatment", treatment_confidence),
         ):
             if (
@@ -332,15 +461,28 @@ def _validate_material_prediction_batch(
             and float(treatment_confidence)
             >= MINIMUM_EXACT_TREATMENT_CONFIDENCE
         )
+        exact_species_is_known = (
+            species != "unknown"
+            and float(species_confidence)
+            >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
+        )
         identity_resolution = (
             "exact_material"
-            if substrate_is_known and exact_treatment_is_known
+            if (
+                substrate_is_known
+                and exact_species_is_known
+                and exact_treatment_is_known
+            )
             else "corresponding_material"
             if substrate_is_known
             else "insufficient_evidence"
         )
         confidence = (
-            min(float(substrate_confidence), float(treatment_confidence))
+            min(
+                float(substrate_confidence),
+                float(species_confidence),
+                float(treatment_confidence),
+            )
             if identity_resolution == "exact_material"
             else float(substrate_confidence)
         )
@@ -352,10 +494,12 @@ def _validate_material_prediction_batch(
                 optical_behavior=optical,
             ),
             "physical_substrate": substrate,
+            "material_species": species,
             "surface_treatment": treatment,
             "optical_behavior": optical,
             "surface_finish": finish,
             "substrate_confidence": float(substrate_confidence),
+            "species_confidence": float(species_confidence),
             "treatment_confidence": float(treatment_confidence),
             "confidence": confidence,
             "identity_resolution": identity_resolution,
@@ -394,7 +538,12 @@ def _material_prediction_payload(
                     "images are grayscale, neutral-background crops of the same "
                     "physical surface from trusted views or linked CAD parts. "
                     "Colour has deliberately been removed. Descriptor: "
-                    + json.dumps(item.get("descriptor", {}), ensure_ascii=False)
+                    + json.dumps(
+                        _color_free_identity_descriptor(
+                            item.get("descriptor", {})
+                        ),
+                        ensure_ascii=False,
+                    )
                 ),
             }
         )
@@ -417,10 +566,12 @@ def _material_prediction_payload(
             {
                 "part_id": str(item["part_id"]),
                 "physical_substrate": "one allowed substrate or unknown",
+                "material_species": "one allowed species or unknown",
                 "surface_treatment": "one allowed treatment or unknown",
                 "optical_behavior": "one allowed optical behavior or unknown",
                 "surface_finish": "one allowed finish",
                 "substrate_confidence": 0.75,
+                "species_confidence": 0.55,
                 "treatment_confidence": 0.55,
             }
             for item in batch
@@ -429,11 +580,13 @@ def _material_prediction_payload(
     prompt = "\n".join(
         [
             "Predict physical material identity before seeing any material candidate.",
-            "Colour is unavailable and must not influence the decision. Identify the substrate, its surface treatment, optical behavior, and finish from geometry, texture, reflectance and manufacturing cues.",
-            "Examples: a powder-coated enclosure is substrate=metal, treatment=paint, optical=opaque; exposed steel is metal/bare/opaque; anodized aluminium is metal/anodized/opaque; hard plastic is polymer/bare/opaque; rubber is elastomer/bare/opaque; clear glazing is glass/bare/transparent.",
-            "Score substrate_confidence and treatment_confidence separately. A visible rigid polymer or metal substrate can be high-confidence even when paint versus anodized versus bare is uncertain. Use treatment=unknown and a low treatment_confidence instead of guessing. Exact treatment requires exceptional evidence; the program will otherwise choose a corresponding same-substrate material. Never guess from background, CAD names, or colour.",
+            "Colour is unavailable and must not influence the decision. Identify the substrate, material species, surface treatment, optical behavior, and finish from geometry, texture, reflectance and manufacturing cues.",
+            "Examples: a powder-coated enclosure is substrate=metal, species=paint, treatment=paint, optical=opaque; exposed stainless steel is metal/steel/bare/opaque; anodized aluminium is metal/aluminum/anodized/opaque; hard ABS is polymer/abs/bare/opaque; rubber is elastomer/rubber/bare/opaque; clear glazing is glass/glass/bare/transparent.",
+            "Score substrate_confidence, species_confidence and treatment_confidence separately. A visible rigid polymer or metal substrate can be high-confidence even when copper versus steel, or paint versus anodized versus bare, is uncertain. Use material_species=unknown or treatment=unknown with a low confidence instead of guessing. Exact species and treatment require exceptional evidence; the program will otherwise use bounded candidate evidence to resolve a corresponding material. Never guess from background, CAD names, or colour.",
             "Allowed physical_substrate values: "
             + json.dumps(identity_options["physical_substrates"], ensure_ascii=False),
+            "Allowed material_species values: "
+            + json.dumps(identity_options["material_species"], ensure_ascii=False),
             "Allowed surface_treatment values: "
             + json.dumps(identity_options["surface_treatments"], ensure_ascii=False),
             "Allowed optical_behavior values: "
@@ -726,6 +879,20 @@ def _annotate_library_preset_variants(
                 generic_material_id is None
                 or material_id != generic_material_id
             )
+            species = str(
+                row.get(
+                    "material_species",
+                    _catalog_material_species(
+                        material_id,
+                        catalog_by_id[material_id],
+                    ),
+                )
+            )
+            row["material_species"] = species
+            row["exact_authored_preset_candidate"] = bool(
+                row["specific_library_preset"]
+                or species not in _GENERIC_MATERIAL_SPECIES
+            )
             annotated.append(row)
     return annotated
 
@@ -937,11 +1104,17 @@ def _identity_filtered_ranking(
     prediction: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     confidence = float(prediction.get("confidence", 0.0))
-    if prediction.get("status") != "APPLYABLE" or confidence < (
-        MINIMUM_MATERIAL_FAMILY_CONFIDENCE
-    ):
-        return [dict(row) for row in ranking]
+    prediction_applyable = (
+        prediction.get("status") == "APPLYABLE"
+        and confidence >= MINIMUM_MATERIAL_FAMILY_CONFIDENCE
+    )
     substrate = str(prediction.get("physical_substrate", "unknown"))
+    predicted_species = str(prediction.get("material_species", "unknown"))
+    species_confidence = float(prediction.get("species_confidence", 0.0))
+    species_authoritative = (
+        predicted_species != "unknown"
+        and species_confidence >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
+    )
     treatment = str(prediction.get("surface_treatment", "unknown"))
     optical = str(prediction.get("optical_behavior", "unknown"))
     finish = str(prediction.get("surface_finish", "unknown"))
@@ -959,15 +1132,51 @@ def _identity_filtered_ranking(
             "material-identity-first retrieval must cover the complete catalog; "
             f"the ranking is missing {len(missing)} material IDs"
         )
+    if not prediction_applyable:
+        unconstrained: list[dict[str, Any]] = []
+        for material_id, record in catalog_by_id.items():
+            row = dict(ranking_by_id[material_id])
+            row["predicted_family"] = "unknown"
+            row["predicted_substrate"] = "unknown"
+            row["predicted_material_species"] = "unknown"
+            row["predicted_material_species_authoritative"] = False
+            row["material_species"] = _catalog_material_species(
+                material_id,
+                record,
+            )
+            row["predicted_treatment"] = "unknown"
+            row["predicted_optical_behavior"] = "unknown"
+            row["predicted_finish"] = "unknown"
+            row["predicted_finish_match"] = False
+            row["identity_match_tier"] = "insufficient_identity_evidence"
+            row["catalog_surface_semantics"] = dict(
+                record["surface_semantics"]
+            )
+            row["physical_identity_applyable"] = False
+            unconstrained.append(row)
+        unconstrained = _annotate_library_preset_variants(
+            unconstrained,
+            catalog_by_id=catalog_by_id,
+        )
+        unconstrained.sort(
+            key=lambda row: (
+                int(row.get("rank", 1_000_000)),
+                str(row["material_id"]),
+            )
+        )
+        return unconstrained
     exact: list[dict[str, Any]] = []
     corresponding: list[dict[str, Any]] = []
     for material_id, record in catalog_by_id.items():
+        candidate_species = _catalog_material_species(material_id, record)
         substrates, candidate_treatment, candidate_optical, semantic_finish, semantic_confidence = (
             _catalog_identity_semantics(material_id, record)
         )
         if semantic_confidence == "low" or substrate not in substrates:
             continue
         if candidate_optical != optical:
+            continue
+        if species_authoritative and candidate_species != predicted_species:
             continue
         row = dict(ranking_by_id[material_id])
         record_finishes = {
@@ -979,12 +1188,16 @@ def _identity_filtered_ranking(
             record_finishes.add(semantic_finish)
         row["predicted_family"] = prediction.get("catalog_family")
         row["predicted_substrate"] = substrate
+        row["predicted_material_species"] = predicted_species
+        row["predicted_material_species_authoritative"] = species_authoritative
+        row["material_species"] = candidate_species
         row["predicted_treatment"] = treatment
         row["predicted_optical_behavior"] = optical
         row["predicted_finish"] = finish
         row["predicted_finish_match"] = bool(
             finish != "unknown" and finish in record_finishes
         )
+        row["physical_identity_applyable"] = True
         row["identity_match_tier"] = (
             "exact_material_contract"
             if exact_treatment_authoritative and candidate_treatment == treatment
@@ -999,8 +1212,9 @@ def _identity_filtered_ranking(
     filtered = exact if exact else corresponding
     if not filtered:
         raise PartIdQwenError(
-            "material_library_gap: no material has the predicted substrate and "
-            f"optical behavior for {prediction.get('part_id')}"
+            "material_library_gap: no material has the predicted substrate, "
+            "species and optical behavior for "
+            f"{prediction.get('part_id')}"
         )
     # Preserve exact authored presets.  A specific preset may be selected only
     # as an exact full-library match; its generic sibling remains available as
@@ -1173,6 +1387,13 @@ def _identity_shortlist(
                 "specific_library_preset": raw.get(
                     "specific_library_preset", False
                 ),
+                "material_species": raw.get("material_species", "unknown"),
+                "exact_authored_preset_candidate": raw.get(
+                    "exact_authored_preset_candidate", False
+                ),
+                "physical_identity_applyable": raw.get(
+                    "physical_identity_applyable", True
+                ),
                 "generic_identity_material_id": raw.get(
                     "generic_identity_material_id", raw.get("material_id")
                 ),
@@ -1209,6 +1430,13 @@ def _candidate_summary(
         "surface_semantics": catalog_record.get("surface_semantics"),
         "identity_match_tier": row.get("identity_match_tier"),
         "specific_library_preset": row.get("specific_library_preset", False),
+        "material_species": row.get("material_species", "unknown"),
+        "exact_authored_preset_candidate": row.get(
+            "exact_authored_preset_candidate", False
+        ),
+        "physical_identity_applyable": row.get(
+            "physical_identity_applyable", True
+        ),
         "generic_identity_material_id": row.get(
             "generic_identity_material_id", row.get("material_id")
         ),
@@ -2259,6 +2487,24 @@ def _validate_batch(
         if (
             require_material_identity_match
             and match_type == "CORRESPONDING_MATERIAL"
+            and candidate.get("physical_identity_applyable") is True
+            and candidate.get("exact_authored_preset_candidate") is True
+            and candidate.get("exact_preset_color_gate_passed") is True
+            and float(confidence) >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
+        ):
+            # Qwen ranks the actual MDL renders but does not own the final
+            # exact/corresponding state transition.  A physically compatible,
+            # identity-specific authored material that Qwen selected and the
+            # measured preset appearance independently confirms is an exact
+            # library match.  Without this deterministic promotion, a correct
+            # Copper choice can be discarded merely because the model emitted
+            # the conservative label CORRESPONDING_MATERIAL, after which the
+            # grayscale fallback is free to replace it with Chrome.
+            match_type = "EXACT_LIBRARY_MATCH"
+            index_resolution = "deterministic_exact_authored_preset_promotion"
+        if (
+            require_material_identity_match
+            and match_type == "CORRESPONDING_MATERIAL"
             and candidate.get("specific_library_preset") is True
         ):
             generic_material_id = candidate.get("generic_identity_material_id")
@@ -2300,6 +2546,7 @@ def _validate_batch(
             "exact_preset_color_gate_passed": (
                 requested_exact_preset_color_gate_passed
             ),
+            "material_species": candidate.get("material_species", "unknown"),
         }
         if require_material_identity_match:
             output[part_id]["match_type"] = match_type
@@ -3021,6 +3268,12 @@ def run_part_id_qwen_rerank(
                     "specific_library_preset": row.get(
                         "specific_library_preset", False
                     ),
+                    "material_species": row.get(
+                        "material_species", "unknown"
+                    ),
+                    "exact_authored_preset_candidate": row.get(
+                        "exact_authored_preset_candidate", False
+                    ),
                     "generic_identity_material_id": row.get(
                         "generic_identity_material_id", material_id
                     ),
@@ -3117,6 +3370,9 @@ def run_part_id_qwen_rerank(
                         "physical_substrate": prediction.get(
                             "physical_substrate"
                         ),
+                        "material_species": prediction.get(
+                            "material_species"
+                        ),
                         "surface_treatment": prediction.get("surface_treatment"),
                         "optical_behavior": prediction.get("optical_behavior"),
                         "surface_finish": prediction.get("surface_finish"),
@@ -3157,6 +3413,12 @@ def run_part_id_qwen_rerank(
                         ),
                         "specific_library_preset": row.get(
                             "specific_library_preset", False
+                        ),
+                        "material_species": row.get(
+                            "material_species", "unknown"
+                        ),
+                        "exact_authored_preset_candidate": row.get(
+                            "exact_authored_preset_candidate", False
                         ),
                         "generic_identity_material_id": row.get(
                             "generic_identity_material_id", row["material_id"]
@@ -3309,7 +3571,10 @@ def run_part_id_qwen_rerank(
         for part_id, initial in sorted(initial_by_id.items()):
             if initial.get("match_type") != "CORRESPONDING_MATERIAL":
                 initial["selection_authority"] = (
-                    "color_confirmed_exact_authored_preset"
+                    "deterministic_material_identity_and_preset_gate"
+                    if initial.get("index_resolution")
+                    == "deterministic_exact_authored_preset_promotion"
+                    else "color_confirmed_exact_authored_preset"
                 )
                 continue
             source_job = job_by_id[part_id]
@@ -3478,7 +3743,7 @@ def run_part_id_qwen_rerank(
         "selection_order": (
             [
                 "physical_material_identity_prediction_without_color",
-                "exact_substrate_treatment_optical_filter",
+                "exact_substrate_species_treatment_optical_filter",
                 "full_catalog_specific_preset_preservation",
                 "exact_preset_confirmation_with_bounded_color_evidence",
                 "independent_grayscale_corresponding_material_selection_when_unresolved",
@@ -3508,7 +3773,7 @@ def run_part_id_qwen_rerank(
         "component_identity_consensus": component_identity_consensus,
         "visual_compatibility_gate": {
             "policy": (
-                "physical_identity_then_exact_authored_preset/v5"
+                "physical_identity_species_then_exact_authored_preset/v6"
                 if require_material_family_prediction
                 else "perceptual_color_texture_transmission_gate/v2"
             ),

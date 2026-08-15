@@ -3123,6 +3123,8 @@ def build_part_id_material_plan(
                 or not prediction["catalog_family"]
                 or not isinstance(prediction.get("physical_substrate"), str)
                 or not prediction["physical_substrate"]
+                or not isinstance(prediction.get("material_species"), str)
+                or not prediction["material_species"]
                 or not isinstance(prediction.get("surface_treatment"), str)
                 or not prediction["surface_treatment"]
                 or not isinstance(prediction.get("optical_behavior"), str)
@@ -3138,6 +3140,10 @@ def build_part_id_material_plan(
                 or isinstance(prediction.get("substrate_confidence"), bool)
                 or not isinstance(
                     prediction.get("substrate_confidence"), (int, float)
+                )
+                or isinstance(prediction.get("species_confidence"), bool)
+                or not isinstance(
+                    prediction.get("species_confidence"), (int, float)
                 )
                 or isinstance(prediction.get("treatment_confidence"), bool)
                 or not isinstance(

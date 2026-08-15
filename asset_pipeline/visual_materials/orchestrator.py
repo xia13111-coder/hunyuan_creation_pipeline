@@ -190,6 +190,10 @@ from qwen_material_pipeline.evidence.part_id_projection import (
     build_part_id_reference_evidence,
     build_part_id_retrieval_request,
 )
+from qwen_material_pipeline.workflows.part_id_qwen import (
+    MINIMUM_MATERIAL_SPECIES_CONFIDENCE,
+    _catalog_material_species,
+)
 from qwen_material_pipeline.scripts.build_part_id_sam3_request import (
     build_request as build_part_id_sam3_request,
 )
@@ -1381,11 +1385,16 @@ def _validate_catalog_family_first_result(
             )
         if prediction.get("status") == "APPLYABLE":
             substrate = prediction.get("physical_substrate")
+            species = prediction.get("material_species")
+            species_confidence = prediction.get("species_confidence")
             treatment = prediction.get("surface_treatment")
             optical = prediction.get("optical_behavior")
             identity_resolution = prediction.get("identity_resolution")
             if (
                 not isinstance(substrate, str)
+                or not isinstance(species, str)
+                or isinstance(species_confidence, bool)
+                or not isinstance(species_confidence, (int, float))
                 or not isinstance(treatment, str)
                 or not isinstance(optical, str)
                 or identity_resolution
@@ -1395,10 +1404,15 @@ def _validate_catalog_family_first_result(
                     f"Part-ID {part_id} has an incomplete physical identity prediction"
                 )
             substrate = substrate.casefold()
+            species = species.casefold()
             treatment = treatment.casefold()
             optical = optical.casefold()
             selected_substrates, selected_treatment, selected_optical, selected_confidence = (
                 identity_semantics(material_id)
+            )
+            selected_species = _catalog_material_species(
+                material_id,
+                selected_catalog_row,
             )
             exact_treatment_exists = any(
                 substrate in candidate_substrates
@@ -1417,6 +1431,12 @@ def _validate_catalog_family_first_result(
                 substrate not in selected_substrates
                 or selected_optical != optical
                 or selected_confidence == "low"
+                or (
+                    species != "unknown"
+                    and float(species_confidence)
+                    >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
+                    and selected_species != species
+                )
                 or (
                     identity_resolution == "exact_material"
                     and exact_treatment_exists
@@ -1450,6 +1470,7 @@ def _validate_catalog_family_first_result(
         contracts = {
             (
                 predictions[part_id].get("physical_substrate"),
+                predictions[part_id].get("material_species"),
                 predictions[part_id].get("surface_treatment"),
                 predictions[part_id].get("optical_behavior"),
                 predictions[part_id].get("surface_finish"),

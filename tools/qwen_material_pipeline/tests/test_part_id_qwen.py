@@ -91,10 +91,12 @@ class _MaterialFamilyFirstRunner:
                             {
                                 "part_id": "P0001",
                                 "physical_substrate": "metal",
+                                "material_species": "paint",
                                 "surface_treatment": "paint",
                                 "optical_behavior": "opaque",
                                 "surface_finish": "matte",
                                 "substrate_confidence": 0.93,
+                                "species_confidence": 0.93,
                                 "treatment_confidence": 0.92,
                             }
                         ],
@@ -139,10 +141,12 @@ class _ComponentIdentityRunner:
                             {
                                 "part_id": "AC_1",
                                 "physical_substrate": "metal",
+                                "material_species": "paint",
                                 "surface_treatment": "paint",
                                 "optical_behavior": "opaque",
                                 "surface_finish": "matte",
                                 "substrate_confidence": 0.94,
+                                "species_confidence": 0.91,
                                 "treatment_confidence": 0.92,
                             }
                         ],
@@ -191,10 +195,12 @@ class _SpecificPresetRunner:
                             {
                                 "part_id": "P0001",
                                 "physical_substrate": "metal",
+                                "material_species": "unknown",
                                 "surface_treatment": "unknown",
                                 "optical_behavior": "opaque",
                                 "surface_finish": "matte",
                                 "substrate_confidence": 0.94,
+                                "species_confidence": 0.25,
                                 "treatment_confidence": 0.35,
                             }
                         ],
@@ -237,10 +243,12 @@ class _TwoStageCorrespondingRunner:
                             {
                                 "part_id": "P0001",
                                 "physical_substrate": "metal",
+                                "material_species": "unknown",
                                 "surface_treatment": "unknown",
                                 "optical_behavior": "opaque",
                                 "surface_finish": "matte",
                                 "substrate_confidence": 0.94,
+                                "species_confidence": 0.25,
                                 "treatment_confidence": 0.35,
                             }
                         ],
@@ -413,7 +421,7 @@ class PartIdQwenTests(unittest.TestCase):
             result["selection_order"],
             [
                 "physical_material_identity_prediction_without_color",
-                "exact_substrate_treatment_optical_filter",
+                "exact_substrate_species_treatment_optical_filter",
                 "full_catalog_specific_preset_preservation",
                 "exact_preset_confirmation_with_bounded_color_evidence",
                 "independent_grayscale_corresponding_material_selection_when_unresolved",
@@ -898,6 +906,59 @@ class PartIdQwenTests(unittest.TestCase):
             )
         )
 
+    def test_material_species_hard_filter_keeps_copper_out_of_chrome_and_steel(
+        self,
+    ) -> None:
+        copper = "mdl:Metals/Copper.mdl#Copper"
+        brushed_copper = (
+            "mdl:Metals/Brushed_Antique_Copper.mdl#Brushed_Antique_Copper"
+        )
+        chrome = "mdl:Metals/Chrome.mdl#Chrome"
+        steel = "mdl:Metals/Steel_Stainless.mdl#Steel_Stainless"
+        catalog = {
+            material_id: {
+                "material_id": material_id,
+                "surface_semantics": self._surface_semantics("metal"),
+            }
+            for material_id in (copper, brushed_copper, chrome, steel)
+        }
+
+        filtered = _identity_filtered_ranking(
+            ranking=[
+                {"rank": 1, "material_id": chrome},
+                {"rank": 2, "material_id": steel},
+                {"rank": 3, "material_id": brushed_copper},
+                {"rank": 4, "material_id": copper},
+            ],
+            catalog_by_id=catalog,
+            prediction={
+                "part_id": "P0161",
+                "catalog_family": "metal",
+                "physical_substrate": "metal",
+                "material_species": "copper",
+                "surface_treatment": "unknown",
+                "optical_behavior": "opaque",
+                "surface_finish": "unknown",
+                "confidence": 0.90,
+                "substrate_confidence": 0.92,
+                "species_confidence": 0.88,
+                "treatment_confidence": 0.30,
+                "identity_resolution": "corresponding_material",
+                "status": "APPLYABLE",
+            },
+        )
+
+        self.assertEqual(
+            {row["material_id"] for row in filtered},
+            {copper, brushed_copper},
+        )
+        self.assertTrue(
+            all(row["material_species"] == "copper" for row in filtered)
+        )
+        self.assertTrue(
+            all(row["exact_authored_preset_candidate"] for row in filtered)
+        )
+
     def test_component_consensus_enforces_one_exact_mdl(self) -> None:
         selections, audit = _apply_component_identity_consensus(
             selections=[
@@ -1264,6 +1325,97 @@ class PartIdQwenTests(unittest.TestCase):
             selections[0]["index_resolution"],
             "specific_preset_to_generic_corresponding_fallback",
         )
+
+    def test_identity_specific_preset_is_promoted_after_measured_confirmation(
+        self,
+    ) -> None:
+        copper = (
+            "mdl:Metals/Brushed_Antique_Copper.mdl#Brushed_Antique_Copper"
+        )
+        expected = [
+            {
+                "part_id": "P0161",
+                "candidates": [
+                    {
+                        "candidate_index": 1,
+                        "material_id": copper,
+                        "material_species": "copper",
+                        "selection_allowed": True,
+                        "specific_library_preset": False,
+                        "exact_authored_preset_candidate": True,
+                        "physical_identity_applyable": True,
+                        "exact_preset_color_gate_passed": True,
+                        "exact_preset_color_delta_e": 7.89,
+                    }
+                ],
+            }
+        ]
+
+        selections = _validate_batch(
+            {
+                "schema_version": MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION,
+                "selections": [
+                    {
+                        "part_id": "P0161",
+                        "candidate_index": 1,
+                        "match_type": "CORRESPONDING_MATERIAL",
+                        "confidence": 0.85,
+                    }
+                ],
+            },
+            expected=expected,
+            require_material_identity_match=True,
+        )
+
+        self.assertEqual(selections[0]["material_id"], copper)
+        self.assertEqual(selections[0]["material_species"], "copper")
+        self.assertEqual(selections[0]["match_type"], "EXACT_LIBRARY_MATCH")
+        self.assertEqual(
+            selections[0]["index_resolution"],
+            "deterministic_exact_authored_preset_promotion",
+        )
+
+    def test_identity_specific_preset_is_not_promoted_on_color_mismatch(
+        self,
+    ) -> None:
+        expected = [
+            {
+                "part_id": "P_ORANGE_PAINT",
+                "candidates": [
+                    {
+                        "candidate_index": 1,
+                        "material_id": "mdl:Metals/Copper.mdl#Copper",
+                        "material_species": "copper",
+                        "selection_allowed": True,
+                        "specific_library_preset": False,
+                        "exact_authored_preset_candidate": True,
+                        "exact_preset_color_gate_passed": False,
+                        "exact_preset_color_delta_e": 39.0,
+                    }
+                ],
+            }
+        ]
+
+        selections = _validate_batch(
+            {
+                "schema_version": MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION,
+                "selections": [
+                    {
+                        "part_id": "P_ORANGE_PAINT",
+                        "candidate_index": 1,
+                        "match_type": "CORRESPONDING_MATERIAL",
+                        "confidence": 0.90,
+                    }
+                ],
+            },
+            expected=expected,
+            require_material_identity_match=True,
+        )
+
+        self.assertEqual(
+            selections[0]["match_type"], "CORRESPONDING_MATERIAL"
+        )
+        self.assertEqual(selections[0]["material_species"], "copper")
 
     def test_exact_preset_with_measured_color_mismatch_is_rejected(self) -> None:
         expected = [
