@@ -132,6 +132,10 @@ COMMANDS: dict[str, CommandSpec] = {
         "qwen_material_pipeline.materials.corresponding_material_color",
         "add photo-derived colour only to corresponding-material selections",
     ),
+    "select-corresponding-material-colors": CommandSpec(
+        "qwen_material_pipeline.materials.corresponding_material_color_selection",
+        "select per-scope colour intensity from registered actual-CAD renders",
+    ),
 }
 
 

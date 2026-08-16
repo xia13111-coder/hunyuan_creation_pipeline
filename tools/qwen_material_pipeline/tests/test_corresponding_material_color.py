@@ -164,6 +164,42 @@ def test_group_uses_one_deterministic_photo_medoid() -> None:
     assert scope["member_part_ids"] == ["P3", "P4"]
     assert scope["target_srgb"] in ([0.1, 0.5, 0.2], [0.12, 0.52, 0.22])
     assert scope["medoid_part_id"] in {"P3", "P4"}
+    assert max(scope["parameters"]["diffuse_tint"]) < 1.0
+    assert scope["color_parameter_audit"]["linear_intensity_gain"] == 1.0
+    assert scope["color_parameter_audit"]["color_parameter_semantics"] == (
+        "render_calibrated_absolute_linear_color_gain"
+    )
+
+
+def test_linear_intensity_gain_is_bounded_and_scales_without_changing_hue() -> None:
+    source, choices, evidence = _documents()
+    _, gain_one = build_corresponding_material_color_plan(
+        source_plan=source,
+        qwen_choices=choices,
+        part_id_evidence=evidence,
+        linear_intensity_gain=1.0,
+    )
+    _, gain_two = build_corresponding_material_color_plan(
+        source_plan=source,
+        qwen_choices=choices,
+        part_id_evidence=evidence,
+        linear_intensity_gain=2.0,
+    )
+    first = next(
+        row for row in gain_one["scopes"] if row["scope_id"] == "COMPONENT:C_GREEN"
+    )["parameters"]["diffuse_tint"]
+    second = next(
+        row for row in gain_two["scopes"] if row["scope_id"] == "COMPONENT:C_GREEN"
+    )["parameters"]["diffuse_tint"]
+    assert second == pytest.approx([2.0 * value for value in first])
+
+    with pytest.raises(CorrespondingMaterialColorError, match="linear_intensity_gain"):
+        build_corresponding_material_color_plan(
+            source_plan=source,
+            qwen_choices=choices,
+            part_id_evidence=evidence,
+            linear_intensity_gain=0.0,
+        )
 
 
 def test_rejects_existing_parameters_or_material_drift() -> None:

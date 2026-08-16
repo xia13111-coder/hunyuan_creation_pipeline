@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import Any
 
 from .perceptual_color import srgb_delta_e
+from .parameters import srgb_to_linear
 from .tuning import (
-    color_parameters_for_target_srgb,
     parameter_policy_for_material,
     tuning_profile_for_material,
 )
@@ -71,6 +71,53 @@ def _unit_color(value: Any, label: str) -> list[float]:
             f"{label} channels must be finite values in [0,1]"
         )
     return color
+
+
+def _positive_gain(value: Any) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not 0.1 <= float(value) <= 8.0
+    ):
+        raise CorrespondingMaterialColorError(
+            "linear_intensity_gain must be a finite number from 0.1 to 8.0"
+        )
+    return float(value)
+
+
+def _render_calibrated_color_parameters(
+    *,
+    profile: Any,
+    target_srgb: Sequence[float],
+    linear_intensity_gain: float,
+) -> tuple[dict[str, list[float]], dict[str, Any]]:
+    """Keep target chroma and absolute intensity available for render search.
+
+    NVIDIA Base ``diffuse_tint`` often multiplies a material's native response.
+    The older adapter normalized its strongest chromatic channel to one, which
+    irreversibly discarded photo luminance before any real-CAD render.  This
+    bounded adapter instead preserves the target's absolute linear magnitude
+    and exposes one audited scalar gain for actual-render calibration.
+    """
+
+    gain = _positive_gain(linear_intensity_gain)
+    validated_srgb = _unit_color(target_srgb, "target_srgb")
+    target_linear = [float(value) for value in srgb_to_linear(validated_srgb)]
+    authored = [min(1.0, max(0.0, value * gain)) for value in target_linear]
+    parameters = {name: list(authored) for name in profile.color_parameters}
+    return parameters, {
+        "base_color_srgb": validated_srgb,
+        "base_color_linear": target_linear,
+        "authored_color_linear": authored,
+        "color_parameter_semantics": (
+            "render_calibrated_absolute_linear_color_gain"
+        ),
+        "linear_intensity_gain": gain,
+        "clipped_channel_count": sum(
+            value * gain > 1.0 for value in target_linear
+        ),
+    }
 
 
 def _unique_by_part(rows: Any, label: str) -> dict[str, Mapping[str, Any]]:
@@ -194,8 +241,11 @@ def build_corresponding_material_color_plan(
     source_plan: Mapping[str, Any],
     qwen_choices: Mapping[str, Any],
     part_id_evidence: Mapping[str, Any],
+    linear_intensity_gain: float = 1.0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return a plan/audit pair for the bounded second-stage colour pass."""
+
+    calibrated_gain = _positive_gain(linear_intensity_gain)
 
     if source_plan.get("assignment_unit") != "part_id":
         raise CorrespondingMaterialColorError("source plan must use Part-ID assignments")
@@ -335,7 +385,11 @@ def build_corresponding_material_color_plan(
             )
         contributors = [evidence_by_id[part_id] for part_id in member_ids]
         target_srgb, medoid_part_id = _weighted_medoid(contributors)
-        parameters, color_audit = color_parameters_for_target_srgb(profile, target_srgb)
+        parameters, color_audit = _render_calibrated_color_parameters(
+            profile=profile,
+            target_srgb=target_srgb,
+            linear_intensity_gain=calibrated_gain,
+        )
         normalized = normalize_material_parameters(material_id, parameters)
         if set(normalized) != set(parameters) or set(parameters) - set(
             parameter_policy_for_material(material_id)
@@ -394,6 +448,7 @@ def build_corresponding_material_color_plan(
         "exact_library_matches_preserved": len(exact_ids),
         "corresponding_materials_parameterized": len(corresponding_ids),
         "colour_scope_count": len(scope_audits),
+        "linear_intensity_gain": calibrated_gain,
         "material_identity_changes": 0,
     }
     output["provenance"] = plan_provenance
@@ -411,6 +466,8 @@ def build_corresponding_material_color_plan(
             "selected_mdl_identity_immutable": True,
             "reviewed_colour_interfaces_only": True,
             "same_photo_material_component_shares_colour": True,
+            "absolute_photo_luminance_preserved_before_render_calibration": True,
+            "linear_intensity_gain": calibrated_gain,
         },
         "summary": {
             "selection_count": len(selections),
@@ -466,6 +523,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-plan", type=Path, required=True)
     parser.add_argument("--qwen-choices", type=Path, required=True)
     parser.add_argument("--part-id-evidence", type=Path, required=True)
+    parser.add_argument(
+        "--linear-intensity-gain",
+        type=float,
+        default=1.0,
+        help=(
+            "bounded multiplier applied to the absolute linear photo colour; "
+            "select this value with registered real-CAD renders"
+        ),
+    )
     parser.add_argument("--output-plan", type=Path, required=True)
     parser.add_argument("--audit", type=Path, required=True)
     return parser
@@ -477,6 +543,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_plan=_read_object(args.source_plan),
         qwen_choices=_read_object(args.qwen_choices),
         part_id_evidence=_read_object(args.part_id_evidence),
+        linear_intensity_gain=args.linear_intensity_gain,
     )
     _write_object(args.output_plan, output)
     _write_object(args.audit, audit)
