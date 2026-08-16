@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import math
 from pathlib import Path
@@ -63,6 +64,7 @@ DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL = 0.68
 DEFAULT_MAXIMUM_FINAL_SAM_TO_CAD_AREA_RATIO = 1.15
 DEFAULT_MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION = 0.04
 DEFAULT_MAXIMUM_NEIGHBOR_NEGATIVE_TARGET_PIXELS = 4096
+DEFAULT_DENSE_CAD_MASK_LOGIT_MAGNITUDE = 4.0
 CAD_SHAPE_NORMALIZATION_SIZE = 96
 CROSS_GROUP_NEAR_DUPLICATE_IOU = 0.90
 CROSS_GROUP_ARBITRATION_SCHEMA_VERSION = (
@@ -897,6 +899,178 @@ def _segment_points(
         raise Sam3RegionError(str(exc)) from exc
 
 
+def _predict_inst_accepts_mask_input(model: Any) -> bool:
+    """Return whether the installed instance predictor exposes dense prompts."""
+
+    try:
+        parameters = inspect.signature(model.predict_inst).parameters.values()
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return any(
+        parameter.name == "mask_input"
+        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
+def _dense_cad_mask_logits(
+    mask: Any,
+    *,
+    output_size: tuple[int, int] = (256, 256),
+    magnitude: float = DEFAULT_DENSE_CAD_MASK_LOGIT_MAGNITUDE,
+) -> Any:
+    """Encode a registered CAD mask as SAM-compatible signed low-res logits.
+
+    A signed distance field is used instead of a hard binary tensor so the
+    image decoder can move the boundary.  This is a prior, never a final mask.
+    ``output_size`` follows OpenCV's ``(width, height)`` convention.
+    """
+
+    import cv2
+    import numpy as np
+
+    binary = np.asarray(mask, dtype=bool)
+    if binary.ndim != 2 or not np.any(binary):
+        raise Sam3RegionError("dense CAD mask prompt is empty or malformed")
+    width, height = output_size
+    if width <= 0 or height <= 0:
+        raise Sam3RegionError("dense CAD mask prompt size must be positive")
+    # INTER_AREA retains subpixel occupancy for thin projected components.
+    occupancy = cv2.resize(
+        binary.astype(np.float32),
+        (int(width), int(height)),
+        interpolation=cv2.INTER_AREA,
+    )
+    low_res = occupancy > 0.05
+    if not np.any(low_res):
+        maximum = np.unravel_index(int(np.argmax(occupancy)), occupancy.shape)
+        low_res[maximum] = True
+    inside = cv2.distanceTransform(low_res.astype(np.uint8), cv2.DIST_L2, 5)
+    outside = cv2.distanceTransform((~low_res).astype(np.uint8), cv2.DIST_L2, 5)
+    signed = inside - outside
+    # Normalize from foreground thickness, not the much larger background.
+    # Otherwise a tiny industrial part receives a near-zero positive logit
+    # merely because most of the image lies far outside the part.
+    foreground_distances = inside[low_res]
+    scale = max(1.0, float(np.percentile(foreground_distances, 75)))
+    logits = np.clip(signed / scale, -1.0, 1.0) * float(magnitude)
+    return logits.astype(np.float32)[None, :, :]
+
+
+def _segment_dense_mask_points(
+    *,
+    model: Any,
+    image_state: Mapping[str, Any],
+    image: Any,
+    click_set: Mapping[str, Any],
+    aligned_cad_seed: Any,
+    minimum_model_score: float,
+    minimum_prompt_overlap: float,
+    maximum_image_fraction: float,
+    minimum_mask_pixels: int,
+) -> tuple[Any | None, dict[str, Any]]:
+    """Run SAM3 with automatic CAD mask, positive, and negative prompts."""
+
+    import numpy as np
+
+    if not _predict_inst_accepts_mask_input(model):
+        return None, {
+            "accepted": False,
+            "available": False,
+            "reason_codes": ["installed_predictor_has_no_dense_mask_input"],
+        }
+    positive_points = click_set["positive_points"]
+    negative_points = click_set["negative_points"]
+    labelled = [(point, 1) for point in positive_points] + [
+        (point, 0) for point in negative_points
+    ]
+    point_coords = np.asarray(
+        [
+            grid_to_pixel(point, width=image.width, height=image.height)
+            for point, _label in labelled
+        ],
+        dtype=np.float32,
+    )
+    point_labels = np.asarray([label for _point, label in labelled], dtype=np.int32)
+    mask_input_size = (256, 256)
+    predictor = getattr(model, "inst_interactive_predictor", None)
+    prompt_encoder = getattr(getattr(predictor, "model", None), "sam_prompt_encoder", None)
+    declared_size = getattr(prompt_encoder, "mask_input_size", None)
+    if (
+        isinstance(declared_size, (tuple, list))
+        and len(declared_size) == 2
+        and all(isinstance(value, int) and value > 0 for value in declared_size)
+    ):
+        # The model declares (height, width), OpenCV consumes (width, height).
+        mask_input_size = (int(declared_size[1]), int(declared_size[0]))
+    mask_logits = _dense_cad_mask_logits(
+        aligned_cad_seed,
+        output_size=mask_input_size,
+    )
+    masks, scores, low_resolution_logits = model.predict_inst(
+        image_state,
+        point_coords=point_coords,
+        point_labels=point_labels,
+        mask_input=mask_logits,
+        multimask_output=False,
+    )
+    try:
+        selected, audit = select_point_candidate(
+            masks,
+            scores,
+            positive_points=positive_points,
+            negative_points=negative_points,
+            width=image.width,
+            height=image.height,
+            minimum_model_score=minimum_model_score,
+            minimum_prompt_agreement=minimum_prompt_overlap,
+            maximum_image_fraction=maximum_image_fraction,
+            minimum_mask_pixels=minimum_mask_pixels,
+            allow_rejected_preview=True,
+        )
+    except ValueError as exc:
+        raise Sam3RegionError(str(exc)) from exc
+    # Neighbor/ring negatives are synthesized from a rendered alignment and
+    # can land on the true photo boundary by a few pixels.  For the dense CAD
+    # branch only, treat those negatives as advisory and let the stricter
+    # visible/amodal shape gate decide.  Score, size, and positive-point
+    # failures remain hard vetoes.
+    if selected is not None and audit.get("accepted") is not True:
+        preview_index = audit.get("preview_candidate_index")
+        preview = next(
+            (
+                row
+                for row in audit.get("candidates", [])
+                if isinstance(row, Mapping)
+                and row.get("candidate_index") == preview_index
+            ),
+            None,
+        )
+        allowed = {"negative_point_inside_mask", "insufficient_point_agreement"}
+        reasons = set(preview.get("reason_codes", [])) if preview else set()
+        if not reasons or not reasons <= allowed:
+            selected = None
+        else:
+            audit = {
+                **audit,
+                "automatic_negative_points_advisory": True,
+                "requires_complete_shape_gate": True,
+            }
+    return selected, {
+        **audit,
+        "available": True,
+        "mask_prompt": {
+            "source": "aligned_whole_assembly_visible_part_id",
+            "representation": "signed_distance_low_resolution_logits",
+            "input_size": [int(mask_logits.shape[2]), int(mask_logits.shape[1])],
+            "minimum_logit": float(mask_logits.min()),
+            "maximum_logit": float(mask_logits.max()),
+            "per_mesh_pose_change_allowed": False,
+        },
+        "low_resolution_logit_shape": list(np.asarray(low_resolution_logits).shape),
+    }
+
+
 def _bounded_shared_camera_alignment(
     cad_seed: Any,
     coarse_candidate: Any,
@@ -1100,85 +1274,22 @@ def _shape_seed_click_set(
     }
 
 
-def _segment_shape_guided_points(
+def _evaluate_shape_guided_candidate(
+    candidate: Any,
     *,
-    model: Any,
-    image_state: Mapping[str, Any],
-    image: Any,
-    cad_seed: Any,
-    coarse_candidate: Any,
     box: Sequence[int],
-    minimum_model_score: float,
-    minimum_prompt_overlap: float,
-    maximum_image_fraction: float,
+    width: int,
+    height: int,
+    aligned_seed: Any,
+    aligned_amodal: Any | None,
     minimum_mask_pixels: int,
-    cad_amodal: Any | None = None,
-    other_part_seeds: Any | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
-    """Refine a coarse box result with CAD-derived positive/negative points."""
+    """Apply the same CAD/occlusion gate to one sparse or dense proposal."""
 
     import cv2
     import numpy as np
 
-    click_set, prompt_audit = _shape_seed_click_set(
-        cad_seed,
-        coarse_candidate,
-        box=box,
-        width=image.width,
-        height=image.height,
-        other_part_seeds=other_part_seeds,
-    )
-    selected, point_audit = _segment_points(
-        model=model,
-        image_state=image_state,
-        image=image,
-        click_set=click_set,
-        minimum_model_score=minimum_model_score,
-        minimum_prompt_overlap=minimum_prompt_overlap,
-        maximum_image_fraction=maximum_image_fraction,
-        minimum_mask_pixels=minimum_mask_pixels,
-    )
-    result = {
-        "prompt_mode": "automatic_cad_shape_positive_negative_points",
-        "click_set": click_set,
-        "prompt_audit": prompt_audit,
-        "sam3_point_audit": point_audit,
-        "accepted": False,
-        "reason_codes": [],
-    }
-    if selected is None:
-        result["reason_codes"].append("no_point_prediction_accepted")
-        return None, result
-    aligned_seed = cv2.warpAffine(
-        np.asarray(cad_seed, dtype=np.uint8),
-        np.asarray(
-            [
-                [1.0, 0.0, prompt_audit["translation_xy_pixels"][0]],
-                [0.0, 1.0, prompt_audit["translation_xy_pixels"][1]],
-            ],
-            dtype=np.float32,
-        ),
-        (image.width, image.height),
-        flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    ) > 0
-    aligned_amodal = None
-    if cad_amodal is not None:
-        aligned_amodal = cv2.warpAffine(
-            np.asarray(cad_amodal, dtype=np.uint8),
-            np.asarray(
-                [
-                    [1.0, 0.0, prompt_audit["translation_xy_pixels"][0]],
-                    [0.0, 1.0, prompt_audit["translation_xy_pixels"][1]],
-                ],
-                dtype=np.float32,
-            ),
-            (image.width, image.height),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        ) > 0
+    selected = np.asarray(candidate, dtype=bool)
     selected_array = np.asarray(selected, dtype=bool)
     direct_intersection = int(np.count_nonzero(selected_array & aligned_seed))
     direct_overlap_smaller = direct_intersection / max(
@@ -1245,8 +1356,8 @@ def _segment_shape_guided_points(
     metrics = _candidate_metrics(
         selected,
         box=box,
-        width=image.width,
-        height=image.height,
+        width=width,
+        height=height,
         cad_seed=aligned_seed,
         cad_amodal=aligned_amodal,
     )
@@ -1287,30 +1398,218 @@ def _segment_shape_guided_points(
         < DEFAULT_MINIMUM_ALIGNED_CAD_OVERLAP_SMALLER
     ):
         reasons.append("aligned_cad_direct_overlap_below_threshold")
-    area_ratio = float(metrics["candidate_to_cad_seed_area_ratio"])
-    if not (
-        1.0 / DEFAULT_MAXIMUM_ALIGNED_CAD_AREA_RATIO
-        <= area_ratio
-        <= DEFAULT_MAXIMUM_ALIGNED_CAD_AREA_RATIO
-    ):
-        reasons.append("aligned_cad_direct_area_mismatch")
-    result.update(
-        {
-            "accepted": not reasons,
-            "reason_codes": reasons,
-            "shape_metrics": {
-                key: round(float(value), 8) if isinstance(value, float) else value
-                for key, value in metrics.items()
-            },
-            "aligned_cad_support_bound": support_audit,
-            "shape_authority": (
-                "isolated_mesh_amodal_plus_whole_assembly_visibility"
-                if aligned_amodal is not None
-                else "whole_assembly_visible_part_id_only"
-            ),
-        }
-    )
+    # The visible renderer mask may be a small fraction of an occluded mesh.
+    # Its area is a valid bound only when no amodal shape is available.  With
+    # an amodal template, candidate/amodal area and visible recall above are
+    # the authoritative, non-conflicting constraints.
+    if aligned_amodal is None:
+        area_ratio = float(metrics["candidate_to_cad_seed_area_ratio"])
+        if not (
+            1.0 / DEFAULT_MAXIMUM_ALIGNED_CAD_AREA_RATIO
+            <= area_ratio
+            <= DEFAULT_MAXIMUM_ALIGNED_CAD_AREA_RATIO
+        ):
+            reasons.append("aligned_cad_direct_area_mismatch")
+    result = {
+        "accepted": not reasons,
+        "reason_codes": reasons,
+        "shape_metrics": {
+            key: round(float(value), 8) if isinstance(value, float) else value
+            for key, value in metrics.items()
+        },
+        "aligned_cad_support_bound": support_audit,
+        "shape_authority": (
+            "isolated_mesh_amodal_plus_whole_assembly_visibility"
+            if aligned_amodal is not None
+            else "whole_assembly_visible_part_id_only"
+        ),
+    }
     return (selected if not reasons else None), result
+
+
+def _selected_point_model_score(audit: Mapping[str, Any]) -> float:
+    selected_index = audit.get("selected_candidate_index")
+    if not isinstance(selected_index, int):
+        selected_index = audit.get("preview_candidate_index")
+    candidates = audit.get("candidates")
+    if not isinstance(selected_index, int) or not isinstance(candidates, list):
+        return 0.0
+    selected = next(
+        (
+            row
+            for row in candidates
+            if isinstance(row, Mapping)
+            and row.get("candidate_index") == selected_index
+        ),
+        None,
+    )
+    value = selected.get("model_score") if isinstance(selected, Mapping) else None
+    return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _segment_shape_guided_points(
+    *,
+    model: Any,
+    image_state: Mapping[str, Any],
+    image: Any,
+    cad_seed: Any,
+    coarse_candidate: Any,
+    box: Sequence[int],
+    minimum_model_score: float,
+    minimum_prompt_overlap: float,
+    maximum_image_fraction: float,
+    minimum_mask_pixels: int,
+    cad_amodal: Any | None = None,
+    other_part_seeds: Any | None = None,
+) -> tuple[Any | None, dict[str, Any]]:
+    """A/B sparse points against a dense CAD mask prompt, without human input."""
+
+    import cv2
+    import numpy as np
+
+    click_set, prompt_audit = _shape_seed_click_set(
+        cad_seed,
+        coarse_candidate,
+        box=box,
+        width=image.width,
+        height=image.height,
+        other_part_seeds=other_part_seeds,
+    )
+    matrix = np.asarray(
+        [
+            [1.0, 0.0, prompt_audit["translation_xy_pixels"][0]],
+            [0.0, 1.0, prompt_audit["translation_xy_pixels"][1]],
+        ],
+        dtype=np.float32,
+    )
+    aligned_seed = cv2.warpAffine(
+        np.asarray(cad_seed, dtype=np.uint8),
+        matrix,
+        (image.width, image.height),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ) > 0
+    aligned_amodal = (
+        cv2.warpAffine(
+            np.asarray(cad_amodal, dtype=np.uint8),
+            matrix,
+            (image.width, image.height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        > 0
+        if cad_amodal is not None
+        else None
+    )
+
+    sparse_selected, sparse_point_audit = _segment_points(
+        model=model,
+        image_state=image_state,
+        image=image,
+        click_set=click_set,
+        minimum_model_score=minimum_model_score,
+        minimum_prompt_overlap=minimum_prompt_overlap,
+        maximum_image_fraction=maximum_image_fraction,
+        minimum_mask_pixels=minimum_mask_pixels,
+    )
+    sparse_final = None
+    sparse_shape_audit: dict[str, Any] | None = None
+    if sparse_selected is not None:
+        sparse_final, sparse_shape_audit = _evaluate_shape_guided_candidate(
+            sparse_selected,
+            box=box,
+            width=image.width,
+            height=image.height,
+            aligned_seed=aligned_seed,
+            aligned_amodal=aligned_amodal,
+            minimum_mask_pixels=minimum_mask_pixels,
+        )
+
+    dense_selected, dense_point_audit = _segment_dense_mask_points(
+        model=model,
+        image_state=image_state,
+        image=image,
+        click_set=click_set,
+        aligned_cad_seed=aligned_seed,
+        minimum_model_score=minimum_model_score,
+        minimum_prompt_overlap=minimum_prompt_overlap,
+        maximum_image_fraction=maximum_image_fraction,
+        minimum_mask_pixels=minimum_mask_pixels,
+    )
+    dense_final = None
+    dense_shape_audit: dict[str, Any] | None = None
+    if dense_selected is not None:
+        dense_final, dense_shape_audit = _evaluate_shape_guided_candidate(
+            dense_selected,
+            box=box,
+            width=image.width,
+            height=image.height,
+            aligned_seed=aligned_seed,
+            aligned_amodal=aligned_amodal,
+            minimum_mask_pixels=minimum_mask_pixels,
+        )
+
+    # Preserve a previously safe sparse result.  Dense guidance is allowed to
+    # rescue only a sparse failure, so this experiment cannot regress accepted
+    # baseline masks by silently changing their source.
+    if sparse_final is not None:
+        selected = sparse_final
+        selected_prompt_mode = "sparse_positive_negative_points"
+        selected_shape_audit = sparse_shape_audit
+        selected_model_score = _selected_point_model_score(sparse_point_audit)
+    elif dense_final is not None:
+        selected = dense_final
+        selected_prompt_mode = "dense_cad_mask_plus_positive_negative_points"
+        selected_shape_audit = dense_shape_audit
+        selected_model_score = _selected_point_model_score(dense_point_audit)
+    else:
+        selected = None
+        selected_prompt_mode = "none"
+        selected_shape_audit = None
+        selected_model_score = 0.0
+
+    result: dict[str, Any] = {
+        "prompt_mode": "automatic_cad_sparse_and_dense_ab",
+        "selected_prompt_mode": selected_prompt_mode,
+        "selected_model_score": selected_model_score,
+        "click_set": click_set,
+        "prompt_audit": prompt_audit,
+        # Keep the legacy key for downstream readers while adding a complete
+        # branch audit for the new dense experiment.
+        "sam3_point_audit": sparse_point_audit,
+        "sparse_branch": {
+            "point_audit": sparse_point_audit,
+            "shape_gate": sparse_shape_audit,
+            "accepted": sparse_final is not None,
+        },
+        "dense_branch": {
+            "point_audit": dense_point_audit,
+            "shape_gate": dense_shape_audit,
+            "accepted": dense_final is not None,
+        },
+        "accepted": selected is not None,
+        "reason_codes": [],
+    }
+    if selected is None:
+        if sparse_selected is None:
+            result["reason_codes"].append("no_sparse_point_prediction_accepted")
+        elif sparse_shape_audit is not None:
+            result["reason_codes"].extend(
+                f"sparse:{reason}" for reason in sparse_shape_audit["reason_codes"]
+            )
+        if dense_selected is None:
+            result["reason_codes"].append("no_dense_mask_prediction_accepted")
+        elif dense_shape_audit is not None:
+            result["reason_codes"].extend(
+                f"dense:{reason}" for reason in dense_shape_audit["reason_codes"]
+            )
+        return None, result
+    assert selected_shape_audit is not None
+    result.update(selected_shape_audit)
+    result["accepted"] = True
+    return selected, result
 
 
 def _segment_ordered_points(
@@ -1783,6 +2082,20 @@ def run(
                                 minimum_mask_pixels=minimum_mask_pixels,
                                 cad_seed=None,
                             )
+                        if coarse_selected is None and cad_amodal_array is not None:
+                            # A tiny/thin part may have no generic detector
+                            # proposal at all.  Start the dense experiment from
+                            # the registered modal mask with zero residual; the
+                            # decoded photo mask must still pass every strict
+                            # visible/amodal gate below.
+                            coarse_selected = cad_seed_array
+                            coarse_audit = {
+                                **coarse_audit,
+                                "accepted": False,
+                                "dense_mask_bootstrap": True,
+                                "source": "registered_visible_cad_seed",
+                                "per_mesh_pose_change_allowed": False,
+                            }
                         shape_point_audit: dict[str, Any] | None = None
                         if coarse_selected is not None:
                             other_part_seeds = None
@@ -1810,24 +2123,16 @@ def run(
                             )
                         if selected is not None and shape_point_audit is not None:
                             candidate_index = len(initial_shape_audit["candidates"])
-                            point_audit = shape_point_audit["sam3_point_audit"]
-                            point_index = point_audit.get("selected_candidate_index")
-                            point_candidate = next(
-                                (
-                                    row
-                                    for row in point_audit.get("candidates", [])
-                                    if isinstance(row, Mapping)
-                                    and row.get("candidate_index") == point_index
-                                ),
-                                {},
-                            )
                             rescued_candidate = {
                                 "candidate_index": candidate_index,
                                 "candidate_source": (
-                                    "automatic_cad_shape_point_refinement"
+                                    "automatic_cad_sparse_or_dense_refinement"
                                 ),
+                                "prompt_mode": shape_point_audit[
+                                    "selected_prompt_mode"
+                                ],
                                 "model_score": float(
-                                    point_candidate.get("model_score", 0.0)
+                                    shape_point_audit.get("selected_model_score", 0.0)
                                 ),
                                 **shape_point_audit["shape_metrics"],
                                 "accepted": True,

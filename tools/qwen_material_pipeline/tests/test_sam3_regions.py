@@ -19,10 +19,13 @@ from qwen_material_pipeline.segmentation.sam3_regions import (
     _bounded_shared_camera_alignment,
     _box_pixels,
     _candidate_metrics,
+    _dense_cad_mask_logits,
+    _evaluate_shape_guided_candidate,
     _load_request,
     _normalized_cxcywh,
     _occlusion_aware_amodal_agreement,
     _segment_box,
+    _segment_dense_mask_points,
     _segment_ordered_points,
     _segment_points,
     _segment_shape_guided_points,
@@ -779,6 +782,132 @@ def test_segment_points_uses_true_positive_and_negative_sam3_prompts() -> None:
         np.asarray([[4.5, 4.5], [0.0, 0.0]])
     )
     assert model.point_labels.tolist() == [1, 0]
+
+
+def test_dense_cad_logits_keep_thin_foreground_prompt_strong() -> None:
+    mask = np.zeros((443, 582), dtype=bool)
+    mask[200:215, 280:284] = True
+
+    logits = _dense_cad_mask_logits(mask, output_size=(288, 288))
+
+    assert logits.shape == (1, 288, 288)
+    assert float(logits.max()) == pytest.approx(4.0)
+    assert float(logits.min()) == pytest.approx(-4.0)
+    assert np.count_nonzero(logits > 0.0) > 0
+
+
+class _FakeDenseInteractiveModel:
+    def __init__(self, mask: np.ndarray) -> None:
+        self.mask = mask
+        self.mask_input = None
+
+    def predict_inst(
+        self,
+        image_state,
+        *,
+        point_coords,
+        point_labels,
+        mask_input,
+        multimask_output: bool,
+    ):
+        assert image_state == {"cached": True}
+        assert multimask_output is False
+        self.mask_input = np.asarray(mask_input).copy()
+        return (
+            self.mask[None, :, :],
+            np.asarray([0.9], dtype=np.float32),
+            np.zeros((1, mask_input.shape[-2], mask_input.shape[-1]), dtype=np.float32),
+        )
+
+
+def test_dense_cad_mask_is_passed_as_model_prompt_not_used_as_output() -> None:
+    seed = np.zeros((32, 32), dtype=bool)
+    seed[8:20, 10:18] = True
+    photo_prediction = np.zeros_like(seed)
+    photo_prediction[9:21, 11:19] = True
+    model = _FakeDenseInteractiveModel(photo_prediction)
+    image = Image.new("RGB", (32, 32))
+    try:
+        selected, audit = _segment_dense_mask_points(
+            model=model,
+            image_state={"cached": True},
+            image=image,
+            click_set={
+                "positive_points": [[450, 450]],
+                "negative_points": [[0, 0]],
+            },
+            aligned_cad_seed=seed,
+            minimum_model_score=0.45,
+            minimum_prompt_overlap=1.0,
+            maximum_image_fraction=0.80,
+            minimum_mask_pixels=16,
+        )
+    finally:
+        image.close()
+
+    assert np.array_equal(selected, photo_prediction)
+    assert model.mask_input is not None
+    assert model.mask_input.shape == (1, 256, 256)
+    assert not np.array_equal(selected, seed)
+    assert audit["mask_prompt"]["source"] == "aligned_whole_assembly_visible_part_id"
+
+
+def test_dense_cad_automatic_negatives_are_advisory_before_shape_gate() -> None:
+    seed = np.zeros((32, 32), dtype=bool)
+    seed[8:24, 8:24] = True
+    photo_prediction = np.zeros_like(seed)
+    photo_prediction[9:23, 9:23] = True
+    model = _FakeDenseInteractiveModel(photo_prediction)
+    image = Image.new("RGB", (32, 32))
+    try:
+        selected, audit = _segment_dense_mask_points(
+            model=model,
+            image_state={"cached": True},
+            image=image,
+            click_set={
+                "positive_points": [[400, 400]],
+                # This synthesized negative is intentionally inside the
+                # photo proposal.  It must not veto a later strict CAD gate.
+                "negative_points": [[500, 500]],
+            },
+            aligned_cad_seed=seed,
+            minimum_model_score=0.45,
+            minimum_prompt_overlap=1.0,
+            maximum_image_fraction=0.80,
+            minimum_mask_pixels=16,
+        )
+    finally:
+        image.close()
+
+    assert np.array_equal(selected, photo_prediction)
+    assert audit["accepted"] is False
+    assert audit["automatic_negative_points_advisory"] is True
+    assert "negative_point_inside_mask" in audit["candidates"][0]["reason_codes"]
+
+
+def test_occluded_visible_seed_does_not_bound_amodal_candidate_area() -> None:
+    visible = np.zeros((64, 64), dtype=bool)
+    visible[22:27, 24:34] = True
+    amodal = np.zeros_like(visible)
+    amodal[16:36, 24:34] = True
+    photo_prediction = np.zeros_like(visible)
+    photo_prediction[17:35, 24:34] = True
+
+    selected, audit = _evaluate_shape_guided_candidate(
+        photo_prediction,
+        box=[0, 0, 1000, 1000],
+        width=64,
+        height=64,
+        aligned_seed=visible,
+        aligned_amodal=amodal,
+        minimum_mask_pixels=16,
+    )
+
+    assert np.array_equal(selected, photo_prediction)
+    assert audit["accepted"] is True
+    assert audit["shape_metrics"]["candidate_to_cad_seed_area_ratio"] > 2.0
+    assert audit["shape_metrics"]["candidate_to_cad_amodal_area_ratio"] < 1.0
+    assert "aligned_cad_direct_area_mismatch" not in audit["reason_codes"]
 
 
 def test_automatic_shape_points_refine_a_shifted_component() -> None:
