@@ -69,7 +69,11 @@ def _tile(
             entity,
             (255, 255, 0),
         ),
-        (f"FINAL: {selected_source}", hybrid, (255, 0, 255)),
+        (
+            "FINAL: Entity+CAD" if selected_source == "entityseg" else "FINAL: SAM3",
+            hybrid,
+            (255, 0, 255),
+        ),
     )
     for label, mask, color in definitions:
         crop = _overlay(source, mask, color)[top:bottom, left:right]
@@ -151,6 +155,7 @@ def build_report(
                     "entityseg_fusion_rejection_reasons", []
                 ),
                 "metrics": final_row.get("fusion_metrics"),
+                "cad_support_trim": final_row.get("cad_support_trim"),
                 "asset": f"assets/{asset_name}",
             }
         )
@@ -175,6 +180,12 @@ def build_report(
                 details.append(f"CAD 直接 IoU {metrics['entity_cad_direct_iou']:.3f}")
             if "entity_to_cad_area_ratio" in metrics:
                 details.append(f"面积比 {metrics['entity_to_cad_area_ratio']:.2f}")
+            trim = row.get("cad_support_trim")
+            if isinstance(trim, Mapping):
+                details.append(
+                    "CAD 支持域裁剪：保留 "
+                    f"{100.0 * float(trim['retained_entity_fraction']):.1f}%"
+                )
             reasons = row["entityseg_rejection_reasons"]
             if reasons:
                 details.append("拒绝原因：" + ", ".join(reasons))

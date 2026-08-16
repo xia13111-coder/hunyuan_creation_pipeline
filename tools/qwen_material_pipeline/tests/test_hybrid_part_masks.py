@@ -5,6 +5,7 @@ import numpy as np
 from qwen_material_pipeline.segmentation.hybrid_part_masks import (
     _connected_component_count,
     _entity_rejection_reasons,
+    _trim_entity_to_cad_support,
 )
 
 
@@ -66,3 +67,30 @@ def test_connected_component_count_ignores_tiny_specks() -> None:
     mask[30, 30] = True
 
     assert _connected_component_count(mask) == 1
+
+
+def test_cad_support_trim_removes_touching_adjacent_part() -> None:
+    seed = np.zeros((80, 100), dtype=bool)
+    entity = np.zeros_like(seed)
+    seed[20:60, 20:60] = True
+    entity[18:62, 18:62] = True
+    entity[45:65, 62:90] = True
+
+    trimmed, audit = _trim_entity_to_cad_support(entity, seed)
+
+    assert np.all(trimmed <= entity)
+    assert not np.any(trimmed[:, 70:])
+    assert audit["retained_entity_fraction"] < 1.0
+    assert audit["final_to_cad_area_ratio"] <= 1.25
+
+
+def test_cad_support_trim_preserves_boundary_already_inside_bound() -> None:
+    seed = np.zeros((80, 100), dtype=bool)
+    entity = np.zeros_like(seed)
+    seed[20:60, 20:60] = True
+    entity[19:61, 19:61] = True
+
+    trimmed, audit = _trim_entity_to_cad_support(entity, seed)
+
+    assert np.array_equal(trimmed, entity)
+    assert audit["retained_entity_fraction"] == 1.0

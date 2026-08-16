@@ -26,6 +26,9 @@ MINIMUM_ENTITY_EDGE_IMPROVEMENT = 0.03
 MINIMUM_SAM_ENTITY_OVERLAP_SMALLER = 0.50
 MINIMUM_DIRECT_IOU_WHEN_SAM_DISAGREES = 0.60
 MINIMUM_CONNECTED_COMPONENT_PIXELS = 16
+MAXIMUM_FINAL_TO_CAD_AREA_RATIO = 1.25
+MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION = 0.04
+MINIMUM_CAD_SUPPORT_RADIUS_PIXELS = 2
 
 
 def _sha256_file(path: Path) -> str:
@@ -100,6 +103,64 @@ def _connected_component_count(mask: np.ndarray) -> int:
     )
 
 
+def _trim_entity_to_cad_support(
+    entity_mask: np.ndarray,
+    cad_seed: np.ndarray,
+) -> tuple[np.ndarray, dict[str, float | int]]:
+    """Keep EntitySeg detail only inside a bounded CAD Part-ID support band.
+
+    Entity segmentation is class agnostic and may merge touching CAD parts into
+    one visual entity.  Intersecting with the exact CAD projection would throw
+    away useful photo-boundary detail, so grow the projection by a small,
+    resolution-independent radius.  Select the largest radius whose result is
+    still no more than 1.25x the CAD area.
+    """
+
+    entity = np.asarray(entity_mask, dtype=bool)
+    seed = np.asarray(cad_seed, dtype=bool)
+    if entity.shape != seed.shape or not np.any(entity) or not np.any(seed):
+        raise EntitySegRegionError("CAD support trim masks are empty or incompatible")
+    seed_y, seed_x = np.where(seed)
+    diagonal = float(
+        np.hypot(
+            int(seed_x.max() - seed_x.min() + 1),
+            int(seed_y.max() - seed_y.min() + 1),
+        )
+    )
+    maximum_radius = max(
+        MINIMUM_CAD_SUPPORT_RADIUS_PIXELS,
+        int(round(MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION * diagonal)),
+    )
+    seed_pixels = int(np.count_nonzero(seed))
+    maximum_pixels = int(np.floor(MAXIMUM_FINAL_TO_CAD_AREA_RATIO * seed_pixels))
+    selected_radius = 0
+    selected = entity & seed
+    for radius in range(maximum_radius + 1):
+        if radius == 0:
+            support = seed
+        else:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
+            )
+            support = cv2.dilate(seed.astype(np.uint8), kernel) > 0
+        candidate = entity & support
+        if int(np.count_nonzero(candidate)) > maximum_pixels:
+            break
+        selected_radius = radius
+        selected = candidate
+    selected_pixels = int(np.count_nonzero(selected))
+    if selected_pixels == 0:
+        raise EntitySegRegionError("CAD support trim removed the complete EntitySeg mask")
+    entity_pixels = int(np.count_nonzero(entity))
+    return selected, {
+        "maximum_support_radius_pixels": maximum_radius,
+        "selected_support_radius_pixels": selected_radius,
+        "maximum_final_to_cad_area_ratio": MAXIMUM_FINAL_TO_CAD_AREA_RATIO,
+        "untrimmed_entity_pixels": entity_pixels,
+        "trimmed_entity_pixels": selected_pixels,
+        "retained_entity_fraction": selected_pixels / entity_pixels,
+        "final_to_cad_area_ratio": selected_pixels / seed_pixels,
+    }
 def _entity_rejection_reasons(
     metrics: Mapping[str, float | int], *, sam_accepted: bool
 ) -> list[str]:
@@ -258,8 +319,11 @@ def build_hybrid_masks(
             )
 
         final_mask: np.ndarray | None
+        cad_support_trim: dict[str, float | int] | None = None
         if entity_mask is not None and not entity_reasons:
-            final_mask = entity_mask
+            final_mask, cad_support_trim = _trim_entity_to_cad_support(
+                entity_mask, seed
+            )
             selected_source = "entityseg"
             decision = (
                 "entityseg_replaces_sam3_boundary"
@@ -302,6 +366,7 @@ def build_hybrid_masks(
                 "entityseg_candidate_accepted": entity_accepted,
                 "entityseg_fusion_rejection_reasons": entity_reasons,
                 "fusion_metrics": metrics,
+                "cad_support_trim": cad_support_trim,
                 "mask": mask_document,
             }
         )
@@ -331,6 +396,9 @@ def build_hybrid_masks(
             "minimum_entity_edge_improvement": MINIMUM_ENTITY_EDGE_IMPROVEMENT,
             "minimum_sam_entity_overlap_smaller": MINIMUM_SAM_ENTITY_OVERLAP_SMALLER,
             "minimum_direct_iou_when_sam_disagrees": MINIMUM_DIRECT_IOU_WHEN_SAM_DISAGREES,
+            "maximum_final_to_cad_area_ratio": MAXIMUM_FINAL_TO_CAD_AREA_RATIO,
+            "maximum_cad_support_radius_fraction": MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION,
+            "minimum_cad_support_radius_pixels": MINIMUM_CAD_SUPPORT_RADIUS_PIXELS,
         },
         "records": records,
         "summary": {
