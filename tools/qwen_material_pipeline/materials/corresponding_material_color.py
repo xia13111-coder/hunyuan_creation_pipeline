@@ -262,8 +262,7 @@ def build_corresponding_material_color_plan(
     if not selections:
         raise CorrespondingMaterialColorError("Qwen choices contain no selections")
 
-    exact_ids: set[str] = set()
-    corresponding_ids: set[str] = set()
+    declared_match_types: dict[str, str] = {}
     for part_id, selection in selections.items():
         if part_id not in assignments:
             raise CorrespondingMaterialColorError(
@@ -279,26 +278,11 @@ def build_corresponding_material_color_plan(
                 f"source assignment {part_id} already contains parameters"
             )
         match_type = selection.get("match_type")
-        if match_type == EXACT_LIBRARY_MATCH:
-            exact_ids.add(part_id)
-        elif match_type == CORRESPONDING_MATERIAL:
-            corresponding_ids.add(part_id)
-        else:
+        if match_type not in {EXACT_LIBRARY_MATCH, CORRESPONDING_MATERIAL}:
             raise CorrespondingMaterialColorError(
                 f"selection {part_id} has unsupported match_type {match_type!r}"
             )
-    if not corresponding_ids:
-        raise CorrespondingMaterialColorError("there are no corresponding materials")
-
-    evidence_by_id = {
-        part_id: _color_evidence(evidence[part_id], part_id)
-        for part_id in sorted(corresponding_ids)
-        if part_id in evidence
-    }
-    if set(evidence_by_id) != corresponding_ids:
-        raise CorrespondingMaterialColorError(
-            "every corresponding material must have sealed Part-ID colour evidence"
-        )
+        declared_match_types[part_id] = str(match_type)
 
     consensus = _mapping(
         qwen_choices.get("component_identity_consensus"),
@@ -351,6 +335,46 @@ def build_corresponding_material_color_plan(
             raise CorrespondingMaterialColorError(
                 f"component {component_id} does not share one selected MDL"
             )
+
+    # Component identity consensus and exact colour-preset confirmation are
+    # separate contracts.  A repeated-role consensus may legitimately choose
+    # one exact *material identity* from conflicting members, but that does not
+    # prove the authored colour preset matches the whole photo component.  In
+    # that explicit case retain the selected MDL and make the whole component
+    # eligible for the bounded colour pass.  A protected exact preset, by
+    # contrast, remains immutable for every member of its material component.
+    effective_match_types = dict(declared_match_types)
+    for component in component_rows:
+        component = _mapping(component, "component")
+        if component.get("match_type") != EXACT_LIBRARY_MATCH:
+            continue
+        if component.get("consensus_mode") != "REPEATED_ROLE_JOINT_CONSENSUS":
+            continue
+        for part_id in component.get("member_part_ids", []):
+            effective_match_types[str(part_id)] = CORRESPONDING_MATERIAL
+
+    exact_ids = {
+        part_id
+        for part_id, match_type in effective_match_types.items()
+        if match_type == EXACT_LIBRARY_MATCH
+    }
+    corresponding_ids = {
+        part_id
+        for part_id, match_type in effective_match_types.items()
+        if match_type == CORRESPONDING_MATERIAL
+    }
+    if not corresponding_ids:
+        raise CorrespondingMaterialColorError("there are no corresponding materials")
+
+    evidence_by_id = {
+        part_id: _color_evidence(evidence[part_id], part_id)
+        for part_id in sorted(corresponding_ids)
+        if part_id in evidence
+    }
+    if set(evidence_by_id) != corresponding_ids:
+        raise CorrespondingMaterialColorError(
+            "every corresponding material must have sealed Part-ID colour evidence"
+        )
 
     scope_members: dict[str, list[str]] = {}
     for part_id in sorted(corresponding_ids):

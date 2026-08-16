@@ -237,6 +237,58 @@ def test_rejects_exact_and_corresponding_members_mixed_in_one_component() -> Non
         )
 
 
+def test_repeated_role_exact_identity_is_still_color_tuned_as_one_scope() -> None:
+    source, choices, evidence = _documents()
+    for part_id in ("P3", "P4"):
+        next(
+            row for row in choices["selections"] if row["part_id"] == part_id
+        )["match_type"] = "EXACT_LIBRARY_MATCH"
+    component = choices["component_identity_consensus"]["components"][0]
+    component["match_type"] = "EXACT_LIBRARY_MATCH"
+    component["consensus_mode"] = "REPEATED_ROLE_JOINT_CONSENSUS"
+    choices = _seal({key: value for key, value in choices.items() if key != "integrity"})
+
+    output, audit = build_corresponding_material_color_plan(
+        source_plan=source,
+        qwen_choices=choices,
+        part_id_evidence=evidence,
+    )
+
+    assignments = _by_id(output)
+    assert assignments["P3"]["material_id"] == METAL
+    assert assignments["P4"]["material_id"] == METAL
+    assert assignments["P3"]["parameters"] == assignments["P4"]["parameters"]
+    assert audit["summary"]["exact_library_match_count"] == 1
+    assert audit["summary"]["corresponding_material_count"] == 3
+    assert any(
+        scope["scope_id"] == "COMPONENT:C_GREEN" for scope in audit["scopes"]
+    )
+
+
+def test_protected_exact_component_keeps_authored_preset_immutable() -> None:
+    source, choices, evidence = _documents()
+    for part_id in ("P3", "P4"):
+        next(
+            row for row in choices["selections"] if row["part_id"] == part_id
+        )["match_type"] = "EXACT_LIBRARY_MATCH"
+    component = choices["component_identity_consensus"]["components"][0]
+    component["match_type"] = "EXACT_LIBRARY_MATCH"
+    component["consensus_mode"] = "PROTECTED_EXACT_PRESET_PROPAGATED"
+    choices = _seal({key: value for key, value in choices.items() if key != "integrity"})
+
+    output, audit = build_corresponding_material_color_plan(
+        source_plan=source,
+        qwen_choices=choices,
+        part_id_evidence=evidence,
+    )
+
+    assignments = _by_id(output)
+    assert "parameters" not in assignments["P3"]
+    assert "parameters" not in assignments["P4"]
+    assert audit["summary"]["exact_library_match_count"] == 3
+    assert audit["summary"]["corresponding_material_count"] == 1
+
+
 def test_rejects_component_member_outside_sealed_plans() -> None:
     source, choices, evidence = _documents()
     choices["component_identity_consensus"]["components"][0][
