@@ -2054,8 +2054,8 @@ def _run_policy_part_id_stage(
         log_message(
             log_cb,
             "Two-layer one-to-one Part-ID mapping completed: every coarse box "
-            "inherits the rigid whole-asset camera, then automatic local SAM3 "
-            "and bounded similarity registration refine only its photo evidence. "
+            "inherits the rigid whole-asset camera and the single residual shared "
+            "by that view, then automatic local SAM3 refines its photo evidence. "
             "No CAD/USD transform was changed. "
             f"{evidence_document['summary'].get('sam3_refined_observation_count', 0)} "
             "observations passed local refinement; "
@@ -2064,8 +2064,8 @@ def _run_policy_part_id_stage(
             f"{evidence_document['summary'].get('chromatic_isolated_observation_count', 0)} "
             "single-view chromatic components were isolated, including "
             f"{evidence_document['summary'].get('tiny_chromatic_rescue_observation_count', 0)} "
-            "small-part rescues. Local transforms affect evidence masks only, "
-            "never CAD/USD geometry. "
+            "small-part rescues. No Part-ID-local translation, rotation, scale, "
+            "or CAD/USD geometry change is allowed. "
             "Selected-view coverage: "
             f"{evidence_document['summary'].get('selected_reference_view_coverage', {})}.",
         )

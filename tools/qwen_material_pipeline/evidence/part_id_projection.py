@@ -31,9 +31,13 @@ from PIL import Image, ImageOps
 
 from .color_semantics import pixel_color_label
 from ..segmentation.sam3_regions import (
+    DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO,
+    DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION,
+    DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU,
     DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT,
     DEFAULT_MINIMUM_CAD_SHAPE_IOU,
     DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS,
+    DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL,
 )
 from ..materials.tuning import (
     color_parameters_for_target_srgb,
@@ -694,7 +698,29 @@ def _open_grayscale(path: Path, label: str) -> np.ndarray:
 
 
 def _selected_cad_shape_candidate(record: Mapping[str, Any]) -> dict[str, Any]:
-    """Return the accepted location-independent CAD-shape candidate audit."""
+    """Return a candidate bound to the sealed view-shared CAD alignment."""
+
+    shared = record.get("view_shared_alignment")
+    if not isinstance(shared, Mapping):
+        raise PartIdProjectionError(
+            "Part-ID SAM3 refinement has no view-shared alignment"
+        )
+    translation = shared.get("translation_xy_pixels")
+    if (
+        not isinstance(translation, Sequence)
+        or isinstance(translation, (str, bytes))
+        or len(translation) != 2
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in translation
+        )
+        or shared.get("part_specific_translation_allowed") is not False
+    ):
+        raise PartIdProjectionError(
+            "Part-ID SAM3 view-shared alignment contract is malformed"
+        )
 
     box_audits = record.get("box_audits")
     if not isinstance(box_audits, list) or len(box_audits) != 1:
@@ -728,23 +754,70 @@ def _selected_cad_shape_candidate(record: Mapping[str, Any]) -> dict[str, Any]:
     )
     if selected is None:
         raise PartIdProjectionError("Part-ID SAM3 selected shape candidate is missing")
+    refinement = box_audit.get("shape_point_refinement")
+    prompt_audit = (
+        refinement.get("prompt_audit") if isinstance(refinement, Mapping) else None
+    )
+    if (
+        not isinstance(refinement, Mapping)
+        or refinement.get("accepted") is not True
+        or not isinstance(prompt_audit, Mapping)
+        or prompt_audit.get("per_mesh_pose_change_allowed") is not False
+        or prompt_audit.get("part_specific_translation_allowed") is not False
+        or prompt_audit.get("part_local_translation_xy_pixels") != [0.0, 0.0]
+        or prompt_audit.get("translation_xy_pixels")
+        != [float(translation[0]), float(translation[1])]
+    ):
+        raise PartIdProjectionError(
+            "Part-ID SAM3 candidate is not bound to the view-shared alignment"
+        )
     seed_pixels = selected.get("cad_shape_seed_pixels")
     shape_iou = selected.get("cad_shape_iou")
     area_agreement = selected.get("cad_shape_area_agreement")
-    if (
-        isinstance(seed_pixels, bool)
-        or not isinstance(seed_pixels, int)
-        or seed_pixels < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS
-        or isinstance(shape_iou, bool)
-        or not isinstance(shape_iou, (int, float))
-        or not math.isfinite(float(shape_iou))
-        or float(shape_iou) < DEFAULT_MINIMUM_CAD_SHAPE_IOU
-        or isinstance(area_agreement, bool)
-        or not isinstance(area_agreement, (int, float))
-        or not math.isfinite(float(area_agreement))
-        or float(area_agreement) < DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
-        or selected.get("cad_shape_location_invariant") is not True
-    ):
+    base_contract_valid = (
+        not isinstance(seed_pixels, bool)
+        and isinstance(seed_pixels, int)
+        and seed_pixels >= DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS
+        and selected.get("cad_shape_location_invariant") is True
+    )
+    if selected.get("cad_amodal_occlusion_aware") is True:
+        amodal_precision = selected.get("cad_amodal_candidate_precision")
+        amodal_shape_iou = selected.get("cad_amodal_shape_iou")
+        visible_recall = selected.get("cad_seed_recall")
+        amodal_area_ratio = selected.get("candidate_to_cad_amodal_area_ratio")
+        shape_contract_valid = (
+            all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+                for value in (
+                    amodal_precision,
+                    amodal_shape_iou,
+                    visible_recall,
+                    amodal_area_ratio,
+                )
+            )
+            and float(amodal_precision)
+            >= DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION
+            and float(amodal_shape_iou)
+            >= DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
+            and float(visible_recall) >= DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL
+            and float(amodal_area_ratio)
+            <= DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO
+        )
+    else:
+        shape_contract_valid = (
+            isinstance(shape_iou, (int, float))
+            and not isinstance(shape_iou, bool)
+            and math.isfinite(float(shape_iou))
+            and float(shape_iou) >= DEFAULT_MINIMUM_CAD_SHAPE_IOU
+            and isinstance(area_agreement, (int, float))
+            and not isinstance(area_agreement, bool)
+            and math.isfinite(float(area_agreement))
+            and float(area_agreement)
+            >= DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
+        )
+    if not base_contract_valid or not shape_contract_valid:
         raise PartIdProjectionError(
             "Part-ID SAM3 selected candidate failed the CAD shape contract"
         )
@@ -1695,6 +1768,9 @@ def build_part_id_reference_evidence(
     refinement: dict[str, Any] | None = None
     refinement_path: Path | None = None
     refinement_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    refinement_records_by_identity: dict[
+        tuple[str, str], Mapping[str, Any]
+    ] = {}
     if part_id_sam3_manifest is not None:
         refinement, refinement_path = _read_object(
             part_id_sam3_manifest,
@@ -1717,13 +1793,42 @@ def build_part_id_reference_evidence(
             raise PartIdProjectionError(
                 "Part-ID SAM3 refinement manifest has no records"
             )
+        refinement_policy = refinement.get("policy")
+        if (
+            not isinstance(refinement_policy, Mapping)
+            or refinement_policy.get("per_mesh_pose_change_allowed") is not False
+            or refinement_policy.get("automatic_shape_point_refinement")
+            != "always_run_same_view_cad_shape_positive_negative_points"
+        ):
+            raise PartIdProjectionError(
+                "Part-ID SAM3 manifest does not enforce view-shared CAD guidance"
+            )
+        shared_alignment_by_view: dict[str, dict[str, Any]] = {}
         for index, raw in enumerate(records):
             if not isinstance(raw, Mapping):
                 raise PartIdProjectionError(f"Part-ID SAM3 record {index} is invalid")
             identity = (str(raw.get("view_id")), str(raw.get("group_id")))
-            if not identity[0] or not identity[1] or identity in refinement_by_identity:
+            if (
+                not identity[0]
+                or not identity[1]
+                or identity in refinement_records_by_identity
+            ):
                 raise PartIdProjectionError(
                     "Part-ID SAM3 records contain invalid duplicate identities"
+                )
+            refinement_records_by_identity[identity] = raw
+            shared = raw.get("view_shared_alignment")
+            if not isinstance(shared, Mapping):
+                raise PartIdProjectionError(
+                    f"Part-ID SAM3 record {identity} has no view-shared alignment"
+                )
+            shared_document = copy.deepcopy(dict(shared))
+            prior_shared = shared_alignment_by_view.setdefault(
+                identity[0], shared_document
+            )
+            if prior_shared != shared_document:
+                raise PartIdProjectionError(
+                    f"Part-ID SAM3 records disagree on shared alignment for {identity[0]}"
                 )
             if raw.get("accepted") is not True:
                 continue
@@ -1749,11 +1854,27 @@ def build_part_id_reference_evidence(
                 raise PartIdProjectionError(
                     f"Part-ID SAM3 mask hash mismatch for {identity}"
                 )
+            seed_record = raw.get("cad_projection_seed")
+            if not isinstance(seed_record, Mapping):
+                raise PartIdProjectionError(
+                    f"Part-ID SAM3 record {identity} has no sealed CAD seed"
+                )
+            seed_path = _resolve_file(
+                seed_record.get("path"),
+                owner=refinement_path,
+                label=f"Part-ID SAM3 CAD seed {identity[0]}/{identity[1]}",
+            )
+            if seed_record.get("sha256") != _sha256_file(seed_path):
+                raise PartIdProjectionError(
+                    f"Part-ID SAM3 CAD seed hash mismatch for {identity}"
+                )
             shape_candidate = _selected_cad_shape_candidate(raw)
             refinement_by_identity[identity] = {
                 "mask_path": mask_path,
+                "cad_seed_path": seed_path,
                 "record": raw,
                 "shape_candidate": shape_candidate,
+                "view_shared_alignment": shared_document,
             }
 
     source_views = manifest.get("source_views")
@@ -1799,6 +1920,18 @@ def build_part_id_reference_evidence(
             "image": image,
             "foreground": foreground,
         }
+    for (view_id, part_id), raw in refinement_records_by_identity.items():
+        reference = references.get(view_id)
+        if reference is None:
+            raise PartIdProjectionError(
+                f"Part-ID SAM3 record uses unknown reference view {view_id}/{part_id}"
+            )
+        if raw.get("source_image_sha256") != _sha256_file(
+            reference["image_path"]
+        ):
+            raise PartIdProjectionError(
+                f"Part-ID SAM3 source image mismatch for {view_id}/{part_id}"
+            )
 
     parts = registry.get("parts")
     render_set = registry.get("render_set")
@@ -1818,6 +1951,18 @@ def build_part_id_reference_evidence(
         if not isinstance(part_id, str) or not part_id or part_id in part_ids:
             raise PartIdProjectionError("registry Part IDs must be unique")
         part_ids.append(part_id)
+    unknown_refinement_parts = sorted(
+        {
+            part_id
+            for _view_id, part_id in refinement_records_by_identity
+            if part_id not in part_ids
+        }
+    )
+    if unknown_refinement_parts:
+        raise PartIdProjectionError(
+            "Part-ID SAM3 manifest contains unknown Part IDs: "
+            + ", ".join(unknown_refinement_parts)
+        )
     render_views: dict[str, dict[str, Any]] = {}
     for raw in raw_render_views:
         if not isinstance(raw, Mapping):
@@ -2016,10 +2161,18 @@ def build_part_id_reference_evidence(
                     refinement_audit = {
                         "applied": False,
                         "status": "local_sam3_missing_or_rejected",
-                        "authority": ("whole_asset_similarity_cad_part_id_projection"),
+                        "authority": ("whole_asset_aligned_cad_part_id_projection"),
                         "per_part_geometric_warp_applied": False,
                     }
                 else:
+                    sealed_record = refined_record["record"]
+                    if sealed_record.get("source_image_sha256") != _sha256_file(
+                        reference["image_path"]
+                    ):
+                        raise PartIdProjectionError(
+                            f"Part-ID SAM3 source image mismatch for "
+                            f"{reference_id}/{part_id}"
+                        )
                     refined = _open_mask(
                         refined_record["mask_path"],
                         f"Part-ID SAM3 mask {reference_id}/{part_id}",
@@ -2033,40 +2186,80 @@ def build_part_id_reference_evidence(
                         refined,
                         reference["foreground"],
                     )
+                    sealed_seed = _open_mask(
+                        refined_record["cad_seed_path"],
+                        f"Part-ID SAM3 CAD seed {reference_id}/{part_id}",
+                    )
+                    if sealed_seed.shape != refined.shape:
+                        raise PartIdProjectionError(
+                            f"Part-ID SAM3 CAD seed shape differs for "
+                            f"{reference_id}/{part_id}"
+                        )
+                    shared_translation = refined_record[
+                        "view_shared_alignment"
+                    ]["translation_xy_pixels"]
+                    aligned_sealed_seed = cv2.warpAffine(
+                        sealed_seed,
+                        np.asarray(
+                            [
+                                [1.0, 0.0, float(shared_translation[0])],
+                                [0.0, 1.0, float(shared_translation[1])],
+                            ],
+                            dtype=np.float32,
+                        ),
+                        (refined.shape[1], refined.shape[0]),
+                        flags=cv2.INTER_NEAREST,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=0,
+                    )
                     refined_pixels = int(np.count_nonzero(refined))
-                    coarse_pixels = int(np.count_nonzero(sampling_projection))
+                    coarse_pixels = int(np.count_nonzero(aligned_sealed_seed))
                     intersection = int(
-                        np.count_nonzero((refined > 0) & (sampling_projection > 0))
+                        np.count_nonzero(
+                            (refined > 0) & (aligned_sealed_seed > 0)
+                        )
                     )
                     overlap_smaller = intersection / max(
                         1, min(refined_pixels, coarse_pixels)
                     )
                     area_ratio = refined_pixels / max(1, coarse_pixels)
-                    # Second layer: the whole assembly supplies the camera and
-                    # coarse one-to-one location; box-prompted SAM3 supplies a
-                    # local component mask. Fit only a bounded 2-D similarity
-                    # for evidence sampling. The USD/CAD transform is never
-                    # edited, so this tolerates photographed movable parts
-                    # without deforming the asset.
-                    _registered_projection, registration = _register_similarity_mask(
-                        sampling_projection,
-                        refined,
-                    )
+                    # The SAM3 manifest already sealed one residual alignment
+                    # for the complete workpiece.  Re-fitting a similarity
+                    # transform here per Part-ID would silently reintroduce the
+                    # old failure mode where a mesh template follows the wrong
+                    # photo candidate.  Verify the two masks directly in the
+                    # shared reference-image coordinate system.
+                    registration = {
+                        **_binary_registration_metrics(
+                            aligned_sealed_seed,
+                            refined,
+                        ),
+                        "uniform_scale": 1.0,
+                        "rotation_degrees": 0.0,
+                        "translation_xy": [0.0, 0.0],
+                        "translation_offset_xy": [0.0, 0.0],
+                        "affine_2x3": [
+                            [1.0, 0.0, 0.0],
+                            [0.0, 1.0, 0.0],
+                        ],
+                        "optimization": (
+                            "none_view_shared_manifest_direct_overlap"
+                        ),
+                        "optimization_domain": "shared_reference_image_canvas",
+                    }
+                    # Candidate geometry, amodal occlusion, neighboring-Part
+                    # ownership, and view-shared alignment were already
+                    # evaluated and sealed by SAM3.  Requiring only a usable
+                    # foreground remainder here avoids creating a second,
+                    # contradictory per-Part geometry authority.
                     refinement_geometry_passed = (
                         refined_pixels >= minimum_projected_pixels
-                        and overlap_smaller >= refinement_overlap_floor
-                        and area_ratio >= refinement_area_floor
-                        and area_ratio <= refinement_area_ceiling
-                        and float(registration["iou"]) >= registered_iou_floor
-                        and float(registration["precision"])
-                        >= registered_precision_floor
-                        and float(registration["recall"]) >= registered_recall_floor
                     )
                     if refinement_geometry_passed:
                         # The CAD silhouette has now served both of its valid
                         # roles: locating the SAM3 search box and verifying the
-                        # selected instance shape under a bounded similarity
-                        # fit.  The photographed SAM3 boundary is the final
+                        # selected instance shape under the sealed view-shared
+                        # alignment.  The photographed SAM3 boundary is the final
                         # pixel authority.  Intersecting it with the original
                         # projection here would re-introduce the very camera
                         # residual that local segmentation is meant to remove.
@@ -2103,18 +2296,26 @@ def build_part_id_reference_evidence(
                         "applied": refinement_geometry_passed,
                         "status": refinement_status,
                         "authority": (
-                            "sam3_local_component_intersected_with_globally_"
-                            "fitted_cad_part_id_projection"
+                            "sam3_component_bound_to_view_shared_cad_alignment"
                             if refinement_geometry_passed
-                            else "whole_asset_similarity_cad_part_id_projection"
+                            else "whole_asset_aligned_cad_part_id_projection"
                         ),
-                        "per_part_geometric_warp_applied": (refinement_geometry_passed),
+                        "per_part_geometric_warp_applied": False,
+                        "view_shared_alignment": copy.deepcopy(
+                            refined_record["view_shared_alignment"]
+                        ),
                         "mask": str(refined_record["mask_path"]),
                         "mask_sha256": _sha256_file(refined_record["mask_path"]),
                         "coarse_refined_intersection_pixels": intersection,
                         "coarse_refined_overlap_smaller": round(overlap_smaller, 8),
                         "refined_to_coarse_area_ratio": round(area_ratio, 8),
                         "registration": registration,
+                        "sealed_cad_seed": {
+                            "path": str(refined_record["cad_seed_path"]),
+                            "sha256": _sha256_file(
+                                refined_record["cad_seed_path"]
+                            ),
+                        },
                         "shape_candidate": copy.deepcopy(
                             refined_record["shape_candidate"]
                         ),
@@ -2448,8 +2649,8 @@ def build_part_id_reference_evidence(
             else "renderer_authored_cad_part_id_masks"
         ),
         "part_correspondence_authority": (
-            "whole_asset_camera_then_cad_box_search_then_location_invariant_"
-            "cad_shape_selected_sam3_instance"
+            "whole_asset_camera_then_view_shared_residual_then_cad_shape_"
+            "selected_sam3_instance_without_part_local_warp"
             if refinement is not None
             else "cad_projected_part_id_bounding_boxes"
         ),
@@ -2476,6 +2677,11 @@ def build_part_id_reference_evidence(
             "minimum_registered_iou": registered_iou_floor,
             "minimum_registered_precision": registered_precision_floor,
             "minimum_registered_recall": registered_recall_floor,
+            "refinement_geometry_authority": (
+                "sealed_sam3_visible_amodal_neighbor_and_view_shared_contract"
+                if refinement is not None
+                else "not_applicable"
+            ),
             "part_box_padding_fraction": box_padding,
             "part_box_context_fraction": box_context,
             "retrieval_region": (
@@ -2488,11 +2694,12 @@ def build_part_id_reference_evidence(
                 else "legacy_unweighted"
             ),
             "missing_or_rejected_refinement_policy": (
-                "whole_asset_similarity_projection_intersect_human_"
+                "whole_asset_aligned_projection_intersect_human_"
                 "foreground_fallback_when_local_box_refinement_is_unusable"
                 if refinement is not None
                 else "not_applicable"
             ),
+            "part_local_geometric_warp_allowed": False,
             "single_trusted_view_may_authorize_observation": True,
             "per_part_observation_selection": (
                 "single_view_chromatic_purity_then_coverage_without_"

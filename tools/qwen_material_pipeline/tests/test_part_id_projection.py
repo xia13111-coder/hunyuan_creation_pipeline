@@ -11,7 +11,9 @@ import numpy as np
 from PIL import Image
 
 from qwen_material_pipeline.evidence.part_id_projection import (
+    PartIdProjectionError,
     _register_similarity_mask,
+    _selected_cad_shape_candidate,
     _select_material_observation_index,
     build_part_id_material_plan,
     build_part_id_reference_evidence,
@@ -33,6 +35,45 @@ def canonical_sha256(value: object) -> str:
 
 
 class PartIdProjectionTests(unittest.TestCase):
+    def test_selected_sam3_candidate_rejects_part_local_translation(self) -> None:
+        record = {
+            "view_shared_alignment": {
+                "translation_xy_pixels": [2.0, -1.0],
+                "part_specific_translation_allowed": False,
+            },
+            "box_audits": [
+                {
+                    "accepted": True,
+                    "selected_candidate_index": 0,
+                    "shape_point_refinement": {
+                        "accepted": True,
+                        "prompt_audit": {
+                            "translation_xy_pixels": [2.0, -1.0],
+                            "part_local_translation_xy_pixels": [1.0, 0.0],
+                            "part_specific_translation_allowed": False,
+                            "per_mesh_pose_change_allowed": False,
+                        },
+                    },
+                    "candidates": [
+                        {
+                            "candidate_index": 0,
+                            "accepted": True,
+                            "cad_shape_seed_pixels": 100,
+                            "cad_shape_iou": 0.9,
+                            "cad_shape_area_agreement": 0.95,
+                            "cad_shape_location_invariant": True,
+                        }
+                    ],
+                }
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            PartIdProjectionError,
+            "not bound to the view-shared alignment",
+        ):
+            _selected_cad_shape_candidate(record)
+
     def test_tiny_chromatic_component_can_propose_h1_without_mvinverse_pixel(
         self,
     ) -> None:
@@ -761,11 +802,36 @@ class PartIdProjectionTests(unittest.TestCase):
                     {
                         "view_id": "front",
                         "group_id": part_id,
+                        "source_image_sha256": hashlib.sha256(
+                            reference_path.read_bytes()
+                        ).hexdigest(),
+                        "view_shared_alignment": {
+                            "translation_xy_pixels": [0.0, 0.0],
+                            "maximum_translation_xy_pixels": [12, 12],
+                            "estimation_mode": (
+                                "whole_workpiece_foreground_to_visible_cad_union_"
+                                "integer_translation"
+                            ),
+                            "part_specific_translation_allowed": False,
+                            "cad_union_pixels": 512,
+                        },
                         "accepted": True,
                         "box_audits": [
                             {
                                 "accepted": True,
                                 "selected_candidate_index": 0,
+                                "shape_point_refinement": {
+                                    "accepted": True,
+                                    "prompt_audit": {
+                                        "translation_xy_pixels": [0.0, 0.0],
+                                        "part_local_translation_xy_pixels": [
+                                            0.0,
+                                            0.0,
+                                        ],
+                                        "part_specific_translation_allowed": False,
+                                        "per_mesh_pose_change_allowed": False,
+                                    },
+                                },
                                 "candidates": [
                                     {
                                         "candidate_index": 0,
@@ -786,10 +852,22 @@ class PartIdProjectionTests(unittest.TestCase):
                                 target_mask.read_bytes()
                             ).hexdigest(),
                         },
+                        "cad_projection_seed": {
+                            "path": str(source_mask),
+                            "sha256": hashlib.sha256(
+                                source_mask.read_bytes()
+                            ).hexdigest(),
+                        },
                     }
                 )
             refinement_unsigned = {
                 "schema_version": "qwen-sam3-region-result/v1",
+                "policy": {
+                    "per_mesh_pose_change_allowed": False,
+                    "automatic_shape_point_refinement": (
+                        "always_run_same_view_cad_shape_positive_negative_points"
+                    ),
+                },
                 "records": refinement_records,
             }
             refinement = {
@@ -828,7 +906,9 @@ class PartIdProjectionTests(unittest.TestCase):
                 for observation in part["observations"]:
                     refinement_audit = observation["part_id_sam3_refinement"]
                     self.assertTrue(refinement_audit["applied"])
-                    self.assertTrue(refinement_audit["per_part_geometric_warp_applied"])
+                    self.assertFalse(
+                        refinement_audit["per_part_geometric_warp_applied"]
+                    )
                     self.assertTrue(observation["photo_part_segmentation_applied"])
                     self.assertEqual(
                         observation["correspondence_mode"],
@@ -846,7 +926,7 @@ class PartIdProjectionTests(unittest.TestCase):
                         refinement_audit["cad_projection_role"],
                         "location_and_shape_prior_only",
                     )
-                    self.assertNotEqual(
+                    self.assertEqual(
                         refinement_audit["registration"]["affine_2x3"],
                         [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
                     )
