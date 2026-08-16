@@ -1327,6 +1327,47 @@ class PartIdQwenTests(unittest.TestCase):
         )
         self.assertTrue(audit["components"][0]["exact_shared_material_enforced"])
 
+    def test_appearance_component_strict_consensus_resolves_exact_preset_conflict(
+        self,
+    ) -> None:
+        selections, audit = _apply_component_identity_consensus(
+            selections=[
+                {
+                    "part_id": "P1",
+                    "material_id": "mdl:Plastic_Acrylic",
+                    "match_type": "EXACT_LIBRARY_MATCH",
+                    "confidence": 0.88,
+                },
+                {
+                    "part_id": "P2",
+                    "material_id": "mdl:Vinyl",
+                    "match_type": "EXACT_LIBRARY_MATCH",
+                    "confidence": 0.86,
+                },
+                {
+                    "part_id": "P3",
+                    "material_id": "mdl:Plastic",
+                    "match_type": "CORRESPONDING_MATERIAL",
+                    "confidence": 0.91,
+                },
+                {
+                    "part_id": "P4",
+                    "material_id": "mdl:Plastic",
+                    "match_type": "CORRESPONDING_MATERIAL",
+                    "confidence": 0.90,
+                },
+            ],
+            component_members={"AC_1": ["P1", "P2", "P3", "P4"]},
+            strict_consensus_component_ids={"AC_1"},
+        )
+
+        self.assertEqual({row["material_id"] for row in selections}, {"mdl:Plastic"})
+        self.assertEqual(
+            audit["components"][0]["consensus_mode"],
+            "REPEATED_ROLE_JOINT_CONSENSUS",
+        )
+        self.assertTrue(audit["summary"]["all_components_share_one_exact_mdl"])
+
     def test_component_consensus_never_overwrites_conflicting_exact_presets(
         self,
     ) -> None:

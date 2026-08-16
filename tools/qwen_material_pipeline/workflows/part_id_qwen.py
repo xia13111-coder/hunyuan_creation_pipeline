@@ -3982,6 +3982,12 @@ def run_part_id_qwen_rerank(
             part_by_id=part_by_id,
             component_members=component_members,
         )
+        # Every component in this mode is an asserted shared physical surface:
+        # photo-supported appearance components and repeated CAD roles alike
+        # must finish with one exact MDL.  Conflicting per-member exact-preset
+        # guesses are noisy observations to resolve jointly, not permission to
+        # split a component that was already sealed as one material identity.
+        strict_consensus_component_ids.update(component_members)
     else:
         strict_consensus_component_ids = set()
         component_scope_by_id = {
