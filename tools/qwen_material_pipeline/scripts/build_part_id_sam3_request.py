@@ -51,16 +51,21 @@ def _box(mask_path: Path) -> tuple[list[int], dict[str, Any]]:
     # The whole-asset camera is the location prior, not a pixel-perfect part
     # segmentation. A wider local search box tolerates residual camera error
     # and photographed movable accessories; the CAD seed still ranks SAM3
-    # candidates and the downstream bounded registration rejects bad fits.
+    # candidates and the downstream view-shared registration rejects bad fits.
     padding_fraction = 0.35
-    padding = max(
-        8,
-        int(round(padding_fraction * max(object_width, object_height))),
-    )
-    left = max(0, int(xs.min()) - padding)
-    top = max(0, int(ys.min()) - padding)
-    right = min(width, int(xs.max()) + padding + 1)
-    bottom = min(height, int(ys.max()) + padding + 1)
+    # Expand each axis from its own object extent.  Using the longest side for
+    # both axes turns a tall, narrow part into an almost full-image box and
+    # lets a neighboring panel become the coarse SAM proposal.
+    padding_x = max(8, int(round(padding_fraction * object_width)))
+    padding_y = max(8, int(round(padding_fraction * object_height)))
+    projected_left = int(xs.min())
+    projected_top = int(ys.min())
+    projected_right = int(xs.max()) + 1
+    projected_bottom = int(ys.max()) + 1
+    left = max(0, projected_left - padding_x)
+    top = max(0, projected_top - padding_y)
+    right = min(width, projected_right + padding_x)
+    bottom = min(height, projected_bottom + padding_y)
 
     def normalized(value: int, extent: int, *, upper: bool) -> int:
         raw = int(math.ceil(value * 1000 / extent)) if upper else int(
@@ -76,8 +81,15 @@ def _box(mask_path: Path) -> tuple[list[int], dict[str, Any]]:
     ], {
         "mask_size": [width, height],
         "projected_mask_pixels": int(mask.sum()),
-        "projected_bbox_pixels": [left, top, right, bottom],
+        "projected_bbox_pixels": [
+            projected_left,
+            projected_top,
+            projected_right,
+            projected_bottom,
+        ],
+        "search_bbox_pixels": [left, top, right, bottom],
         "local_search_padding_fraction": padding_fraction,
+        "local_search_padding_xy_pixels": [padding_x, padding_y],
     }
 
 
@@ -242,15 +254,24 @@ def build_request(
                 .expanduser()
                 .resolve(strict=True)
             )
-            box, audit = _box(mask)
-            source_by_view.setdefault(
-                view_id,
-                {
-                    "id": view_id,
-                    "image": str(image),
-                    "image_sha256": _sha256(image),
-                },
+            foreground = (
+                Path(str(observation["human_sam3_foreground"]))
+                .expanduser()
+                .resolve(strict=True)
             )
+            box, audit = _box(mask)
+            source_record = {
+                "id": view_id,
+                "image": str(image),
+                "image_sha256": _sha256(image),
+                "whole_workpiece_foreground": str(foreground),
+                "whole_workpiece_foreground_sha256": _sha256(foreground),
+            }
+            previous_source = source_by_view.setdefault(view_id, source_record)
+            if previous_source != source_record:
+                raise ValueError(
+                    f"observations for {view_id} disagree on source or foreground"
+                )
             amodal_record = amodal_by_identity.get((view_id, part_id))
             if amodal_manifest is not None and amodal_record is None:
                 raise ValueError(f"missing amodal CAD template for {view_id}/{part_id}")

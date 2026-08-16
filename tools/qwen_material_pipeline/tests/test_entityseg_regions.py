@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from qwen_material_pipeline.segmentation.entityseg_regions import (
     _cad_location_agreement,
@@ -69,7 +70,7 @@ def test_selection_rejects_neighboring_identical_component() -> None:
     assert "cad_centroid_too_far_from_registered_part" in neighbor["reason_codes"]
 
 
-def test_selection_uses_bounded_shared_camera_residual_for_direct_shape_match() -> None:
+def test_selection_does_not_move_cad_template_per_candidate() -> None:
     source = np.zeros((100, 120, 3), dtype=np.uint8)
     seed = np.zeros((100, 120), dtype=bool)
     shifted = np.zeros_like(seed)
@@ -95,7 +96,15 @@ def test_selection_uses_bounded_shared_camera_residual_for_direct_shape_match() 
 
     assert selected is not None
     row = audit[0]
-    assert row["cad_template_alignment"]["translation_xy_pixels"] == [2.0, 2.0]
+    assert row["cad_template_alignment"]["translation_xy_pixels"] == [0.0, 0.0]
+    assert row["cad_template_alignment"]["part_local_translation_xy_pixels"] == [
+        0.0,
+        0.0,
+    ]
+    assert row["cad_template_alignment"]["candidate_centroid_residual_xy_pixels"] == [
+        2.0,
+        2.0,
+    ]
     assert row["cad_template_alignment"]["per_mesh_pose_change_allowed"] is False
-    assert row["cad_direct_iou"] == 1.0
+    assert row["cad_direct_iou"] == pytest.approx(0.72413793)
     assert row["registered_cad_centroid_distance_normalized"] > 0.0

@@ -65,6 +65,8 @@ DEFAULT_MAXIMUM_FINAL_SAM_TO_CAD_AREA_RATIO = 1.15
 DEFAULT_MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION = 0.04
 DEFAULT_MAXIMUM_NEIGHBOR_NEGATIVE_TARGET_PIXELS = 4096
 DEFAULT_DENSE_CAD_MASK_LOGIT_MAGNITUDE = 4.0
+DEFAULT_MAXIMUM_VIEW_SHARED_TRANSLATION_PIXELS = 12
+DEFAULT_MAXIMUM_OTHER_PART_OVERLAP_FRACTION = 0.12
 CAD_SHAPE_NORMALIZATION_SIZE = 96
 CROSS_GROUP_NEAR_DUPLICATE_IOU = 0.90
 CROSS_GROUP_ARBITRATION_SCHEMA_VERSION = (
@@ -209,6 +211,24 @@ def _load_request(path: Path) -> tuple[dict[str, Any], dict[str, Path]]:
             base=path.parent,
             label=f"source_views[{index}].image",
         )
+        foreground = raw.get("whole_workpiece_foreground")
+        if foreground is not None:
+            foreground_path = _resolve_file(
+                foreground,
+                base=path.parent,
+                label=f"source_views[{index}].whole_workpiece_foreground",
+            )
+            expected_foreground_digest = raw.get(
+                "whole_workpiece_foreground_sha256"
+            )
+            if (
+                not isinstance(expected_foreground_digest, str)
+                or expected_foreground_digest != _sha256_file(foreground_path)
+            ):
+                raise Sam3RegionError(
+                    f"source_views[{index}] foreground hash mismatch"
+                )
+            raw["whole_workpiece_foreground"] = str(foreground_path)
     identities: set[tuple[str, str]] = set()
     for index, raw in enumerate(raw_regions):
         if not isinstance(raw, dict):
@@ -1071,6 +1091,113 @@ def _segment_dense_mask_points(
     }
 
 
+def _translate_binary_mask(mask: Any, translation_xy: Sequence[float]) -> Any:
+    """Translate one renderer mask by a view-shared image-plane residual."""
+
+    import cv2
+    import numpy as np
+
+    binary = np.asarray(mask, dtype=bool)
+    if binary.ndim != 2:
+        raise Sam3RegionError("view-shared alignment mask must be two-dimensional")
+    if len(translation_xy) != 2:
+        raise Sam3RegionError("view-shared translation must contain x and y")
+    dx, dy = (float(translation_xy[0]), float(translation_xy[1]))
+    return cv2.warpAffine(
+        binary.astype(np.uint8),
+        np.asarray([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32),
+        (binary.shape[1], binary.shape[0]),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ) > 0
+
+
+def _estimate_view_shared_translation(
+    cad_seeds: Mapping[str, Any],
+    whole_workpiece_foreground: Any | None,
+) -> dict[str, Any]:
+    """Estimate one rigid image residual for every Part-ID in a view.
+
+    The union of renderer-authored visible Part IDs is aligned to the photo's
+    whole-workpiece foreground.  No individual Part-ID is allowed to vote for
+    or receive a different translation.
+    """
+
+    import numpy as np
+
+    if not cad_seeds:
+        raise Sam3RegionError("view-shared alignment requires CAD seeds")
+    shapes = {np.asarray(mask, dtype=bool).shape for mask in cad_seeds.values()}
+    if len(shapes) != 1:
+        raise Sam3RegionError("view CAD seeds have inconsistent dimensions")
+    height, width = next(iter(shapes))
+    union = np.zeros((height, width), dtype=bool)
+    for mask in cad_seeds.values():
+        union |= np.asarray(mask, dtype=bool)
+    union_pixels = int(np.count_nonzero(union))
+    if whole_workpiece_foreground is None:
+        return {
+            "translation_xy_pixels": [0.0, 0.0],
+            "maximum_translation_xy_pixels": [0, 0],
+            "estimation_mode": "no_foreground_fail_closed_zero_translation",
+            "part_specific_translation_allowed": False,
+            "cad_union_pixels": union_pixels,
+        }
+    foreground = np.asarray(whole_workpiece_foreground, dtype=bool)
+    if foreground.shape != union.shape or not np.any(foreground):
+        raise Sam3RegionError(
+            "whole-workpiece foreground is empty or differs from CAD dimensions"
+        )
+    maximum_dx = min(
+        DEFAULT_MAXIMUM_VIEW_SHARED_TRANSLATION_PIXELS,
+        max(2, int(round(0.03 * width))),
+    )
+    maximum_dy = min(
+        DEFAULT_MAXIMUM_VIEW_SHARED_TRANSLATION_PIXELS,
+        max(2, int(round(0.03 * height))),
+    )
+    foreground_pixels = int(np.count_nonzero(foreground))
+    candidates: list[tuple[tuple[float, ...], int, int, int, float]] = []
+    for dy in range(-maximum_dy, maximum_dy + 1):
+        for dx in range(-maximum_dx, maximum_dx + 1):
+            shifted = _translate_binary_mask(union, (dx, dy))
+            shifted_pixels = int(np.count_nonzero(shifted))
+            intersection = int(np.count_nonzero(shifted & foreground))
+            union_count = shifted_pixels + foreground_pixels - intersection
+            cad_recall = intersection / max(1, shifted_pixels)
+            iou = intersection / max(1, union_count)
+            # Prefer foreground containment, then IoU, and finally the
+            # smallest rigid residual.  This makes a broad foreground plateau
+            # deterministically choose the calibrated zero pose.
+            rank = (
+                cad_recall,
+                iou,
+                -math.hypot(dx, dy),
+                -abs(dx),
+                -abs(dy),
+                -dx,
+                -dy,
+            )
+            candidates.append((rank, dx, dy, intersection, iou))
+    _rank, dx, dy, intersection, iou = max(candidates, key=lambda row: row[0])
+    return {
+        "translation_xy_pixels": [float(dx), float(dy)],
+        "maximum_translation_xy_pixels": [maximum_dx, maximum_dy],
+        "estimation_mode": (
+            "whole_workpiece_foreground_to_visible_cad_union_integer_translation"
+        ),
+        "part_specific_translation_allowed": False,
+        "cad_union_pixels": union_pixels,
+        "foreground_pixels": foreground_pixels,
+        "intersection_pixels": intersection,
+        "cad_union_foreground_recall": round(
+            intersection / max(1, union_pixels), 8
+        ),
+        "union_iou": round(iou, 8),
+    }
+
+
 def _bounded_shared_camera_alignment(
     cad_seed: Any,
     coarse_candidate: Any,
@@ -1078,16 +1205,10 @@ def _bounded_shared_camera_alignment(
     box: Sequence[int],
     width: int,
     height: int,
+    view_shared_alignment: Mapping[str, Any] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
-    """Align a rendered Part-ID silhouette without changing its 3-D pose.
+    """Return a view-aligned mask without applying a Part-ID-specific motion."""
 
-    The silhouette already comes from the calibrated whole-asset camera.  A
-    residual 2-D translation is therefore the only permitted correction: no
-    per-mesh rotation, scale, or deformation is inferred here.  The coarse
-    photo proposal is used only to estimate that bounded image-plane residual.
-    """
-
-    import cv2
     import numpy as np
 
     seed = np.asarray(cad_seed, dtype=bool)
@@ -1105,32 +1226,21 @@ def _bounded_shared_camera_alignment(
 
     seed_center_x, seed_center_y = centroid(seed)
     coarse_x, coarse_y = centroid(coarse)
-    left, top, right, bottom = _box_pixels(box, width=width, height=height)
-    seed_rows, seed_columns = np.where(seed)
-    seed_width = int(seed_columns.max() - seed_columns.min() + 1)
-    seed_height = int(seed_rows.max() - seed_rows.min() + 1)
-    maximum_dx = max(2.0, min(0.20 * (right - left), 0.75 * seed_width))
-    maximum_dy = max(2.0, min(0.20 * (bottom - top), 0.75 * seed_height))
-    dx = float(np.clip(coarse_x - seed_center_x, -maximum_dx, maximum_dx))
-    dy = float(np.clip(coarse_y - seed_center_y, -maximum_dy, maximum_dy))
-    shifted = cv2.warpAffine(
-        seed.astype(np.uint8),
-        np.asarray([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32),
-        (width, height),
-        flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    ) > 0
-    return shifted, {
-        "translation_xy_pixels": [round(dx, 8), round(dy, 8)],
-        "maximum_translation_xy_pixels": [
-            round(maximum_dx, 8),
-            round(maximum_dy, 8),
+    requested_dx = coarse_x - seed_center_x
+    requested_dy = coarse_y - seed_center_y
+    shared = dict(view_shared_alignment or {})
+    translation = shared.get("translation_xy_pixels", [0.0, 0.0])
+    return _translate_binary_mask(seed, translation), {
+        **shared,
+        "translation_xy_pixels": [float(translation[0]), float(translation[1])],
+        "candidate_centroid_residual_xy_pixels": [
+            round(requested_dx, 8),
+            round(requested_dy, 8),
         ],
-        "alignment_model": (
-            "shared_whole_asset_camera_bounded_image_translation_only"
-        ),
+        "part_local_translation_xy_pixels": [0.0, 0.0],
+        "alignment_model": "whole_asset_view_shared_translation_only",
         "per_mesh_pose_change_allowed": False,
+        "part_specific_translation_allowed": False,
     }
 
 
@@ -1142,6 +1252,7 @@ def _shape_seed_click_set(
     width: int,
     height: int,
     other_part_seeds: Any | None = None,
+    view_shared_alignment: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, list[list[int]]], dict[str, Any]]:
     """Turn a same-view CAD silhouette into automatic SAM3 prompts.
 
@@ -1159,6 +1270,7 @@ def _shape_seed_click_set(
         box=box,
         width=width,
         height=height,
+        view_shared_alignment=view_shared_alignment,
     )
     distance = cv2.distanceTransform(shifted.astype(np.uint8), cv2.DIST_L2, 5)
     positive: list[tuple[int, int]] = []
@@ -1266,7 +1378,9 @@ def _shape_seed_click_set(
         "negative_points": [grid(point) for point in negative],
     }, {
         **alignment_audit,
-        "translation_policy": "coarse_sam_centroid_bounded_by_shared_camera_seed",
+        "translation_policy": (
+            "whole_workpiece_foreground_to_visible_cad_union_shared_per_view"
+        ),
         "positive_point_count": len(positive),
         "negative_point_count": len(negative),
         "neighboring_part_negative_point_count": neighboring_negative_count,
@@ -1283,6 +1397,7 @@ def _evaluate_shape_guided_candidate(
     aligned_seed: Any,
     aligned_amodal: Any | None,
     minimum_mask_pixels: int,
+    other_part_seeds: Any | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
     """Apply the same CAD/occlusion gate to one sparse or dense proposal."""
 
@@ -1398,6 +1513,18 @@ def _evaluate_shape_guided_candidate(
         < DEFAULT_MINIMUM_ALIGNED_CAD_OVERLAP_SMALLER
     ):
         reasons.append("aligned_cad_direct_overlap_below_threshold")
+    if other_part_seeds is not None:
+        others = np.asarray(other_part_seeds, dtype=bool)
+        if others.shape != selected.shape:
+            raise Sam3RegionError("neighbor CAD masks differ from candidate size")
+        other_intersection = int(np.count_nonzero(selected & others))
+        other_fraction = other_intersection / max(
+            1, int(np.count_nonzero(selected))
+        )
+        metrics["other_part_intersection_pixels"] = other_intersection
+        metrics["other_part_overlap_fraction"] = other_fraction
+        if other_fraction > DEFAULT_MAXIMUM_OTHER_PART_OVERLAP_FRACTION:
+            reasons.append("candidate_claims_neighboring_cad_parts")
     # The visible renderer mask may be a small fraction of an occluded mesh.
     # Its area is a valid bound only when no amodal shape is available.  With
     # an amodal template, candidate/amodal area and visible recall above are
@@ -1461,19 +1588,29 @@ def _segment_shape_guided_points(
     minimum_mask_pixels: int,
     cad_amodal: Any | None = None,
     other_part_seeds: Any | None = None,
+    view_shared_alignment: Mapping[str, Any] | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
     """A/B sparse points against a dense CAD mask prompt, without human input."""
 
     import cv2
     import numpy as np
 
+    translation = (view_shared_alignment or {}).get(
+        "translation_xy_pixels", [0.0, 0.0]
+    )
+    aligned_other_part_seeds = (
+        _translate_binary_mask(other_part_seeds, translation)
+        if other_part_seeds is not None
+        else None
+    )
     click_set, prompt_audit = _shape_seed_click_set(
         cad_seed,
         coarse_candidate,
         box=box,
         width=image.width,
         height=image.height,
-        other_part_seeds=other_part_seeds,
+        other_part_seeds=aligned_other_part_seeds,
+        view_shared_alignment=view_shared_alignment,
     )
     matrix = np.asarray(
         [
@@ -1525,6 +1662,7 @@ def _segment_shape_guided_points(
             aligned_seed=aligned_seed,
             aligned_amodal=aligned_amodal,
             minimum_mask_pixels=minimum_mask_pixels,
+            other_part_seeds=aligned_other_part_seeds,
         )
 
     dense_selected, dense_point_audit = _segment_dense_mask_points(
@@ -1549,6 +1687,7 @@ def _segment_shape_guided_points(
             aligned_seed=aligned_seed,
             aligned_amodal=aligned_amodal,
             minimum_mask_pixels=minimum_mask_pixels,
+            other_part_seeds=aligned_other_part_seeds,
         )
 
     # Preserve a previously safe sparse result.  Dense guidance is allowed to
@@ -1938,6 +2077,16 @@ def run(
         with Image.open(source_paths[view_id]) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
         image_state = processor.set_image(image)
+        source_record = next(
+            row for row in request["source_views"] if row["id"] == view_id
+        )
+        foreground_array = None
+        foreground_path = source_record.get("whole_workpiece_foreground")
+        if isinstance(foreground_path, str):
+            with Image.open(Path(foreground_path)) as foreground_opened:
+                foreground_array = (
+                    np.asarray(foreground_opened.convert("L"), dtype=np.uint8) >= 128
+                )
         view_cad_seeds: dict[str, Any] = {}
         view_cad_amodal: dict[str, Any] = {}
         for seed_region in regions_by_view[view_id]:
@@ -1966,6 +2115,19 @@ def run(
                         f"{seed_region['group_id']} differ from the source image"
                     )
                 view_cad_amodal[str(seed_region["group_id"])] = amodal_array
+        view_shared_alignment = _estimate_view_shared_translation(
+            view_cad_seeds,
+            foreground_array,
+        )
+        shared_translation_xy = view_shared_alignment["translation_xy_pixels"]
+        view_aligned_cad_seeds = {
+            group_id: _translate_binary_mask(mask, shared_translation_xy)
+            for group_id, mask in view_cad_seeds.items()
+        }
+        view_aligned_cad_amodal = {
+            group_id: _translate_binary_mask(mask, shared_translation_xy)
+            for group_id, mask in view_cad_amodal.items()
+        }
         view_records: list[dict[str, Any]] = []
         for region in sorted(
             regions_by_view[view_id], key=lambda item: str(item["group_id"])
@@ -1987,10 +2149,18 @@ def run(
             cad_seed_record = region.get("cad_projection_seed")
             cad_amodal_record = region.get("cad_amodal_template")
             cad_amodal_array = None
+            aligned_cad_seed_array = None
+            aligned_cad_amodal_array = None
             if isinstance(cad_seed_record, Mapping):
                 cad_seed_array = view_cad_seeds[str(region["group_id"])]
+                aligned_cad_seed_array = view_aligned_cad_seeds[
+                    str(region["group_id"])
+                ]
             if isinstance(cad_amodal_record, Mapping):
                 cad_amodal_array = view_cad_amodal[str(region["group_id"])]
+                aligned_cad_amodal_array = view_aligned_cad_amodal[
+                    str(region["group_id"])
+                ]
             if click_sets:
                 if model.inst_interactive_predictor is None:
                     raise Sam3RegionError(
@@ -2052,8 +2222,8 @@ def run(
                         minimum_prompt_overlap=minimum_prompt_overlap,
                         maximum_image_fraction=maximum_image_fraction,
                         minimum_mask_pixels=minimum_mask_pixels,
-                        cad_seed=cad_seed_array,
-                        cad_amodal=cad_amodal_array,
+                        cad_seed=aligned_cad_seed_array,
+                        cad_amodal=aligned_cad_amodal_array,
                     )
                     selected = initial_selected
                     audit = initial_shape_audit
@@ -2088,7 +2258,7 @@ def run(
                             # the registered modal mask with zero residual; the
                             # decoded photo mask must still pass every strict
                             # visible/amodal gate below.
-                            coarse_selected = cad_seed_array
+                            coarse_selected = aligned_cad_seed_array
                             coarse_audit = {
                                 **coarse_audit,
                                 "accepted": False,
@@ -2098,15 +2268,10 @@ def run(
                             }
                         shape_point_audit: dict[str, Any] | None = None
                         if coarse_selected is not None:
-                            other_part_seeds = None
-                            if (
-                                int(np.count_nonzero(cad_seed_array))
-                                <= DEFAULT_MAXIMUM_NEIGHBOR_NEGATIVE_TARGET_PIXELS
-                            ):
-                                other_part_seeds = np.zeros_like(cad_seed_array)
-                                for other_group_id, other_seed in view_cad_seeds.items():
-                                    if other_group_id != str(region["group_id"]):
-                                        other_part_seeds |= other_seed
+                            other_part_seeds = np.zeros_like(cad_seed_array)
+                            for other_group_id, other_seed in view_cad_seeds.items():
+                                if other_group_id != str(region["group_id"]):
+                                    other_part_seeds |= other_seed
                             selected, shape_point_audit = _segment_shape_guided_points(
                                 model=model,
                                 image_state=image_state,
@@ -2120,6 +2285,7 @@ def run(
                                 maximum_image_fraction=maximum_image_fraction,
                                 minimum_mask_pixels=minimum_mask_pixels,
                                 other_part_seeds=other_part_seeds,
+                                view_shared_alignment=view_shared_alignment,
                             )
                         if selected is not None and shape_point_audit is not None:
                             candidate_index = len(initial_shape_audit["candidates"])
@@ -2289,6 +2455,7 @@ def run(
                     "click_sets": click_sets or [],
                     "source_image": str(source_paths[view_id]),
                     "source_image_sha256": _sha256_file(source_paths[view_id]),
+                    "view_shared_alignment": view_shared_alignment,
                     "accepted": accepted,
                     "reason_codes": reasons,
                     "accepted_box_count": accepted_boxes,
@@ -2383,9 +2550,15 @@ def run(
             "isolated_mesh_projection": "complete_shape_prior",
         },
         "cad_shape_candidate_policy": (
-            "same_view_rendered_part_template_bounded_translation_direct_support"
+            "same_view_rendered_part_template_view_shared_translation_direct_support"
         ),
         "per_mesh_pose_change_allowed": False,
+        "maximum_view_shared_translation_pixels": (
+            DEFAULT_MAXIMUM_VIEW_SHARED_TRANSLATION_PIXELS
+        ),
+        "maximum_other_part_overlap_fraction": (
+            DEFAULT_MAXIMUM_OTHER_PART_OVERLAP_FRACTION
+        ),
         "maximum_final_sam_to_cad_area_ratio": (
             DEFAULT_MAXIMUM_FINAL_SAM_TO_CAD_AREA_RATIO
         ),

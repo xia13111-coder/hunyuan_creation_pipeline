@@ -1965,11 +1965,10 @@ def _run_policy_part_id_stage(
         ):
             _require_file(required_path, "part_id_material_assignment")
         # Layer 1 establishes one camera and one coarse CAD box per Part-ID.
-        # Layer 2 prompts local SAM3 inside those boxes and fits only a bounded
-        # 2-D similarity transform for photo evidence. CAD/USD geometry is
-        # never moved. This restores the tolerant generic mapping that handles
-        # movable accessories and small camera residuals without weakening the
-        # one-to-one Part-ID assignment authority.
+        # Layer 2 prompts local SAM3 inside those boxes.  Any image-plane
+        # residual is estimated once from the whole workpiece and shared by
+        # every Part-ID in that view; no individual mesh may move to follow a
+        # segmentation candidate. CAD/USD geometry is never moved.
         for stale_dir in (part_id_coarse_evidence_dir, part_id_evidence_dir):
             if stale_dir.exists() or stale_dir.is_symlink():
                 archived = unique_path(

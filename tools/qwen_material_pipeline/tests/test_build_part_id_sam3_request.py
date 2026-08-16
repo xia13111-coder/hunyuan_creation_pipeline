@@ -6,6 +6,7 @@ from pathlib import Path
 from PIL import Image
 
 from qwen_material_pipeline.scripts.build_part_id_sam3_request import (
+    _box,
     _sha256,
     build_request,
 )
@@ -27,13 +28,16 @@ def test_build_request_refines_every_visible_part_view(tmp_path: Path) -> None:
     for view_id in ("front", "top"):
         image = tmp_path / f"{view_id}.png"
         mask = tmp_path / f"{view_id}-mask.png"
+        foreground = tmp_path / f"{view_id}-foreground.png"
         _write_image(image, "RGB")
         _write_image(mask, "L")
+        _write_image(foreground, "L")
         observations.append(
             {
                 "view_id": view_id,
                 "image": str(image),
                 "mask": str(mask),
+                "human_sam3_foreground": str(foreground),
                 "selected_for_material_inference": view_id == "front",
             }
         )
@@ -66,8 +70,10 @@ def test_build_request_refines_every_visible_part_view(tmp_path: Path) -> None:
 def test_build_request_accepts_six_pixel_chromatic_rescue(tmp_path: Path) -> None:
     image = tmp_path / "top.png"
     mask = tmp_path / "top-mask.png"
+    foreground = tmp_path / "top-foreground.png"
     _write_image(image, "RGB")
     _write_image(mask, "L", tiny=True)
+    _write_image(foreground, "L")
     evidence = tmp_path / "evidence.json"
     evidence.write_text(
         json.dumps(
@@ -81,6 +87,7 @@ def test_build_request_accepts_six_pixel_chromatic_rescue(tmp_path: Path) -> Non
                                 "view_id": "top",
                                 "image": str(image),
                                 "mask": str(mask),
+                                "human_sam3_foreground": str(foreground),
                                 "selected_for_material_inference": True,
                             }
                         ],
@@ -108,9 +115,11 @@ def test_build_request_binds_complete_mesh_shape_separately_from_visibility(
     image = tmp_path / "front.png"
     modal = tmp_path / "front-modal.png"
     amodal = tmp_path / "front-amodal.png"
+    foreground = tmp_path / "front-foreground.png"
     _write_image(image, "RGB")
     _write_image(modal, "L")
     _write_image(amodal, "L")
+    _write_image(foreground, "L")
     evidence = tmp_path / "evidence.json"
     evidence.write_text(
         json.dumps(
@@ -124,6 +133,7 @@ def test_build_request_binds_complete_mesh_shape_separately_from_visibility(
                                 "view_id": "front",
                                 "image": str(image),
                                 "mask": str(modal),
+                                "human_sam3_foreground": str(foreground),
                             }
                         ],
                     }
@@ -183,3 +193,19 @@ def test_build_request_binds_complete_mesh_shape_separately_from_visibility(
     assert request["prompt_authority"] == (
         "whole_asset_visible_part_id_location_plus_isolated_mesh_shape"
     )
+
+
+def test_search_box_padding_is_axis_specific_for_tall_part(tmp_path: Path) -> None:
+    mask = Image.new("L", (100, 200), 0)
+    for y in range(20, 180):
+        for x in range(40, 50):
+            mask.putpixel((x, y), 255)
+    path = tmp_path / "tall.png"
+    mask.save(path)
+
+    box, audit = _box(path)
+
+    assert audit["projected_bbox_pixels"] == [40, 20, 50, 180]
+    assert audit["local_search_padding_xy_pixels"] == [8, 56]
+    assert audit["search_bbox_pixels"] == [32, 0, 58, 200]
+    assert box == [320, 0, 580, 1000]

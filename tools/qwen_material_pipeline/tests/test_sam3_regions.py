@@ -20,6 +20,7 @@ from qwen_material_pipeline.segmentation.sam3_regions import (
     _box_pixels,
     _candidate_metrics,
     _dense_cad_mask_logits,
+    _estimate_view_shared_translation,
     _evaluate_shape_guided_candidate,
     _load_request,
     _normalized_cxcywh,
@@ -910,6 +911,32 @@ def test_occluded_visible_seed_does_not_bound_amodal_candidate_area() -> None:
     assert "aligned_cad_direct_area_mismatch" not in audit["reason_codes"]
 
 
+def test_shape_gate_rejects_candidate_that_claims_neighbor_part_pixels() -> None:
+    visible = np.zeros((64, 64), dtype=bool)
+    visible[20:40, 10:25] = True
+    amodal = np.zeros_like(visible)
+    amodal[20:40, 10:40] = True
+    candidate = np.zeros_like(visible)
+    candidate[20:40, 10:35] = True
+    other_parts = np.zeros_like(visible)
+    other_parts[20:40, 25:35] = True
+
+    selected, audit = _evaluate_shape_guided_candidate(
+        candidate,
+        box=[0, 0, 1000, 1000],
+        width=64,
+        height=64,
+        aligned_seed=visible,
+        aligned_amodal=amodal,
+        minimum_mask_pixels=16,
+        other_part_seeds=other_parts,
+    )
+
+    assert selected is None
+    assert audit["shape_metrics"]["other_part_overlap_fraction"] == 0.4
+    assert "candidate_claims_neighboring_cad_parts" in audit["reason_codes"]
+
+
 def test_automatic_shape_points_refine_a_shifted_component() -> None:
     seed = np.zeros((32, 32), dtype=bool)
     seed[8:16, 6:12] = True
@@ -923,6 +950,7 @@ def test_automatic_shape_points_refine_a_shifted_component() -> None:
         box=[0, 0, 1000, 1000],
         width=32,
         height=32,
+        view_shared_alignment={"translation_xy_pixels": [4.0, 3.0]},
     )
     assert prompt_audit["translation_xy_pixels"] == pytest.approx([4.0, 3.0])
     assert click_set["positive_points"]
@@ -945,6 +973,7 @@ def test_automatic_shape_points_refine_a_shifted_component() -> None:
             minimum_prompt_overlap=0.25,
             maximum_image_fraction=0.80,
             minimum_mask_pixels=16,
+            view_shared_alignment={"translation_xy_pixels": [4.0, 3.0]},
         )
     finally:
         image.close()
@@ -970,12 +999,34 @@ def test_shared_camera_alignment_only_translates_the_complete_part_shape() -> No
         box=[0, 0, 1000, 1000],
         width=48,
         height=40,
+        view_shared_alignment={"translation_xy_pixels": [5.0, 4.0]},
     )
 
     assert np.array_equal(aligned, coarse)
     assert audit["translation_xy_pixels"] == pytest.approx([5.0, 4.0])
+    assert audit["part_local_translation_xy_pixels"] == [0.0, 0.0]
+    assert audit["candidate_centroid_residual_xy_pixels"] == pytest.approx(
+        [5.0, 4.0]
+    )
     assert audit["per_mesh_pose_change_allowed"] is False
     assert "translation_only" in audit["alignment_model"]
+
+
+def test_view_shared_alignment_cannot_follow_one_part_candidate() -> None:
+    seed_a = np.zeros((40, 48), dtype=bool)
+    seed_a[8:20, 10:18] = True
+    seed_b = np.zeros_like(seed_a)
+    seed_b[22:32, 30:40] = True
+    foreground = seed_a | seed_b
+
+    audit = _estimate_view_shared_translation(
+        {"P0001": seed_a, "P0002": seed_b},
+        foreground,
+    )
+
+    assert audit["translation_xy_pixels"] == [0.0, 0.0]
+    assert audit["part_specific_translation_allowed"] is False
+    assert audit["cad_union_foreground_recall"] == 1.0
 
 
 def test_amodal_shape_restores_only_renderer_known_occlusion() -> None:
