@@ -762,6 +762,24 @@ class PartIdProjectionTests(unittest.TestCase):
                         "view_id": "front",
                         "group_id": part_id,
                         "accepted": True,
+                        "box_audits": [
+                            {
+                                "accepted": True,
+                                "selected_candidate_index": 0,
+                                "candidates": [
+                                    {
+                                        "candidate_index": 0,
+                                        "accepted": True,
+                                        "cad_shape_seed_pixels": int(
+                                            np.count_nonzero(source_array)
+                                        ),
+                                        "cad_shape_iou": 1.0,
+                                        "cad_shape_area_agreement": 1.0,
+                                        "cad_shape_location_invariant": True,
+                                    }
+                                ],
+                            }
+                        ],
                         "mask": {
                             "path": f"masks/front__{part_id}.png",
                             "sha256": hashlib.sha256(
@@ -810,8 +828,23 @@ class PartIdProjectionTests(unittest.TestCase):
                 for observation in part["observations"]:
                     refinement_audit = observation["part_id_sam3_refinement"]
                     self.assertTrue(refinement_audit["applied"])
-                    self.assertTrue(
-                        refinement_audit["per_part_geometric_warp_applied"]
+                    self.assertTrue(refinement_audit["per_part_geometric_warp_applied"])
+                    self.assertTrue(observation["photo_part_segmentation_applied"])
+                    self.assertEqual(
+                        observation["correspondence_mode"],
+                        "cad_box_shape_guided_sam3_photo_instance",
+                    )
+                    self.assertEqual(
+                        observation["boundary_policy"],
+                        "one_pixel_shape_guided_sam3_photo_mask_interior",
+                    )
+                    self.assertEqual(
+                        observation["sampling_core_authority"],
+                        "sam3_photo_instance_mask_for_color_and_pbr",
+                    )
+                    self.assertEqual(
+                        refinement_audit["cad_projection_role"],
+                        "location_and_shape_prior_only",
                     )
                     self.assertNotEqual(
                         refinement_audit["registration"]["affine_2x3"],

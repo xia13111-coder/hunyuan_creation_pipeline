@@ -23,6 +23,8 @@ from qwen_material_pipeline.segmentation.sam3_regions import (
     _segment_box,
     _segment_ordered_points,
     _segment_points,
+    _segment_shape_guided_points,
+    _shape_seed_click_set,
     _validated_box,
 )
 from qwen_material_pipeline.segmentation.human_foreground import sha256_file
@@ -517,6 +519,9 @@ class _ArrayTensor:
     def detach(self) -> "_ArrayTensor":
         return self
 
+    def float(self) -> "_ArrayTensor":
+        return self
+
     def to(self, _device: str) -> "_ArrayTensor":
         return self
 
@@ -618,6 +623,71 @@ def test_segment_box_prefers_cad_seed_agreement_over_model_score() -> None:
     assert audit["selected_candidate_index"] == 1
 
 
+def test_segment_box_uses_shape_after_translation_not_direct_projection_iou() -> None:
+    seed = np.zeros((32, 32), dtype=bool)
+    seed[5:13, 4:10] = True
+    direct_overlap_wrong_shape = np.zeros((32, 32), dtype=bool)
+    direct_overlap_wrong_shape[3:16, 3:12] = True
+    translated_matching_shape = np.zeros((32, 32), dtype=bool)
+    translated_matching_shape[18:26, 20:26] = True
+    processor = _FakeProcessor(
+        np.stack([direct_overlap_wrong_shape, translated_matching_shape])[:, None],
+        np.asarray([0.99, 0.70], dtype=np.float32),
+    )
+    image = Image.new("RGB", (32, 32))
+    try:
+        selected, audit = _segment_box(
+            processor=processor,
+            image=image,
+            prompt="one component",
+            box=[0, 0, 1000, 1000],
+            minimum_model_score=0.45,
+            minimum_prompt_overlap=0.25,
+            maximum_image_fraction=0.80,
+            minimum_mask_pixels=16,
+            cad_seed=seed,
+        )
+    finally:
+        image.close()
+
+    assert selected is not None
+    assert np.array_equal(selected, translated_matching_shape)
+    assert audit["selected_candidate_index"] == 1
+    wrong, matching = audit["candidates"]
+    assert wrong["cad_seed_iou"] > matching["cad_seed_iou"]
+    assert matching["cad_shape_iou"] > wrong["cad_shape_iou"]
+    assert matching["cad_shape_location_invariant"] is True
+
+
+def test_segment_box_rejects_unreliable_six_pixel_cad_shape_seed() -> None:
+    seed = np.zeros((16, 16), dtype=bool)
+    seed[3:5, 4:7] = True
+    candidate = np.zeros((16, 16), dtype=bool)
+    candidate[6:10, 7:11] = True
+    processor = _FakeProcessor(
+        candidate[None, None],
+        np.asarray([0.99], dtype=np.float32),
+    )
+    image = Image.new("RGB", (16, 16))
+    try:
+        selected, audit = _segment_box(
+            processor=processor,
+            image=image,
+            prompt="one component",
+            box=[0, 0, 1000, 1000],
+            minimum_model_score=0.45,
+            minimum_prompt_overlap=0.25,
+            maximum_image_fraction=0.80,
+            minimum_mask_pixels=8,
+            cad_seed=seed,
+        )
+    finally:
+        image.close()
+
+    assert selected is None
+    assert "cad_shape_seed_too_small" in audit["candidates"][0]["reason_codes"]
+
+
 def test_segment_box_reports_gate_reasons_when_every_candidate_fails() -> None:
     too_large = np.ones((10, 10), dtype=bool)
     too_small = np.zeros((10, 10), dtype=bool)
@@ -707,6 +777,52 @@ def test_segment_points_uses_true_positive_and_negative_sam3_prompts() -> None:
         np.asarray([[4.5, 4.5], [0.0, 0.0]])
     )
     assert model.point_labels.tolist() == [1, 0]
+
+
+def test_automatic_shape_points_refine_a_shifted_component() -> None:
+    seed = np.zeros((32, 32), dtype=bool)
+    seed[8:16, 6:12] = True
+    shifted = np.zeros((32, 32), dtype=bool)
+    shifted[11:19, 10:16] = True
+    merged = np.zeros((32, 32), dtype=bool)
+    merged[7:23, 6:22] = True
+    click_set, prompt_audit = _shape_seed_click_set(
+        seed,
+        shifted,
+        box=[0, 0, 1000, 1000],
+        width=32,
+        height=32,
+    )
+    assert prompt_audit["translation_xy_pixels"] == pytest.approx([4.0, 3.0])
+    assert click_set["positive_points"]
+    assert click_set["negative_points"]
+
+    model = _FakeInteractiveModel(
+        np.stack([merged, shifted]),
+        np.asarray([0.99, 0.80], dtype=np.float32),
+    )
+    image = Image.new("RGB", (32, 32))
+    try:
+        selected, audit = _segment_shape_guided_points(
+            model=model,
+            image_state={"cached": True},
+            image=image,
+            cad_seed=seed,
+            coarse_candidate=shifted,
+            box=[0, 0, 1000, 1000],
+            minimum_model_score=0.45,
+            minimum_prompt_overlap=0.25,
+            maximum_image_fraction=0.80,
+            minimum_mask_pixels=16,
+        )
+    finally:
+        image.close()
+
+    assert selected is not None
+    assert np.array_equal(selected, shifted)
+    assert audit["accepted"] is True
+    assert audit["shape_metrics"]["cad_shape_location_invariant"] is True
+    assert audit["shape_metrics"]["cad_shape_iou"] == pytest.approx(1.0)
 
 
 class _FakeOrderedInteractiveModel:

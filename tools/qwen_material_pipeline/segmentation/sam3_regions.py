@@ -51,6 +51,10 @@ DEFAULT_MINIMUM_MODEL_SCORE = 0.45
 DEFAULT_MINIMUM_PROMPT_OVERLAP = 0.25
 DEFAULT_MAXIMUM_IMAGE_FRACTION = 0.80
 DEFAULT_MINIMUM_MASK_PIXELS = 32
+DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS = 16
+DEFAULT_MINIMUM_CAD_SHAPE_IOU = 0.50
+DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT = 0.50
+CAD_SHAPE_NORMALIZATION_SIZE = 96
 CROSS_GROUP_NEAR_DUPLICATE_IOU = 0.90
 CROSS_GROUP_ARBITRATION_SCHEMA_VERSION = (
     "sam3-cross-group-near-duplicate-arbitration/v1"
@@ -281,10 +285,9 @@ def _load_request(path: Path) -> tuple[dict[str, Any], dict[str, Path]]:
                     label=f"regions[{index}].cad_projection_seed.path",
                 )
                 expected_digest = cad_seed.get("sha256")
-                if (
-                    not isinstance(expected_digest, str)
-                    or expected_digest != _sha256_file(seed_path)
-                ):
+                if not isinstance(
+                    expected_digest, str
+                ) or expected_digest != _sha256_file(seed_path):
                     raise Sam3RegionError(
                         f"regions[{index}].cad_projection_seed hash mismatch"
                     )
@@ -381,6 +384,110 @@ def _normalized_cxcywh(box: Sequence[int], *, width: int, height: int) -> list[f
     ]
 
 
+def _normalized_shape_agreement(
+    candidate_mask: Any,
+    cad_seed_mask: Any,
+    *,
+    normalization_size: int = CAD_SHAPE_NORMALIZATION_SIZE,
+) -> dict[str, Any]:
+    """Compare a SAM mask with a CAD silhouette independently of position.
+
+    The projected CAD mask is only a location prior.  For candidate selection,
+    both masks are cropped to their own support, isotropically normalized on a
+    shared square canvas, and compared over a bounded rotation search.  This
+    lets a correctly segmented photographed component win even when the coarse
+    camera projection is translated or slightly rotated, without deforming the
+    CAD asset or treating the projection as photo ground truth.
+    """
+
+    import cv2
+    import numpy as np
+
+    if (
+        isinstance(normalization_size, bool)
+        or not isinstance(normalization_size, int)
+        or normalization_size < 32
+    ):
+        raise Sam3RegionError("shape normalization size must be at least 32")
+
+    def normalize(value: Any, label: str) -> tuple[Any, int, float]:
+        mask = np.asarray(value, dtype=bool)
+        pixels = int(np.count_nonzero(mask))
+        if mask.ndim != 2 or pixels == 0:
+            raise Sam3RegionError(f"{label} must be a non-empty 2-D mask")
+        ys, xs = np.where(mask)
+        crop = (mask[ys.min() : ys.max() + 1, xs.min() : xs.max() + 1]).astype(np.uint8)
+        height, width = crop.shape
+        margin = max(4, normalization_size // 12)
+        available = normalization_size - 2 * margin
+        scale = available / max(height, width)
+        resized_width = max(1, int(round(width * scale)))
+        resized_height = max(1, int(round(height * scale)))
+        resized = cv2.resize(
+            crop,
+            (resized_width, resized_height),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        canvas = np.zeros((normalization_size, normalization_size), dtype=np.uint8)
+        left = (normalization_size - resized_width) // 2
+        top = (normalization_size - resized_height) // 2
+        canvas[top : top + resized_height, left : left + resized_width] = resized
+        return canvas > 0, pixels, width / max(1, height)
+
+    candidate, candidate_pixels, candidate_aspect = normalize(
+        candidate_mask, "SAM3 candidate"
+    )
+    seed, seed_pixels, seed_aspect = normalize(cad_seed_mask, "CAD shape seed")
+    center = ((normalization_size - 1) * 0.5, (normalization_size - 1) * 0.5)
+    best: tuple[float, float, float, float, float] | None = None
+    for rotation in np.linspace(-35.0, 35.0, 15):
+        matrix = cv2.getRotationMatrix2D(center, float(rotation), 1.0)
+        rotated_seed = (
+            cv2.warpAffine(
+                seed.astype(np.uint8),
+                matrix,
+                (normalization_size, normalization_size),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+            > 0
+        )
+        intersection = int(np.count_nonzero(candidate & rotated_seed))
+        candidate_normalized_pixels = int(np.count_nonzero(candidate))
+        seed_normalized_pixels = int(np.count_nonzero(rotated_seed))
+        union = candidate_normalized_pixels + seed_normalized_pixels - intersection
+        iou = intersection / max(1, union)
+        precision = intersection / max(1, candidate_normalized_pixels)
+        recall = intersection / max(1, seed_normalized_pixels)
+        overlap_smaller = intersection / max(
+            1, min(candidate_normalized_pixels, seed_normalized_pixels)
+        )
+        score = iou + 0.04 * min(precision, recall)
+        result = (score, iou, min(precision, recall), overlap_smaller, float(rotation))
+        if best is None or result > best:
+            best = result
+    if best is None:  # pragma: no cover - non-empty masks always enter the loop
+        raise Sam3RegionError("unable to compare CAD and SAM3 shapes")
+    _score, iou, minimum_precision_recall, overlap_smaller, rotation = best
+    area_ratio = candidate_pixels / max(1, seed_pixels)
+    area_agreement = min(area_ratio, 1.0 / max(area_ratio, 1e-12))
+    return {
+        "cad_shape_seed_pixels": seed_pixels,
+        "cad_shape_candidate_pixels": candidate_pixels,
+        "cad_shape_iou": iou,
+        "cad_shape_minimum_precision_recall": minimum_precision_recall,
+        "cad_shape_overlap_smaller": overlap_smaller,
+        "cad_shape_rotation_degrees": rotation,
+        "cad_shape_seed_aspect_ratio": seed_aspect,
+        "cad_shape_candidate_aspect_ratio": candidate_aspect,
+        "cad_shape_candidate_to_seed_area_ratio": area_ratio,
+        "cad_shape_area_agreement": area_agreement,
+        "cad_shape_normalization_size": normalization_size,
+        "cad_shape_location_invariant": True,
+    }
+
+
 def _candidate_metrics(
     mask: Any,
     *,
@@ -434,8 +541,8 @@ def _candidate_metrics(
                 "cad_seed_recall": seed_intersection / max(1, seed_pixels),
                 "cad_seed_overlap_smaller": seed_intersection
                 / max(1, min(mask_pixels, seed_pixels)),
-                "candidate_to_cad_seed_area_ratio": mask_pixels
-                / max(1, seed_pixels),
+                "candidate_to_cad_seed_area_ratio": mask_pixels / max(1, seed_pixels),
+                **_normalized_shape_agreement(candidate, seed),
             }
         )
     return result
@@ -479,12 +586,15 @@ def _segment_box(
     if masks_raw is None or scores_raw is None:
         raise Sam3RegionError("SAM3 output is missing masks or scores")
     masks = masks_raw.detach().to("cpu").numpy()
-    scores = scores_raw.detach().to("cpu").numpy().reshape(-1)
+    # Instance-interactive SAM3 may expose detector confidences as bfloat16;
+    # NumPy has no portable bfloat16 scalar type.  The ranking contract stores
+    # ordinary finite floats, so normalize on-device before crossing runtimes.
+    scores = scores_raw.detach().float().to("cpu").numpy().reshape(-1)
     if masks.ndim == 4 and masks.shape[1] == 1:
         masks = masks[:, 0]
     if masks.ndim != 3 or len(masks) != len(scores):
         raise Sam3RegionError("SAM3 masks/scores have incompatible shapes")
-    candidates: list[tuple[tuple[float, float, float, int], Any, dict[str, Any]]] = []
+    candidates: list[tuple[tuple[Any, ...], Any, dict[str, Any]]] = []
     audits: list[dict[str, Any]] = []
     for index, (mask, raw_score) in enumerate(zip(masks, scores)):
         score = float(raw_score)
@@ -504,8 +614,25 @@ def _segment_box(
             reasons.append("mask_too_large")
         if metrics["overlap_smaller"] < minimum_prompt_overlap:
             reasons.append("insufficient_prompt_overlap")
-        if not metrics["prompt_center_inside"] and metrics["prompt_coverage"] < 0.10:
+        if (
+            cad_seed is None
+            and not metrics["prompt_center_inside"]
+            and metrics["prompt_coverage"] < 0.10
+        ):
             reasons.append("prompt_not_localized")
+        if cad_seed is not None:
+            if (
+                int(metrics["cad_shape_seed_pixels"])
+                < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS
+            ):
+                reasons.append("cad_shape_seed_too_small")
+            elif float(metrics["cad_shape_iou"]) < DEFAULT_MINIMUM_CAD_SHAPE_IOU:
+                reasons.append("cad_shape_iou_below_threshold")
+            elif (
+                float(metrics["cad_shape_area_agreement"])
+                < DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
+            ):
+                reasons.append("cad_shape_area_mismatch")
         audit = {
             "candidate_index": index,
             "model_score": round(score, 8),
@@ -520,12 +647,10 @@ def _segment_box(
         if not reasons:
             if cad_seed is not None:
                 rank = (
-                    float(metrics["cad_seed_iou"]),
-                    min(
-                        float(metrics["cad_seed_precision"]),
-                        float(metrics["cad_seed_recall"]),
-                    ),
-                    float(metrics["cad_seed_overlap_smaller"]),
+                    float(metrics["cad_shape_iou"]),
+                    float(metrics["cad_shape_minimum_precision_recall"]),
+                    float(metrics["cad_shape_overlap_smaller"]),
+                    float(metrics["cad_shape_area_agreement"]),
                     score,
                     -index,
                 )
@@ -596,6 +721,191 @@ def _segment_points(
         )
     except ValueError as exc:
         raise Sam3RegionError(str(exc)) from exc
+
+
+def _shape_seed_click_set(
+    cad_seed: Any,
+    coarse_candidate: Any,
+    *,
+    box: Sequence[int],
+    width: int,
+    height: int,
+) -> tuple[dict[str, list[list[int]]], dict[str, Any]]:
+    """Turn a CAD silhouette into bounded automatic SAM3 point prompts."""
+
+    import cv2
+    import numpy as np
+
+    seed = np.asarray(cad_seed, dtype=bool)
+    coarse = np.asarray(coarse_candidate, dtype=bool)
+    if seed.shape != (height, width) or coarse.shape != (height, width):
+        raise Sam3RegionError("CAD shape point masks differ from the source image")
+    if int(np.count_nonzero(seed)) < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS:
+        raise Sam3RegionError("CAD shape seed is too small for automatic points")
+
+    def centroid(mask: Any) -> tuple[float, float]:
+        ys, xs = np.where(mask)
+        if not len(xs):
+            raise Sam3RegionError("automatic shape point mask is empty")
+        return float(xs.mean()), float(ys.mean())
+
+    seed_x, seed_y = centroid(seed)
+    coarse_x, coarse_y = centroid(coarse)
+    left, top, right, bottom = _box_pixels(box, width=width, height=height)
+    maximum_dx = max(2.0, 0.20 * (right - left))
+    maximum_dy = max(2.0, 0.20 * (bottom - top))
+    dx = float(np.clip(coarse_x - seed_x, -maximum_dx, maximum_dx))
+    dy = float(np.clip(coarse_y - seed_y, -maximum_dy, maximum_dy))
+    shifted = cv2.warpAffine(
+        seed.astype(np.uint8),
+        np.asarray([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32),
+        (width, height),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    distance = cv2.distanceTransform(shifted, cv2.DIST_L2, 5)
+    positive: list[tuple[int, int]] = []
+    ranked = np.dstack(
+        np.unravel_index(np.argsort(distance.ravel())[::-1], distance.shape)
+    )[0]
+    shifted_y, shifted_x = np.where(shifted > 0)
+    diagonal = math.hypot(
+        int(shifted_x.max() - shifted_x.min() + 1),
+        int(shifted_y.max() - shifted_y.min() + 1),
+    )
+    spacing = max(3.0, 0.20 * diagonal)
+    for y, x in ranked:
+        if distance[y, x] <= 0:
+            break
+        point = (int(x), int(y))
+        if all(
+            math.hypot(point[0] - px, point[1] - py) >= spacing for px, py in positive
+        ):
+            positive.append(point)
+        if len(positive) >= 4:
+            break
+    if not positive:
+        raise Sam3RegionError("CAD shape seed produced no positive point")
+
+    ring_radius = max(4, int(round(0.10 * diagonal)))
+    inner = cv2.dilate(
+        shifted,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+        iterations=1,
+    )
+    outer = cv2.dilate(
+        shifted,
+        cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2 * ring_radius + 1, 2 * ring_radius + 1),
+        ),
+        iterations=1,
+    )
+    ring_y, ring_x = np.where((outer > 0) & (inner == 0))
+    negative: list[tuple[int, int]] = []
+    center_x = float(shifted_x.mean())
+    center_y = float(shifted_y.mean())
+    for angle in np.linspace(0.0, 2.0 * math.pi, 8, endpoint=False):
+        if not len(ring_x):
+            break
+        target_x = center_x + math.cos(float(angle)) * (0.5 * diagonal + ring_radius)
+        target_y = center_y + math.sin(float(angle)) * (0.5 * diagonal + ring_radius)
+        index = int(np.argmin((ring_x - target_x) ** 2 + (ring_y - target_y) ** 2))
+        point = (int(ring_x[index]), int(ring_y[index]))
+        if point not in negative:
+            negative.append(point)
+
+    def grid(point: tuple[int, int]) -> list[int]:
+        x, y = point
+        return [
+            int(round(x * 1000 / max(1, width - 1))),
+            int(round(y * 1000 / max(1, height - 1))),
+        ]
+
+    return {
+        "positive_points": [grid(point) for point in positive],
+        "negative_points": [grid(point) for point in negative],
+    }, {
+        "translation_xy_pixels": [round(dx, 8), round(dy, 8)],
+        "translation_policy": "coarse_sam_centroid_bounded_by_local_box",
+        "positive_point_count": len(positive),
+        "negative_point_count": len(negative),
+        "ring_radius_pixels": ring_radius,
+    }
+
+
+def _segment_shape_guided_points(
+    *,
+    model: Any,
+    image_state: Mapping[str, Any],
+    image: Any,
+    cad_seed: Any,
+    coarse_candidate: Any,
+    box: Sequence[int],
+    minimum_model_score: float,
+    minimum_prompt_overlap: float,
+    maximum_image_fraction: float,
+    minimum_mask_pixels: int,
+) -> tuple[Any | None, dict[str, Any]]:
+    """Refine a coarse box result with CAD-derived positive/negative points."""
+
+    click_set, prompt_audit = _shape_seed_click_set(
+        cad_seed,
+        coarse_candidate,
+        box=box,
+        width=image.width,
+        height=image.height,
+    )
+    selected, point_audit = _segment_points(
+        model=model,
+        image_state=image_state,
+        image=image,
+        click_set=click_set,
+        minimum_model_score=minimum_model_score,
+        minimum_prompt_overlap=minimum_prompt_overlap,
+        maximum_image_fraction=maximum_image_fraction,
+        minimum_mask_pixels=minimum_mask_pixels,
+    )
+    result = {
+        "prompt_mode": "automatic_cad_shape_positive_negative_points",
+        "click_set": click_set,
+        "prompt_audit": prompt_audit,
+        "sam3_point_audit": point_audit,
+        "accepted": False,
+        "reason_codes": [],
+    }
+    if selected is None:
+        result["reason_codes"].append("no_point_prediction_accepted")
+        return None, result
+    metrics = _candidate_metrics(
+        selected,
+        box=box,
+        width=image.width,
+        height=image.height,
+        cad_seed=cad_seed,
+    )
+    reasons: list[str] = []
+    if int(metrics["cad_shape_seed_pixels"]) < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS:
+        reasons.append("cad_shape_seed_too_small")
+    if float(metrics["cad_shape_iou"]) < DEFAULT_MINIMUM_CAD_SHAPE_IOU:
+        reasons.append("cad_shape_iou_below_threshold")
+    if (
+        float(metrics["cad_shape_area_agreement"])
+        < DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
+    ):
+        reasons.append("cad_shape_area_mismatch")
+    result.update(
+        {
+            "accepted": not reasons,
+            "reason_codes": reasons,
+            "shape_metrics": {
+                key: round(float(value), 8) if isinstance(value, float) else value
+                for key, value in metrics.items()
+            },
+        }
+    )
+    return (selected if not reasons else None), result
 
 
 def _segment_ordered_points(
@@ -704,6 +1014,14 @@ def _mask_quality(record: Mapping[str, Any]) -> dict[str, float]:
                 and not isinstance(item.get("mask_precision"), bool)
             ]
         ),
+        "median_cad_shape_iou": _median(
+            [
+                float(item["cad_shape_iou"])
+                for item in selected
+                if isinstance(item.get("cad_shape_iou"), (int, float))
+                and not isinstance(item.get("cad_shape_iou"), bool)
+            ]
+        ),
     }
 
 
@@ -790,6 +1108,7 @@ def _arbitrate_view_group_masks(
             component,
             key=lambda index: (
                 -quality[index]["accepted_box_ratio"],
+                -quality[index]["median_cad_shape_iou"],
                 -quality[index]["median_model_score"],
                 -quality[index]["median_prompt_overlap"],
                 -quality[index]["median_mask_precision"],
@@ -878,8 +1197,15 @@ def run(
             f"unable to import SAM3 from repository {repository}: {exc}"
         ) from exc
 
-    interactive_requested = any(
+    human_interactive_requested = any(
         bool(region.get("click_sets")) for region in request["regions"]
+    )
+    automatic_shape_interactive_requested = any(
+        isinstance(region.get("cad_projection_seed"), Mapping)
+        for region in request["regions"]
+    )
+    interactive_requested = (
+        human_interactive_requested or automatic_shape_interactive_requested
     )
     model = build_sam3_image_model(
         checkpoint_path=str(checkpoint),
@@ -930,8 +1256,7 @@ def run(
                 seed_path = Path(str(cad_seed_record["path"]))
                 with Image.open(seed_path) as seed_opened:
                     cad_seed_array = (
-                        np.asarray(seed_opened.convert("L"), dtype=np.uint8)
-                        >= 128
+                        np.asarray(seed_opened.convert("L"), dtype=np.uint8) >= 128
                     )
                 if cad_seed_array.shape != (image.height, image.width):
                     raise Sam3RegionError(
@@ -1001,6 +1326,81 @@ def run(
                         minimum_mask_pixels=minimum_mask_pixels,
                         cad_seed=cad_seed_array,
                     )
+                    if (
+                        selected is None
+                        and cad_seed_array is not None
+                        and int(np.count_nonzero(cad_seed_array))
+                        >= DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS
+                    ):
+                        coarse_selected, coarse_audit = _segment_box(
+                            processor=processor,
+                            image=image,
+                            image_state=image_state,
+                            prompt=str(region["prompt"]),
+                            box=box,
+                            minimum_model_score=minimum_model_score,
+                            minimum_prompt_overlap=minimum_prompt_overlap,
+                            maximum_image_fraction=maximum_image_fraction,
+                            minimum_mask_pixels=minimum_mask_pixels,
+                            cad_seed=None,
+                        )
+                        initial_shape_audit = audit
+                        shape_point_audit: dict[str, Any] | None = None
+                        if coarse_selected is not None:
+                            selected, shape_point_audit = _segment_shape_guided_points(
+                                model=model,
+                                image_state=image_state,
+                                image=image,
+                                cad_seed=cad_seed_array,
+                                coarse_candidate=coarse_selected,
+                                box=box,
+                                minimum_model_score=minimum_model_score,
+                                minimum_prompt_overlap=minimum_prompt_overlap,
+                                maximum_image_fraction=maximum_image_fraction,
+                                minimum_mask_pixels=minimum_mask_pixels,
+                            )
+                        if selected is not None and shape_point_audit is not None:
+                            candidate_index = len(initial_shape_audit["candidates"])
+                            point_audit = shape_point_audit["sam3_point_audit"]
+                            point_index = point_audit.get("selected_candidate_index")
+                            point_candidate = next(
+                                (
+                                    row
+                                    for row in point_audit.get("candidates", [])
+                                    if isinstance(row, Mapping)
+                                    and row.get("candidate_index") == point_index
+                                ),
+                                {},
+                            )
+                            rescued_candidate = {
+                                "candidate_index": candidate_index,
+                                "candidate_source": (
+                                    "automatic_cad_shape_point_refinement"
+                                ),
+                                "model_score": float(
+                                    point_candidate.get("model_score", 0.0)
+                                ),
+                                **shape_point_audit["shape_metrics"],
+                                "accepted": True,
+                                "reason_codes": [],
+                            }
+                            audit = {
+                                "accepted": True,
+                                "selected_candidate_index": candidate_index,
+                                "candidates": [
+                                    *initial_shape_audit["candidates"],
+                                    rescued_candidate,
+                                ],
+                                "initial_box_shape_audit": initial_shape_audit,
+                                "coarse_box_audit": coarse_audit,
+                                "shape_point_refinement": shape_point_audit,
+                            }
+                        else:
+                            audit = {
+                                **initial_shape_audit,
+                                "coarse_box_audit": coarse_audit,
+                                "shape_point_refinement": shape_point_audit,
+                            }
                     box_audits.append({"box_index": box_index, "box": box, **audit})
                     if selected is not None:
                         union |= selected
@@ -1035,14 +1435,10 @@ def run(
                     reproduction_iou >= CONFIRMED_MASK_STRICT_MINIMUM_IOU
                 )
                 bounded_reproduction = (
-                    reproduction_precision
-                    >= CONFIRMED_MASK_BOUNDED_MINIMUM_PRECISION
-                    and reproduction_recall
-                    >= CONFIRMED_MASK_BOUNDED_MINIMUM_RECALL
+                    reproduction_precision >= CONFIRMED_MASK_BOUNDED_MINIMUM_PRECISION
+                    and reproduction_recall >= CONFIRMED_MASK_BOUNDED_MINIMUM_RECALL
                 )
-                reproduction_accepted = (
-                    strict_reproduction or bounded_reproduction
-                )
+                reproduction_accepted = strict_reproduction or bounded_reproduction
                 confirmed_mask_audit = {
                     "path": str(confirmed_path),
                     "sha256": _sha256_file(confirmed_path),
@@ -1050,17 +1446,13 @@ def run(
                     "rerun_mask_pixels": union_pixels_before_confirmation,
                     "intersection_pixels": intersection,
                     "reproduction_iou": round(reproduction_iou, 8),
-                    "minimum_reproduction_iou": (
-                        CONFIRMED_MASK_STRICT_MINIMUM_IOU
-                    ),
+                    "minimum_reproduction_iou": (CONFIRMED_MASK_STRICT_MINIMUM_IOU),
                     "reproduction_precision": round(reproduction_precision, 8),
                     "reproduction_recall": round(reproduction_recall, 8),
                     "bounded_minimum_precision": (
                         CONFIRMED_MASK_BOUNDED_MINIMUM_PRECISION
                     ),
-                    "bounded_minimum_recall": (
-                        CONFIRMED_MASK_BOUNDED_MINIMUM_RECALL
-                    ),
+                    "bounded_minimum_recall": (CONFIRMED_MASK_BOUNDED_MINIMUM_RECALL),
                     "acceptance_mode": (
                         "strict_iou"
                         if strict_reproduction
@@ -1105,6 +1497,12 @@ def run(
                         if ordered_interaction_requested and click_sets
                         else "human_interactive_points"
                         if click_sets
+                        else "cad_shape_guided_box_then_automatic_points"
+                        if any(
+                            isinstance(item.get("shape_point_refinement"), Mapping)
+                            and item["shape_point_refinement"].get("accepted") is True
+                            for item in box_audits
+                        )
                         else "text_and_positive_boxes"
                     ),
                     "interaction_replay_mode": (
@@ -1188,14 +1586,24 @@ def run(
         "minimum_prompt_overlap": minimum_prompt_overlap,
         "maximum_image_fraction": maximum_image_fraction,
         "minimum_mask_pixels": minimum_mask_pixels,
+        "minimum_cad_shape_seed_pixels": DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS,
+        "minimum_cad_shape_iou": DEFAULT_MINIMUM_CAD_SHAPE_IOU,
+        "minimum_cad_shape_area_agreement": (DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT),
+        "cad_shape_candidate_policy": (
+            "location_invariant_isotropic_normalization_bounded_rotation"
+        ),
         "rejected_mask_policy": "fail_closed_no_mask_evidence",
         "cross_group_arbitration_schema": (CROSS_GROUP_ARBITRATION_SCHEMA_VERSION),
         "cross_group_near_duplicate_iou": CROSS_GROUP_NEAR_DUPLICATE_IOU,
         "cross_group_minimum_intersection_pixels": minimum_mask_pixels,
         "cross_group_foreground_policy": "exclude_whole_asset_foreground",
     }
-    if interactive_requested:
+    if human_interactive_requested:
         policy["human_point_model_score_policy"] = "advisory_when_human_confirmed"
+    if automatic_shape_interactive_requested:
+        policy[
+            "automatic_shape_point_refinement"
+        ] = "coarse_box_then_bounded_cad_shape_positive_negative_points"
     if ordered_interaction_requested:
         policy[
             "human_point_replay_policy"

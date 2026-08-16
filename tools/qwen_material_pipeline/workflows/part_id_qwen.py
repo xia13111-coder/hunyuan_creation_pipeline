@@ -15,7 +15,13 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-from qwen_material_pipeline.evidence.part_id_projection import SCHEMA_VERSION
+from qwen_material_pipeline.evidence.part_id_projection import (
+    DEFAULT_MINIMUM_PROJECTED_PIXELS,
+    SCHEMA_VERSION,
+)
+from qwen_material_pipeline.segmentation.sam3_regions import (
+    DEFAULT_MINIMUM_CAD_SHAPE_IOU,
+)
 from qwen_material_pipeline.materials.perceptual_color import (
     perceptual_similarity,
     srgb_delta_e,
@@ -138,8 +144,27 @@ _MATERIAL_SPECIES_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("leather", ("leather",)),
     ("textile", ("cloth", "linen", "fabric", "carpet")),
     ("paper", ("paper", "cardboard")),
-    ("wood", ("wood", "veneer", "walnut", "oak", "birch", "ash", "bamboo", "cherry", "mahogany", "timber", "plywood", "cork")),
-    ("plastic", ("plastic", "polymer", "polycarbonate", "polypropylene", "polyethylene")),
+    (
+        "wood",
+        (
+            "wood",
+            "veneer",
+            "walnut",
+            "oak",
+            "birch",
+            "ash",
+            "bamboo",
+            "cherry",
+            "mahogany",
+            "timber",
+            "plywood",
+            "cork",
+        ),
+    ),
+    (
+        "plastic",
+        ("plastic", "polymer", "polycarbonate", "polypropylene", "polyethylene"),
+    ),
 )
 
 _GENERIC_MATERIAL_SPECIES = frozenset(
@@ -309,9 +334,7 @@ def _catalog_material_species(
 
     semantics = record.get("surface_semantics")
     explicit = (
-        semantics.get("material_species")
-        if isinstance(semantics, Mapping)
-        else None
+        semantics.get("material_species") if isinstance(semantics, Mapping) else None
     )
     if isinstance(explicit, str) and explicit.strip():
         return explicit.strip().casefold()
@@ -516,13 +539,11 @@ def _validate_material_prediction_batch(
         )
         exact_treatment_is_known = (
             treatment != "unknown"
-            and float(treatment_confidence)
-            >= MINIMUM_EXACT_TREATMENT_CONFIDENCE
+            and float(treatment_confidence) >= MINIMUM_EXACT_TREATMENT_CONFIDENCE
         )
         exact_species_is_known = (
             species != "unknown"
-            and float(species_confidence)
-            >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
+            and float(species_confidence) >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
         )
         identity_resolution = (
             "exact_material"
@@ -561,11 +582,7 @@ def _validate_material_prediction_batch(
             "treatment_confidence": float(treatment_confidence),
             "confidence": confidence,
             "identity_resolution": identity_resolution,
-            "status": (
-                "APPLYABLE"
-                if substrate_is_known
-                else "INSUFFICIENT_EVIDENCE"
-            ),
+            "status": ("APPLYABLE" if substrate_is_known else "INSUFFICIENT_EVIDENCE"),
         }
     if set(output) != expected_ids:
         raise PartIdQwenError(
@@ -589,8 +606,7 @@ def _material_prediction_payload(
                 f"material prediction target {item['part_id']} has no views"
             )
         local_context = (
-            item.get("evidence_layout")
-            == "isolated_target_with_local_context"
+            item.get("evidence_layout") == "isolated_target_with_local_context"
         )
         target_instruction = (
             (
@@ -620,11 +636,9 @@ def _material_prediction_payload(
                 "type": "text",
                 "text": target_instruction
                 + json.dumps(
-                        _color_free_identity_descriptor(
-                            item.get("descriptor", {})
-                        ),
-                        ensure_ascii=False,
-                    ),
+                    _color_free_identity_descriptor(item.get("descriptor", {})),
+                    ensure_ascii=False,
+                ),
             }
         )
         for view in views:
@@ -891,9 +905,7 @@ def _colorless_material_identity_key(
 
 def _specific_library_preset(material_id: str) -> bool:
     name = material_id.rsplit("#", 1)[-1].casefold()
-    tokens = {
-        token for token in name.replace("-", "_").split("_") if token
-    }
+    tokens = {token for token in name.replace("-", "_").split("_") if token}
     return bool(tokens & _COLOR_IDENTITY_TOKENS)
 
 
@@ -956,8 +968,7 @@ def _annotate_library_preset_variants(
             row["colorless_identity_key"] = list(key)
             row["generic_identity_material_id"] = generic_material_id
             row["specific_library_preset"] = (
-                generic_material_id is None
-                or material_id != generic_material_id
+                generic_material_id is None or material_id != generic_material_id
             )
             species = str(
                 row.get(
@@ -1073,9 +1084,7 @@ def _rank_identity_candidates_with_pbr(
         row = dict(raw)
         material_id = row.get("material_id")
         fingerprint = _library_pbr_fingerprint(
-            profiles_by_id.get(material_id)
-            if isinstance(material_id, str)
-            else None
+            profiles_by_id.get(material_id) if isinstance(material_id, str) else None
         )
         terms = {
             key: abs(observed[key] - fingerprint[key])
@@ -1120,8 +1129,7 @@ def _direct_exact_library_match(
     if (
         prediction.get("status") != "APPLYABLE"
         or prediction.get("identity_resolution") != "exact_material"
-        or float(prediction.get("confidence", 0.0))
-        < MINIMUM_EXACT_TREATMENT_CONFIDENCE
+        or float(prediction.get("confidence", 0.0)) < MINIMUM_EXACT_TREATMENT_CONFIDENCE
     ):
         return None
     exact = [
@@ -1229,9 +1237,7 @@ def _identity_filtered_ranking(
             row["predicted_finish"] = "unknown"
             row["predicted_finish_match"] = False
             row["identity_match_tier"] = "insufficient_identity_evidence"
-            row["catalog_surface_semantics"] = dict(
-                record["surface_semantics"]
-            )
+            row["catalog_surface_semantics"] = dict(record["surface_semantics"])
             row["physical_identity_applyable"] = False
             unconstrained.append(row)
         unconstrained = _annotate_library_preset_variants(
@@ -1249,9 +1255,13 @@ def _identity_filtered_ranking(
     corresponding: list[dict[str, Any]] = []
     for material_id, record in catalog_by_id.items():
         candidate_species = _catalog_material_species(material_id, record)
-        substrates, candidate_treatment, candidate_optical, semantic_finish, semantic_confidence = (
-            _catalog_identity_semantics(material_id, record)
-        )
+        (
+            substrates,
+            candidate_treatment,
+            candidate_optical,
+            semantic_finish,
+            semantic_confidence,
+        ) = _catalog_identity_semantics(material_id, record)
         if semantic_confidence == "low" or substrate not in substrates:
             continue
         if candidate_optical != optical:
@@ -1375,8 +1385,7 @@ def _identity_shortlist(
                 "generic_identity_material_id" not in row
                 or (
                     isinstance(row.get("generic_identity_material_id"), str)
-                    and str(row["material_id"])
-                    == row["generic_identity_material_id"]
+                    and str(row["material_id"]) == row["generic_identity_material_id"]
                 )
             )
         ]
@@ -1389,9 +1398,7 @@ def _identity_shortlist(
                     0 if row.get("predicted_finish_match") is True else 1,
                     (
                         float(row["physical_pbr_mean_error"])
-                        if isinstance(
-                            row.get("physical_pbr_mean_error"), (int, float)
-                        )
+                        if isinstance(row.get("physical_pbr_mean_error"), (int, float))
                         else float("inf")
                     ),
                     int(row.get("rank", 1_000_000)),
@@ -1449,8 +1456,7 @@ def _identity_shortlist(
                 "selection_allowed": True,
                 "selection_allowed_by_default_constraints": True,
                 "library_gap_fallback": (
-                    raw.get("identity_match_tier")
-                    == "corresponding_material_fallback"
+                    raw.get("identity_match_tier") == "corresponding_material_fallback"
                 ),
                 "library_gap_fallback_tier": (
                     raw.get("identity_match_tier")
@@ -1461,12 +1467,8 @@ def _identity_shortlist(
                 "relaxed_constraints": [],
                 "conditional_h1_evaluation": False,
                 "color_evidence_used": False,
-                "color_evidence_scope": (
-                    "exact_library_preset_confirmation_only"
-                ),
-                "specific_library_preset": raw.get(
-                    "specific_library_preset", False
-                ),
+                "color_evidence_scope": ("exact_library_preset_confirmation_only"),
+                "specific_library_preset": raw.get("specific_library_preset", False),
                 "material_species": raw.get("material_species", "unknown"),
                 "exact_authored_preset_candidate": raw.get(
                     "exact_authored_preset_candidate", False
@@ -1478,12 +1480,8 @@ def _identity_shortlist(
                     "generic_identity_material_id", raw.get("material_id")
                 ),
                 "physical_pbr_evidence": raw.get("physical_pbr_evidence", {}),
-                "library_pbr_fingerprint": raw.get(
-                    "library_pbr_fingerprint", {}
-                ),
-                "physical_pbr_term_errors": raw.get(
-                    "physical_pbr_term_errors", {}
-                ),
+                "library_pbr_fingerprint": raw.get("library_pbr_fingerprint", {}),
+                "physical_pbr_term_errors": raw.get("physical_pbr_term_errors", {}),
                 "physical_pbr_mean_error": raw.get("physical_pbr_mean_error"),
                 "physical_pbr_similarity": raw.get("physical_pbr_similarity"),
             }
@@ -1514,9 +1512,7 @@ def _candidate_summary(
         "exact_authored_preset_candidate": row.get(
             "exact_authored_preset_candidate", False
         ),
-        "physical_identity_applyable": row.get(
-            "physical_identity_applyable", True
-        ),
+        "physical_identity_applyable": row.get("physical_identity_applyable", True),
         "generic_identity_material_id": row.get(
             "generic_identity_material_id", row.get("material_id")
         ),
@@ -1645,6 +1641,35 @@ def _target_appearance(observation: Mapping[str, Any]) -> dict[str, Any] | None:
             and chromatic_coverage.get("tiny_part_rescue") is True
         ),
     }
+
+
+def _shape_guided_exact_preset_eligible(
+    observation: Mapping[str, Any],
+    *,
+    required: bool,
+) -> bool:
+    """Require a real photo-instance mask before an independent exact MDL."""
+
+    if not required:
+        return True
+    pixels = observation.get("trusted_foreground_pixels")
+    refinement = observation.get("part_id_sam3_refinement")
+    shape = (
+        refinement.get("shape_candidate") if isinstance(refinement, Mapping) else None
+    )
+    return bool(
+        observation.get("photo_part_segmentation_applied") is True
+        and isinstance(pixels, int)
+        and not isinstance(pixels, bool)
+        and pixels >= DEFAULT_MINIMUM_PROJECTED_PIXELS
+        and isinstance(refinement, Mapping)
+        and refinement.get("applied") is True
+        and isinstance(shape, Mapping)
+        and shape.get("cad_shape_location_invariant") is True
+        and isinstance(shape.get("cad_shape_iou"), (int, float))
+        and not isinstance(shape.get("cad_shape_iou"), bool)
+        and float(shape["cad_shape_iou"]) >= DEFAULT_MINIMUM_CAD_SHAPE_IOU
+    )
 
 
 def _is_color_critical_target(
@@ -2028,9 +2053,7 @@ def _promote_library_gap_candidates(
         # perceptual Delta-E.  Its transmission or texture risk is less
         # damaging than replacing an observed saturated coating with an
         # unrelated neutral material when the MDL must remain immutable.
-        color_faithful = [
-            row for row in rows if row.get("color_gate_passed") is True
-        ]
+        color_faithful = [row for row in rows if row.get("color_gate_passed") is True]
         if color_faithful:
             selected = min(
                 color_faithful,
@@ -2051,9 +2074,9 @@ def _promote_library_gap_candidates(
             # the evidence-bounded visual decision.
             selected["selection_allowed"] = True
             selected["library_gap_fallback"] = True
-            selected["library_gap_fallback_tier"] = (
-                "immutable_chromatic_visual_priority"
-            )
+            selected[
+                "library_gap_fallback_tier"
+            ] = "immutable_chromatic_visual_priority"
             selected["relaxed_constraints"] = relaxed_constraints
             selected["conditional_h1_evaluation"] = False
             selected["compatibility_rank"] = 1
@@ -2075,10 +2098,7 @@ def _promote_library_gap_candidates(
             and tuning_profile_for_material(material_id) is not None
         )
 
-    tiers: tuple[
-        tuple[str, tuple[str, ...], Any],
-        ...,
-    ] = (
+    tiers: tuple[tuple[str, tuple[str, ...], Any], ...,] = (
         (
             "opaque_texture_compatible_color_parameter_candidate",
             ("default_color_gate",),
@@ -2560,6 +2580,13 @@ def _validate_batch(
         if (
             require_material_identity_match
             and match_type == "EXACT_LIBRARY_MATCH"
+            and candidate.get("exact_preset_evidence_eligible") is False
+        ):
+            match_type = "CORRESPONDING_MATERIAL"
+            index_resolution = "shape_guided_exact_evidence_unavailable"
+        if (
+            require_material_identity_match
+            and match_type == "EXACT_LIBRARY_MATCH"
             and candidate.get("exact_preset_color_gate_passed") is False
         ):
             match_type = "CORRESPONDING_MATERIAL"
@@ -2569,6 +2596,7 @@ def _validate_batch(
             and match_type == "CORRESPONDING_MATERIAL"
             and candidate.get("physical_identity_applyable") is True
             and candidate.get("exact_authored_preset_candidate") is True
+            and candidate.get("exact_preset_evidence_eligible") is not False
             and candidate.get("exact_preset_color_gate_passed") is True
             and float(confidence) >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
         ):
@@ -2620,9 +2648,7 @@ def _validate_batch(
             "requested_material_id": requested_material_id,
             "index_resolution": index_resolution,
             "confidence": float(confidence),
-            "exact_preset_color_delta_e": (
-                requested_exact_preset_color_delta_e
-            ),
+            "exact_preset_color_delta_e": (requested_exact_preset_color_delta_e),
             "exact_preset_color_gate_passed": (
                 requested_exact_preset_color_gate_passed
             ),
@@ -2687,11 +2713,7 @@ def _payload(
                 ),
                 "confidence": 0.75,
                 **(
-                    {
-                        "match_type": (
-                            "EXACT_LIBRARY_MATCH or CORRESPONDING_MATERIAL"
-                        )
-                    }
+                    {"match_type": ("EXACT_LIBRARY_MATCH or CORRESPONDING_MATERIAL")}
                     if require_material_family_prediction
                     else {}
                 ),
@@ -2810,11 +2832,7 @@ def _component_refinement_rgb(part: Mapping[str, Any]) -> list[float] | None:
     if not isinstance(descriptor, Mapping):
         return None
     robust = descriptor.get("robust_color_evidence")
-    value = (
-        robust.get("robust_reference_srgb")
-        if isinstance(robust, Mapping)
-        else None
-    )
+    value = robust.get("robust_reference_srgb") if isinstance(robust, Mapping) else None
     if value is None:
         value = descriptor.get("median_rgb")
     if (
@@ -2909,8 +2927,7 @@ def _component_refinement_observation_weight(
     ):
         return 0.0
     return float(
-        max(0.0, min(1.0, float(weight)))
-        * min(1.0, math.log2(max(2, pixels)) / 12.0)
+        max(0.0, min(1.0, float(weight))) * min(1.0, math.log2(max(2, pixels)) / 12.0)
     )
 
 
@@ -2954,9 +2971,7 @@ def _refine_component_memberships_with_final_evidence(
         inputs.get("rendered_registry") if isinstance(inputs, Mapping) else None
     )
     registry_sha256 = (
-        inputs.get("rendered_registry_sha256")
-        if isinstance(inputs, Mapping)
-        else None
+        inputs.get("rendered_registry_sha256") if isinstance(inputs, Mapping) else None
     )
     if not isinstance(registry_value, str) or not isinstance(registry_sha256, str):
         return result, disabled
@@ -2992,15 +3007,17 @@ def _refine_component_memberships_with_final_evidence(
             "final Part-ID evidence is not covered by the rendered registry"
         )
     raw_components = appearance_components.get("components")
-    component_metadata = {
-        str(raw["component_id"]): raw
-        for raw in raw_components
-        if isinstance(raw, Mapping) and isinstance(raw.get("component_id"), str)
-    } if isinstance(raw_components, list) else {}
+    component_metadata = (
+        {
+            str(raw["component_id"]): raw
+            for raw in raw_components
+            if isinstance(raw, Mapping) and isinstance(raw.get("component_id"), str)
+        }
+        if isinstance(raw_components, list)
+        else {}
+    )
     default_prim = registry.get("default_prim")
-    assigned = {
-        part_id for members in result.values() for part_id in members
-    }
+    assigned = {part_id for members in result.values() for part_id in members}
     candidate_matches: dict[str, list[dict[str, Any]]] = {}
     for part_id in sorted(set(part_by_id) - assigned):
         part = part_by_id[part_id]
@@ -3010,15 +3027,15 @@ def _refine_component_memberships_with_final_evidence(
             if isinstance(descriptor, Mapping)
             else None
         )
-        sample_count = robust.get("sample_count") if isinstance(robust, Mapping) else None
+        sample_count = (
+            robust.get("sample_count") if isinstance(robust, Mapping) else None
+        )
         inlier_fraction = (
             robust.get("inlier_fraction") if isinstance(robust, Mapping) else None
         )
         candidate_rgb = _component_refinement_rgb(part)
         candidate_surface = (
-            descriptor.get("surface_class")
-            if isinstance(descriptor, Mapping)
-            else None
+            descriptor.get("surface_class") if isinstance(descriptor, Mapping) else None
         )
         registry_row = registry_by_id[part_id]
         candidate_branch = _component_refinement_assembly_branch(
@@ -3034,8 +3051,7 @@ def _refine_component_memberships_with_final_evidence(
             or sample_count < MINIMUM_COMPONENT_REFINEMENT_PIXELS
             or isinstance(inlier_fraction, bool)
             or not isinstance(inlier_fraction, (int, float))
-            or float(inlier_fraction)
-            < MINIMUM_COMPONENT_REFINEMENT_INLIER_FRACTION
+            or float(inlier_fraction) < MINIMUM_COMPONENT_REFINEMENT_INLIER_FRACTION
             or candidate_branch is None
         ):
             continue
@@ -3051,8 +3067,7 @@ def _refine_component_memberships_with_final_evidence(
                 not isinstance(canonical_rgb, list)
                 or len(canonical_rgb) != 3
                 or any(
-                    isinstance(channel, bool)
-                    or not isinstance(channel, (int, float))
+                    isinstance(channel, bool) or not isinstance(channel, (int, float))
                     for channel in canonical_rgb
                 )
             ):
@@ -3121,7 +3136,9 @@ def _refine_component_memberships_with_final_evidence(
                         )
                         current = best_by_view.get(view_id)
                         if current is None or (support, member, -gap) > (
-                            current[0], current[1], -current[2]
+                            current[0],
+                            current[1],
+                            -current[2],
                         ):
                             best_by_view[view_id] = (support, member, gap)
             spatial_support = sum(row[0] for row in best_by_view.values())
@@ -3160,9 +3177,7 @@ def _refine_component_memberships_with_final_evidence(
         additions.append({"part_id": part_id, **match})
     component_audits = []
     additions_by_component = {
-        component_id: [
-            row for row in additions if row["component_id"] == component_id
-        ]
+        component_id: [row for row in additions if row["component_id"] == component_id]
         for component_id in result
     }
     for component_id, members in sorted(result.items()):
@@ -3268,9 +3283,7 @@ def _registry_part_rows_for_repeated_assemblies(
         part_id = raw.get("part_id") if isinstance(raw, Mapping) else None
         prim_path = raw.get("prim_path") if isinstance(raw, Mapping) else None
         geometry_sha256 = (
-            raw.get("geometry_content_sha256")
-            if isinstance(raw, Mapping)
-            else None
+            raw.get("geometry_content_sha256") if isinstance(raw, Mapping) else None
         )
         point_count = raw.get("point_count") if isinstance(raw, Mapping) else None
         face_count = raw.get("face_count") if isinstance(raw, Mapping) else None
@@ -3332,9 +3345,7 @@ def _repeated_role_surface_classes(
     for part_id in member_part_ids:
         descriptor = part_by_id[part_id].get("descriptor")
         surface = (
-            descriptor.get("surface_class")
-            if isinstance(descriptor, Mapping)
-            else None
+            descriptor.get("surface_class") if isinstance(descriptor, Mapping) else None
         )
         if isinstance(surface, str) and surface not in {"", "unknown"}:
             known.add(surface)
@@ -3411,7 +3422,10 @@ def _apply_repeated_assembly_role_constraints(
     repeated_candidates: list[
         tuple[
             tuple[str, ...],
-            tuple[tuple[tuple[str, ...], list[tuple[tuple[str, ...], dict[str, Any]]]], ...],
+            tuple[
+                tuple[tuple[str, ...], list[tuple[tuple[str, ...], dict[str, Any]]]],
+                ...,
+            ],
             tuple[tuple[tuple[str, ...], str, int, int], ...],
         ]
     ] = []
@@ -3445,7 +3459,10 @@ def _apply_repeated_assembly_role_constraints(
     selected_structures: list[
         tuple[
             tuple[str, ...],
-            tuple[tuple[tuple[str, ...], list[tuple[tuple[str, ...], dict[str, Any]]]], ...],
+            tuple[
+                tuple[tuple[str, ...], list[tuple[tuple[str, ...], dict[str, Any]]]],
+                ...,
+            ],
             tuple[tuple[tuple[str, ...], str, int, int], ...],
         ]
     ] = []
@@ -3487,9 +3504,9 @@ def _apply_repeated_assembly_role_constraints(
                 "role_signature": signature_document,
             }
         )
-        roles_by_path: dict[
-            tuple[str, ...], list[Mapping[str, Any]]
-        ] = defaultdict(list)
+        roles_by_path: dict[tuple[str, ...], list[Mapping[str, Any]]] = defaultdict(
+            list
+        )
         for root, descendants in instances:
             for path, row in descendants:
                 roles_by_path[path[len(root) :]].append(row)
@@ -3503,9 +3520,7 @@ def _apply_repeated_assembly_role_constraints(
             if len(observed_members) < MINIMUM_REPEATED_ASSEMBLY_INSTANCE_COUNT:
                 continue
             candidate_role_count += 1
-            geometry_ids = {
-                str(row["geometry_content_sha256"]) for row in role_rows
-            }
+            geometry_ids = {str(row["geometry_content_sha256"]) for row in role_rows}
             known_surfaces = _repeated_role_surface_classes(
                 member_part_ids=observed_members,
                 part_by_id=part_by_id,
@@ -3788,17 +3803,15 @@ def _apply_component_identity_consensus(
                         protected_exact_support[str(winner)]
                     )
                     if not was_protected_source:
-                        row["index_resolution"] = (
-                            "component_exact_preset_propagation"
-                        )
-                        row["selection_authority"] = (
-                            "appearance_component_protected_exact_preset"
-                        )
+                        row["index_resolution"] = "component_exact_preset_propagation"
+                        row[
+                            "selection_authority"
+                        ] = "appearance_component_protected_exact_preset"
                 elif consensus_mode == "REPEATED_ROLE_JOINT_CONSENSUS":
                     row["index_resolution"] = "repeated_assembly_role_consensus"
-                    row["selection_authority"] = (
-                        "repeated_assembly_role_joint_consensus"
-                    )
+                    row[
+                        "selection_authority"
+                    ] = "repeated_assembly_role_joint_consensus"
         audits.append(
             {
                 "component_id": component_id,
@@ -3859,6 +3872,12 @@ def run_part_id_qwen_rerank(
 
     if evidence.get("schema_version") != SCHEMA_VERSION:
         raise PartIdQwenError("unsupported Part-ID evidence schema")
+    shape_guided_exact_preset_required = evidence.get(
+        "part_segmentation_authority"
+    ) == (
+        "shape_guided_sam3_photo_instance_when_valid_otherwise_"
+        "audited_cad_projection_fallback"
+    )
     if (
         isinstance(batch_size, bool)
         or not isinstance(batch_size, int)
@@ -3934,16 +3953,15 @@ def run_part_id_qwen_rerank(
         appearance_components if require_material_family_prediction else None,
         observed_part_ids=set(part_by_id),
     )
-    component_members, component_membership_refinement = (
-        _refine_component_memberships_with_final_evidence(
-            appearance_components=(
-                appearance_components
-                if require_material_family_prediction
-                else None
-            ),
-            component_members=component_members,
-            part_by_id=part_by_id,
-        )
+    (
+        component_members,
+        component_membership_refinement,
+    ) = _refine_component_memberships_with_final_evidence(
+        appearance_components=(
+            appearance_components if require_material_family_prediction else None
+        ),
+        component_members=component_members,
+        part_by_id=part_by_id,
     )
     if require_material_family_prediction:
         (
@@ -3959,8 +3977,7 @@ def run_part_id_qwen_rerank(
     else:
         strict_consensus_component_ids = set()
         component_scope_by_id = {
-            component_id: "appearance_component"
-            for component_id in component_members
+            component_id: "appearance_component" for component_id in component_members
         }
         repeated_assembly_role_consistency = {
             "schema_version": "qwen-repeated-assembly-role-consistency/v1",
@@ -4014,8 +4031,7 @@ def run_part_id_qwen_rerank(
                     candidate.get("isolated_crop") or candidate.get("crop"), str
                 )
                 and (
-                    not include_local_context
-                    or isinstance(candidate.get("crop"), str)
+                    not include_local_context or isinstance(candidate.get("crop"), str)
                 )
             ]
             if not trusted_views:
@@ -4039,18 +4055,16 @@ def run_part_id_qwen_rerank(
                     Path(row["crop"]),
                     output,
                     context_source=(
-                        Path(row["context_crop"])
-                        if include_local_context
-                        else None
+                        Path(row["context_crop"]) if include_local_context else None
                     ),
                 )
-                grayscale_views.append(
-                    {"view_id": row["view_id"], "crop": str(output)}
-                )
+                grayscale_views.append({"view_id": row["view_id"], "crop": str(output)})
             return grayscale_views
 
         for component_id, members in sorted(component_members.items()):
-            representative_members = list(members)[:MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH]
+            representative_members = list(members)[
+                :MAX_MATERIAL_PREDICTION_IMAGES_PER_BATCH
+            ]
             trusted_views = [
                 prediction_views(
                     part_id,
@@ -4139,6 +4153,10 @@ def run_part_id_qwen_rerank(
             raise PartIdQwenError(
                 f"Part-ID {part_id} does not have exactly one selected observation"
             )
+        exact_preset_evidence_eligible = _shape_guided_exact_preset_eligible(
+            selected_observations[0],
+            required=shape_guided_exact_preset_required,
+        )
         ranking = retrieval_by_id[part_id].get("fused_ranking")
         if not isinstance(ranking, list) or len(ranking) < 2:
             raise PartIdQwenError(f"Part-ID {part_id} has no candidate ranking")
@@ -4169,9 +4187,7 @@ def run_part_id_qwen_rerank(
             else:
                 raw_descriptor = part.get("descriptor")
                 identity_descriptor = (
-                    raw_descriptor
-                    if isinstance(raw_descriptor, Mapping)
-                    else None
+                    raw_descriptor if isinstance(raw_descriptor, Mapping) else None
                 )
             ranking = _rank_identity_candidates_with_pbr(
                 ranking,
@@ -4182,6 +4198,7 @@ def run_part_id_qwen_rerank(
             _direct_exact_library_match(ranking, prediction=prediction)
             if require_material_family_prediction
             and isinstance(prediction, Mapping)
+            and exact_preset_evidence_eligible
             else None
         )
         target = _target_appearance(selected_observations[0])
@@ -4286,21 +4303,15 @@ def run_part_id_qwen_rerank(
                     "specific_library_preset": row.get(
                         "specific_library_preset", False
                     ),
-                    "material_species": row.get(
-                        "material_species", "unknown"
-                    ),
+                    "material_species": row.get("material_species", "unknown"),
                     "exact_authored_preset_candidate": row.get(
                         "exact_authored_preset_candidate", False
                     ),
                     "generic_identity_material_id": row.get(
                         "generic_identity_material_id", material_id
                     ),
-                    "physical_pbr_similarity": row.get(
-                        "physical_pbr_similarity"
-                    ),
-                    "physical_pbr_mean_error": row.get(
-                        "physical_pbr_mean_error"
-                    ),
+                    "physical_pbr_similarity": row.get("physical_pbr_similarity"),
+                    "physical_pbr_mean_error": row.get("physical_pbr_mean_error"),
                     "authored_preset_median_rgb": (
                         [round(float(value), 8) for value in candidate_rgb]
                         if candidate_rgb is not None
@@ -4315,8 +4326,10 @@ def run_part_id_qwen_rerank(
                         exact_preset_color_delta_e
                         <= EXACT_LIBRARY_PRESET_MAXIMUM_DELTA_E
                         if exact_preset_color_delta_e is not None
+                        and exact_preset_evidence_eligible
                         else None
                     ),
+                    "exact_preset_evidence_eligible": (exact_preset_evidence_eligible),
                 }
             )
         job = {
@@ -4334,6 +4347,7 @@ def run_part_id_qwen_rerank(
             "candidates": candidates,
             "library_gap_fallback": library_gap_fallback,
             "material_prediction": prediction,
+            "exact_preset_evidence_eligible": exact_preset_evidence_eligible,
         }
         if direct_match is None:
             jobs.append(job)
@@ -4377,6 +4391,7 @@ def run_part_id_qwen_rerank(
                 "library_gap_fallback": library_gap_fallback,
                 "material_prediction": prediction,
                 "direct_exact_library_assignment": direct_match,
+                "exact_preset_evidence_eligible": (exact_preset_evidence_eligible),
                 "authorized_catalog_family": (
                     prediction.get("catalog_family")
                     if isinstance(prediction, Mapping)
@@ -4385,12 +4400,8 @@ def run_part_id_qwen_rerank(
                 ),
                 "authorized_physical_identity": (
                     {
-                        "physical_substrate": prediction.get(
-                            "physical_substrate"
-                        ),
-                        "material_species": prediction.get(
-                            "material_species"
-                        ),
+                        "physical_substrate": prediction.get("physical_substrate"),
+                        "material_species": prediction.get("material_species"),
                         "surface_treatment": prediction.get("surface_treatment"),
                         "optical_behavior": prediction.get("optical_behavior"),
                         "surface_finish": prediction.get("surface_finish"),
@@ -4426,30 +4437,20 @@ def run_part_id_qwen_rerank(
                         "conditional_h1_evaluation": row["conditional_h1_evaluation"],
                         "identity_match_tier": row.get("identity_match_tier"),
                         "color_evidence_used": row.get("color_evidence_used"),
-                        "color_evidence_scope": row.get(
-                            "color_evidence_scope"
-                        ),
+                        "color_evidence_scope": row.get("color_evidence_scope"),
                         "specific_library_preset": row.get(
                             "specific_library_preset", False
                         ),
-                        "material_species": row.get(
-                            "material_species", "unknown"
-                        ),
+                        "material_species": row.get("material_species", "unknown"),
                         "exact_authored_preset_candidate": row.get(
                             "exact_authored_preset_candidate", False
                         ),
                         "generic_identity_material_id": row.get(
                             "generic_identity_material_id", row["material_id"]
                         ),
-                        "physical_pbr_similarity": row.get(
-                            "physical_pbr_similarity"
-                        ),
-                        "physical_pbr_mean_error": row.get(
-                            "physical_pbr_mean_error"
-                        ),
-                        "physical_pbr_evidence": row.get(
-                            "physical_pbr_evidence", {}
-                        ),
+                        "physical_pbr_similarity": row.get("physical_pbr_similarity"),
+                        "physical_pbr_mean_error": row.get("physical_pbr_mean_error"),
+                        "physical_pbr_evidence": row.get("physical_pbr_evidence", {}),
                         "library_pbr_fingerprint": row.get(
                             "library_pbr_fingerprint", {}
                         ),
@@ -4481,6 +4482,7 @@ def run_part_id_qwen_rerank(
                 grayscale=False,
             )
             job["comparison_sheet"] = str(sheet)
+
     def run_selection_batches(
         stage_jobs: Sequence[dict[str, Any]],
         *,
@@ -4509,9 +4511,7 @@ def run_part_id_qwen_rerank(
                     ),
                 )
                 generated = runner.generate_with_metadata(payload)
-                artifact_stem = (
-                    f"{stage}_batch_{batch_index:03d}_attempt_{attempt}"
-                )
+                artifact_stem = f"{stage}_batch_{batch_index:03d}_attempt_{attempt}"
                 raw_path = raw_dir / f"{artifact_stem}.txt"
                 raw_path.write_text(generated.text, encoding="utf-8")
                 try:
@@ -4566,15 +4566,11 @@ def run_part_id_qwen_rerank(
                 )
         return stage_selections, stage_audits
 
-    exact_preset_qwen_selections, exact_preset_batch_audits = (
-        run_selection_batches(
-            jobs,
-            stage=(
-                "exact_preset" if require_material_family_prediction else "selection"
-            ),
-            require_match_type=require_material_family_prediction,
-            corresponding_only=False,
-        )
+    exact_preset_qwen_selections, exact_preset_batch_audits = run_selection_batches(
+        jobs,
+        stage=("exact_preset" if require_material_family_prediction else "selection"),
+        require_match_type=require_material_family_prediction,
+        corresponding_only=False,
     )
     corresponding_qwen_selections: list[dict[str, Any]] = []
     corresponding_batch_audits: list[dict[str, Any]] = []
@@ -4613,9 +4609,9 @@ def run_part_id_qwen_rerank(
                 }
                 sanitized["candidate_index"] = len(generic_candidates) + 1
                 sanitized["color_evidence_used"] = False
-                sanitized["color_evidence_scope"] = (
-                    "forbidden_in_corresponding_material_pass"
-                )
+                sanitized[
+                    "color_evidence_scope"
+                ] = "forbidden_in_corresponding_material_pass"
                 generic_candidates.append(sanitized)
             if not generic_candidates:
                 raise PartIdQwenError(
@@ -4640,9 +4636,9 @@ def run_part_id_qwen_rerank(
                 }
                 sheet = _comparison_sheet(
                     part_id=part_id,
-                    crop=Path(str(source_job["crop"])).expanduser().resolve(
-                        strict=True
-                    ),
+                    crop=Path(str(source_job["crop"]))
+                    .expanduser()
+                    .resolve(strict=True),
                     candidates=generic_candidates,
                     render_paths=render_paths,
                     output=corresponding_comparison_dir / f"{part_id}.png",
@@ -4650,21 +4646,20 @@ def run_part_id_qwen_rerank(
                 )
                 fallback_job["comparison_sheet"] = str(sheet)
             corresponding_jobs.append(fallback_job)
-        corresponding_qwen_selections, corresponding_batch_audits = (
-            run_selection_batches(
-                corresponding_jobs,
-                stage="corresponding_material",
-                require_match_type=False,
-                corresponding_only=True,
-            )
+        (
+            corresponding_qwen_selections,
+            corresponding_batch_audits,
+        ) = run_selection_batches(
+            corresponding_jobs,
+            stage="corresponding_material",
+            require_match_type=False,
+            corresponding_only=True,
         )
         for row in corresponding_qwen_selections:
             part_id = str(row["part_id"])
             initial = initial_by_id[part_id]
             row["match_type"] = "CORRESPONDING_MATERIAL"
-            row["selection_authority"] = (
-                "grayscale_corresponding_material_second_pass"
-            )
+            row["selection_authority"] = "grayscale_corresponding_material_second_pass"
             row["exact_preset_decision"] = dict(initial)
             initial_by_id[part_id] = row
         qwen_selections = [
@@ -4680,12 +4675,10 @@ def run_part_id_qwen_rerank(
     ]
     selections.sort(key=lambda row: str(row["part_id"]))
     if require_material_family_prediction:
-        selections, component_identity_consensus = (
-            _apply_component_identity_consensus(
-                selections=selections,
-                component_members=component_members,
-                strict_consensus_component_ids=strict_consensus_component_ids,
-            )
+        selections, component_identity_consensus = _apply_component_identity_consensus(
+            selections=selections,
+            component_members=component_members,
+            strict_consensus_component_ids=strict_consensus_component_ids,
         )
         selective_regression = {
             "schema_version": SELECTIVE_REGRESSION_SCHEMA_VERSION,
@@ -4694,9 +4687,7 @@ def run_part_id_qwen_rerank(
             "summary": {
                 "part_count": len(selections),
                 "qwen_choice_retained_count": len(qwen_selections),
-                "direct_exact_library_assignment_count": len(
-                    direct_selections
-                ),
+                "direct_exact_library_assignment_count": len(direct_selections),
                 "fresh_local_baseline_selected_count": 0,
                 "exact_cover": True,
             },
@@ -4768,6 +4759,7 @@ def run_part_id_qwen_rerank(
                 else "isolated_target_only"
             )
         ),
+        "shape_guided_exact_preset_required": (shape_guided_exact_preset_required),
         "selection_order": (
             [
                 "physical_material_identity_prediction_without_color",
@@ -4802,9 +4794,7 @@ def run_part_id_qwen_rerank(
         "part_id_selective_regression": selective_regression,
         "component_identity_consensus": component_identity_consensus,
         "component_membership_refinement": component_membership_refinement,
-        "repeated_assembly_role_consistency": (
-            repeated_assembly_role_consistency
-        ),
+        "repeated_assembly_role_consistency": (repeated_assembly_role_consistency),
         "visual_compatibility_gate": {
             "policy": (
                 "physical_identity_species_then_exact_authored_preset/v6"
@@ -4835,9 +4825,7 @@ def run_part_id_qwen_rerank(
                     for row in selections
                 )
                 if require_material_family_prediction
-                else sum(
-                    job.get("library_gap_fallback") is not None for job in jobs
-                )
+                else sum(job.get("library_gap_fallback") is not None for job in jobs)
             ),
             "selective_regression_changed_count": (
                 selective_regression["summary"]["fresh_local_baseline_selected_count"]
@@ -4856,14 +4844,10 @@ def run_part_id_qwen_rerank(
                 len(members) for members in component_members.values()
             ),
             "repeated_assembly_role_count": (
-                repeated_assembly_role_consistency["summary"][
-                    "constrained_role_count"
-                ]
+                repeated_assembly_role_consistency["summary"]["constrained_role_count"]
             ),
             "repeated_assembly_role_constrained_part_count": (
-                repeated_assembly_role_consistency["summary"][
-                    "constrained_part_count"
-                ]
+                repeated_assembly_role_consistency["summary"]["constrained_part_count"]
             ),
             "color_evidence_used_for_identity_count": sum(
                 row.get("match_type") == "EXACT_LIBRARY_MATCH"
@@ -4879,6 +4863,10 @@ def run_part_id_qwen_rerank(
                 for part in part_by_id.values()
             ),
             "direct_exact_library_assignment_count": len(direct_selections),
+            "shape_guided_exact_preset_eligible_count": sum(
+                gate.get("exact_preset_evidence_eligible") is True
+                for gate in gate_audits
+            ),
             "qwen_corresponding_selection_count": sum(
                 row.get("match_type") == "CORRESPONDING_MATERIAL"
                 for row in qwen_selections

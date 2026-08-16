@@ -1,11 +1,11 @@
 """Build reference-photo material evidence for each CAD ``part_id``.
 
-The human-confirmed SAM3 masks in this workflow describe the whole physical
-workpiece.  They are therefore a foreground/background authority only; they
-must never be interpreted as material regions.  Individual material evidence
-comes from projecting each renderer-authored Part-ID mask into the registered
-reference photograph and intersecting that projection with the SAM3
-foreground.
+The human-confirmed whole-workpiece SAM3 mask remains a foreground/background
+authority only.  Each renderer-authored Part-ID projection supplies a coarse
+box and a shape prior for a second, local SAM3 instance segmentation.  When
+that photographed mask passes the location-independent CAD-shape contract it
+becomes the pixel authority; otherwise the projection is retained only as an
+explicitly audited fallback.
 
 This module deliberately has no palette or canonical-group assignment input.
 Its primary keys are the stable CAD Part IDs (``P0001``, ``P0002``, ...).
@@ -30,6 +30,11 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from .color_semantics import pixel_color_label
+from ..segmentation.sam3_regions import (
+    DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT,
+    DEFAULT_MINIMUM_CAD_SHAPE_IOU,
+    DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS,
+)
 from ..materials.tuning import (
     color_parameters_for_target_srgb,
     tuning_profile_for_material,
@@ -686,6 +691,64 @@ def _open_grayscale(path: Path, label: str) -> np.ndarray:
     if array.ndim != 2:
         raise PartIdProjectionError(f"{label} is not grayscale: {path}")
     return array
+
+
+def _selected_cad_shape_candidate(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the accepted location-independent CAD-shape candidate audit."""
+
+    box_audits = record.get("box_audits")
+    if not isinstance(box_audits, list) or len(box_audits) != 1:
+        raise PartIdProjectionError(
+            "Part-ID SAM3 refinement must contain one shape-guided box audit"
+        )
+    box_audit = box_audits[0]
+    if not isinstance(box_audit, Mapping) or box_audit.get("accepted") is not True:
+        raise PartIdProjectionError(
+            "Part-ID SAM3 refinement lacks an accepted shape-guided box"
+        )
+    selected_index = box_audit.get("selected_candidate_index")
+    candidates = box_audit.get("candidates")
+    if (
+        isinstance(selected_index, bool)
+        or not isinstance(selected_index, int)
+        or not isinstance(candidates, list)
+    ):
+        raise PartIdProjectionError(
+            "Part-ID SAM3 shape-guided candidate selection is malformed"
+        )
+    selected = next(
+        (
+            item
+            for item in candidates
+            if isinstance(item, Mapping)
+            and item.get("candidate_index") == selected_index
+            and item.get("accepted") is True
+        ),
+        None,
+    )
+    if selected is None:
+        raise PartIdProjectionError("Part-ID SAM3 selected shape candidate is missing")
+    seed_pixels = selected.get("cad_shape_seed_pixels")
+    shape_iou = selected.get("cad_shape_iou")
+    area_agreement = selected.get("cad_shape_area_agreement")
+    if (
+        isinstance(seed_pixels, bool)
+        or not isinstance(seed_pixels, int)
+        or seed_pixels < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS
+        or isinstance(shape_iou, bool)
+        or not isinstance(shape_iou, (int, float))
+        or not math.isfinite(float(shape_iou))
+        or float(shape_iou) < DEFAULT_MINIMUM_CAD_SHAPE_IOU
+        or isinstance(area_agreement, bool)
+        or not isinstance(area_agreement, (int, float))
+        or not math.isfinite(float(area_agreement))
+        or float(area_agreement) < DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
+        or selected.get("cad_shape_location_invariant") is not True
+    ):
+        raise PartIdProjectionError(
+            "Part-ID SAM3 selected candidate failed the CAD shape contract"
+        )
+    return copy.deepcopy(dict(selected))
 
 
 def _open_bgr(path: Path, label: str) -> np.ndarray:
@@ -1530,10 +1593,11 @@ def build_part_id_reference_evidence(
 ) -> dict[str, Any]:
     """Build box-first evidence for every visible CAD Part ID.
 
-    A projected Part-ID bounding box is the correspondence authority shown to
-    retrieval and Qwen.  The renderer-authored projected mask remains a
-    private sampling core for robust colour/PBR statistics; it is not treated
-    as a photo segmentation result.
+    A projected Part-ID bounding box is only the coarse correspondence and
+    local-search authority.  When a location-independent CAD-shape check
+    accepts a SAM3 candidate, the SAM3 instance boundary becomes the photo
+    sampling authority.  Otherwise the renderer-authored projection remains
+    an explicitly audited fallback, never a claimed photo segmentation.
     """
 
     if (
@@ -1685,9 +1749,11 @@ def build_part_id_reference_evidence(
                 raise PartIdProjectionError(
                     f"Part-ID SAM3 mask hash mismatch for {identity}"
                 )
+            shape_candidate = _selected_cad_shape_candidate(raw)
             refinement_by_identity[identity] = {
                 "mask_path": mask_path,
                 "record": raw,
+                "shape_candidate": shape_candidate,
             }
 
     source_views = manifest.get("source_views")
@@ -1982,7 +2048,7 @@ def build_part_id_reference_evidence(
                     # for evidence sampling. The USD/CAD transform is never
                     # edited, so this tolerates photographed movable parts
                     # without deforming the asset.
-                    registered_projection, registration = _register_similarity_mask(
+                    _registered_projection, registration = _register_similarity_mask(
                         sampling_projection,
                         refined,
                     )
@@ -1997,25 +2063,28 @@ def build_part_id_reference_evidence(
                         and float(registration["recall"]) >= registered_recall_floor
                     )
                     if refinement_geometry_passed:
-                        registered_intersection = cv2.bitwise_and(
-                            registered_projection,
+                        # The CAD silhouette has now served both of its valid
+                        # roles: locating the SAM3 search box and verifying the
+                        # selected instance shape under a bounded similarity
+                        # fit.  The photographed SAM3 boundary is the final
+                        # pixel authority.  Intersecting it with the original
+                        # projection here would re-introduce the very camera
+                        # residual that local segmentation is meant to remove.
+                        refined_interior = cv2.erode(
                             refined,
-                        )
-                        registered_interior = cv2.erode(
-                            registered_intersection,
                             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
                             iterations=1,
                         )
                         trusted_mask = (
-                            registered_interior
-                            if int(np.count_nonzero(registered_interior))
+                            refined_interior
+                            if int(np.count_nonzero(refined_interior))
                             >= minimum_projected_pixels
-                            else registered_intersection
+                            else refined
                         )
                         boundary_policy = (
-                            "one_pixel_registered_cad_sam3_intersection_interior"
+                            "one_pixel_shape_guided_sam3_photo_mask_interior"
                         )
-                        refinement_status = "applied_as_intersection_guard"
+                        refinement_status = "applied_as_photo_instance_mask"
                     else:
                         # SAM3 often merges a small CAD child with its parent.
                         # Preserve coverage using only the global CAD
@@ -2039,16 +2108,23 @@ def build_part_id_reference_evidence(
                             if refinement_geometry_passed
                             else "whole_asset_similarity_cad_part_id_projection"
                         ),
-                        "per_part_geometric_warp_applied": (
-                            refinement_geometry_passed
-                        ),
+                        "per_part_geometric_warp_applied": (refinement_geometry_passed),
                         "mask": str(refined_record["mask_path"]),
                         "mask_sha256": _sha256_file(refined_record["mask_path"]),
                         "coarse_refined_intersection_pixels": intersection,
                         "coarse_refined_overlap_smaller": round(overlap_smaller, 8),
                         "refined_to_coarse_area_ratio": round(area_ratio, 8),
                         "registration": registration,
-                        "trusted_intersection_pixels": (
+                        "shape_candidate": copy.deepcopy(
+                            refined_record["shape_candidate"]
+                        ),
+                        "cad_projection_role": "location_and_shape_prior_only",
+                        "photo_mask_authority": (
+                            "sam3_shape_selected_local_instance_boundary"
+                            if refinement_geometry_passed
+                            else None
+                        ),
+                        "trusted_photo_mask_pixels": (
                             int(np.count_nonzero(trusted_mask))
                             if refinement_geometry_passed
                             else None
@@ -2084,9 +2160,9 @@ def build_part_id_reference_evidence(
                 boundary_policy = "single_view_part_id_dominant_chromatic_component"
                 chromatic_coverage["applied"] = True
                 chromatic_coverage["tiny_part_rescue"] = tiny_projection
-                chromatic_coverage["pre_isolation_foreground_pixels"] = (
-                    foreground_trusted_pixels
-                )
+                chromatic_coverage[
+                    "pre_isolation_foreground_pixels"
+                ] = foreground_trusted_pixels
             else:
                 chromatic_coverage["applied"] = False
                 chromatic_coverage["tiny_part_rescue"] = False
@@ -2125,11 +2201,14 @@ def build_part_id_reference_evidence(
                     f"unable to write Part-ID box mask {box_mask_path}"
                 )
 
-            isolated_left, isolated_top, isolated_right, isolated_bottom = (
-                _expanded_mask_box(
-                    trusted_mask,
-                    padding_fraction=0.10,
-                )
+            (
+                isolated_left,
+                isolated_top,
+                isolated_right,
+                isolated_bottom,
+            ) = _expanded_mask_box(
+                trusted_mask,
+                padding_fraction=0.10,
             )
             crop_rgb = reference["image"][
                 isolated_top:isolated_bottom,
@@ -2172,6 +2251,10 @@ def build_part_id_reference_evidence(
             Image.fromarray(boxed_crop, mode="RGB").save(crop_path)
 
             sampled_rgb = reference["image"][trusted_mask > 0]
+            photo_part_segmentation_applied = bool(
+                isinstance(refinement_audit, Mapping)
+                and refinement_audit.get("applied") is True
+            )
             record = records[part_id]
             record["_rgb_samples"].append(sampled_rgb)
             view_mvinverse = _sample_mvinverse(
@@ -2197,7 +2280,11 @@ def build_part_id_reference_evidence(
                     "crop_sha256": _sha256_file(crop_path),
                     "isolated_crop": str(isolated_crop_path.resolve(strict=True)),
                     "isolated_crop_sha256": _sha256_file(isolated_crop_path),
-                    "correspondence_mode": ("cad_projected_part_id_bounding_box"),
+                    "correspondence_mode": (
+                        "cad_box_shape_guided_sam3_photo_instance"
+                        if photo_part_segmentation_applied
+                        else "cad_projected_part_id_bounding_box"
+                    ),
                     "projected_box_xyxy": list(raw_box),
                     "target_box_xyxy": list(target_box),
                     "context_box_xyxy": list(context_box),
@@ -2222,16 +2309,19 @@ def build_part_id_reference_evidence(
                         "camera_alignment_evidence_weight"
                     ],
                     "evidence_authority": (
-                        "sam3_local_component_intersect_globally_fitted_"
-                        "whole_asset_cad_part_id_projection_and_human_"
-                        "sam3_foreground"
-                        if refinement_audit is not None
+                        "sam3_shape_selected_local_photo_instance_mask_"
+                        "validated_by_cad_shape_prior"
+                        if photo_part_segmentation_applied
                         else "globally_fitted_whole_asset_cad_part_id_"
                         "projection_intersect_human_sam3_foreground"
                     ),
-                    "photo_part_segmentation_applied": False,
+                    "photo_part_segmentation_applied": (
+                        photo_part_segmentation_applied
+                    ),
                     "sampling_core_authority": (
-                        "renderer_authored_cad_projection_for_color_and_pbr_only"
+                        "sam3_photo_instance_mask_for_color_and_pbr"
+                        if photo_part_segmentation_applied
+                        else "renderer_authored_cad_projection_for_color_and_pbr_only"
                     ),
                     "part_id_sam3_refinement": refinement_audit,
                 }
@@ -2352,13 +2442,14 @@ def build_part_id_reference_evidence(
             else "whole_workpiece_foreground_only"
         ),
         "part_segmentation_authority": (
-            "sam3_local_component_intersected_with_whole_asset_similarity_"
-            "cad_part_id_projection"
+            "shape_guided_sam3_photo_instance_when_valid_otherwise_"
+            "audited_cad_projection_fallback"
             if refinement is not None
             else "renderer_authored_cad_part_id_masks"
         ),
         "part_correspondence_authority": (
-            "whole_asset_camera_then_cad_box_prompted_local_part_similarity"
+            "whole_asset_camera_then_cad_box_search_then_location_invariant_"
+            "cad_shape_selected_sam3_instance"
             if refinement is not None
             else "cad_projected_part_id_bounding_boxes"
         ),
@@ -2845,9 +2936,10 @@ def _apply_part_id_coating_consistency(
         }
         profile = tuning_profile_for_material(canonical_material_id)
         if allow_color_parameters and profile is not None:
-            canonical_parameters, authored_color_audit = (
-                color_parameters_for_target_srgb(profile, canonical_color)
-            )
+            (
+                canonical_parameters,
+                authored_color_audit,
+            ) = color_parameters_for_target_srgb(profile, canonical_color)
             canonical_color_audit = {
                 "status": "authored",
                 "material_id": canonical_material_id,
@@ -2875,16 +2967,13 @@ def _apply_part_id_coating_consistency(
                         canonical_color_audit = copy.deepcopy(dict(raw_color_audit))
 
         member_part_ids = sorted(str(row["part_id"]) for row in rows)
-        component_id = (
-            "CC_"
-            + _canonical_sha256(
-                {
-                    "assembly_domain": proposal["assembly_domain"],
-                    "source_appearance_sha256": proposal["source_appearance_sha256"],
-                    "member_part_ids": member_part_ids,
-                }
-            )[:12]
-        )
+        component_id = "CC_" + _canonical_sha256(
+            {
+                "assembly_domain": proposal["assembly_domain"],
+                "source_appearance_sha256": proposal["source_appearance_sha256"],
+                "member_part_ids": member_part_ids,
+            }
+        )[:12]
         pre_materials: dict[str, str] = {}
         for row in rows:
             part_id = str(row["part_id"])
@@ -2907,9 +2996,9 @@ def _apply_part_id_coating_consistency(
                 provenance = {}
                 assignment["provenance"] = provenance
             provenance["pre_coating_consistency_material_id"] = pre_material
-            provenance["selection_basis"] = (
-                "part_id_independent_evidence_then_safe_same_coating_consistency"
-            )
+            provenance[
+                "selection_basis"
+            ] = "part_id_independent_evidence_then_safe_same_coating_consistency"
             provenance["mdl_color_parameterization"] = copy.deepcopy(
                 canonical_color_audit
             )
@@ -3138,17 +3227,11 @@ def build_part_id_material_plan(
                     "insufficient_evidence",
                 }
                 or isinstance(prediction.get("substrate_confidence"), bool)
-                or not isinstance(
-                    prediction.get("substrate_confidence"), (int, float)
-                )
+                or not isinstance(prediction.get("substrate_confidence"), (int, float))
                 or isinstance(prediction.get("species_confidence"), bool)
-                or not isinstance(
-                    prediction.get("species_confidence"), (int, float)
-                )
+                or not isinstance(prediction.get("species_confidence"), (int, float))
                 or isinstance(prediction.get("treatment_confidence"), bool)
-                or not isinstance(
-                    prediction.get("treatment_confidence"), (int, float)
-                )
+                or not isinstance(prediction.get("treatment_confidence"), (int, float))
                 or isinstance(prediction.get("confidence"), bool)
                 or not isinstance(prediction.get("confidence"), (int, float))
                 or not math.isfinite(float(prediction["confidence"]))
@@ -3341,11 +3424,7 @@ def build_part_id_material_plan(
                 else "part_id_siglip2_dinov2_mvinverse_fused_rank_1"
             ),
             "selected_retrieval_rank": int(selected_row.get("rank", 1)),
-            "qwen_confidence": (
-                qwen_confidence
-                if qwen_material is not None
-                else None
-            ),
+            "qwen_confidence": (qwen_confidence if qwen_material is not None else None),
             "candidate_material_ids": candidates,
             "evidence_mask_sha256s": sorted([str(selected_observation["mask_sha256"])]),
         }

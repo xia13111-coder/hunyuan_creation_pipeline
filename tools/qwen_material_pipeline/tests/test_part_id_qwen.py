@@ -26,6 +26,7 @@ from qwen_material_pipeline.workflows.part_id_qwen import (
     _promote_library_gap_candidates,
     _rank_identity_candidates_with_pbr,
     _refine_component_memberships_with_final_evidence,
+    _shape_guided_exact_preset_eligible,
     _target_appearance,
     _validate_batch,
     _write_grayscale_identity_crop,
@@ -445,9 +446,7 @@ class PartIdQwenTests(unittest.TestCase):
             result["selections"][0]["selection_authority"],
             "unique_full_catalog_physical_contract",
         )
-        self.assertEqual(
-            result["summary"]["direct_exact_library_assignment_count"], 1
-        )
+        self.assertEqual(result["summary"]["direct_exact_library_assignment_count"], 1)
         self.assertEqual(
             result["visual_compatibility_gate"]["parts"][0]["authorized_material_ids"],
             [paint_matte, paint_gloss],
@@ -464,12 +463,12 @@ class PartIdQwenTests(unittest.TestCase):
             isolated = root / "isolated.png"
             context = root / "context.png"
             output = root / "sheet.png"
-            Image.fromarray(
-                np.full((18, 30, 3), (220, 30, 15), dtype=np.uint8)
-            ).save(isolated)
-            Image.fromarray(
-                np.full((30, 54, 3), (10, 180, 60), dtype=np.uint8)
-            ).save(context)
+            Image.fromarray(np.full((18, 30, 3), (220, 30, 15), dtype=np.uint8)).save(
+                isolated
+            )
+            Image.fromarray(np.full((30, 54, 3), (10, 180, 60), dtype=np.uint8)).save(
+                context
+            )
 
             _write_grayscale_identity_crop(
                 isolated,
@@ -548,13 +547,11 @@ class PartIdQwenTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             crop = root / "P0001.png"
-            Image.fromarray(
-                np.full((24, 24, 3), (18, 20, 22), dtype=np.uint8)
-            ).save(crop)
-            generic = "mdl:Aluminum_Anodized.mdl#Aluminum_Anodized"
-            black = (
-                "mdl:Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
+            Image.fromarray(np.full((24, 24, 3), (18, 20, 22), dtype=np.uint8)).save(
+                crop
             )
+            generic = "mdl:Aluminum_Anodized.mdl#Aluminum_Anodized"
+            black = "mdl:Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
             blue = "mdl:Aluminum_Anodized_Blue.mdl#Aluminum_Anodized_Blue"
             semantics = self._surface_semantics(
                 "metal",
@@ -620,9 +617,7 @@ class PartIdQwenTests(unittest.TestCase):
             "EXACT_LIBRARY_MATCH",
         )
         self.assertEqual(result["summary"]["exact_library_match_count"], 1)
-        self.assertEqual(
-            result["summary"]["color_evidence_used_for_identity_count"], 1
-        )
+        self.assertEqual(result["summary"]["color_evidence_used_for_identity_count"], 1)
 
     def test_unconfirmed_specific_preset_uses_independent_grayscale_fallback(
         self,
@@ -630,15 +625,13 @@ class PartIdQwenTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             crop = root / "P0001.png"
-            Image.fromarray(
-                np.full((24, 24, 3), (18, 20, 22), dtype=np.uint8)
-            ).save(crop)
+            Image.fromarray(np.full((24, 24, 3), (18, 20, 22), dtype=np.uint8)).save(
+                crop
+            )
             generic = "mdl:Aluminum_Anodized.mdl#Aluminum_Anodized"
             black = "mdl:Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
             blue = "mdl:Aluminum_Anodized_Blue.mdl#Aluminum_Anodized_Blue"
-            semantics = self._surface_semantics(
-                "metal", "anodized", finish="matte"
-            )
+            semantics = self._surface_semantics("metal", "anodized", finish="matte")
             runner = _TwoStageCorrespondingRunner()
             result = run_part_id_qwen_rerank(
                 evidence={
@@ -698,9 +691,7 @@ class PartIdQwenTests(unittest.TestCase):
             selection["selection_authority"],
             "grayscale_corresponding_material_second_pass",
         )
-        self.assertEqual(
-            selection["exact_preset_decision"]["material_id"], generic
-        )
+        self.assertEqual(selection["exact_preset_decision"]["material_id"], generic)
         self.assertEqual(
             result["corresponding_material_qwen_selections"][0]["material_id"],
             generic,
@@ -805,9 +796,7 @@ class PartIdQwenTests(unittest.TestCase):
             [row["material_id"] for row in shortlist],
             ["mdl:A_Paint.mdl#A_Paint", "mdl:B_Bare.mdl#B_Bare"],
         )
-        self.assertEqual(
-            [row["original_retrieval_rank"] for row in shortlist], [1, 2]
-        )
+        self.assertEqual([row["original_retrieval_rank"] for row in shortlist], [1, 2])
         self.assertTrue(all(row["color_evidence_used"] is False for row in shortlist))
 
     def test_full_catalog_pbr_fingerprint_can_authorize_unique_exact_match(
@@ -950,19 +939,14 @@ class PartIdQwenTests(unittest.TestCase):
         self.assertTrue(by_id[black]["specific_library_preset"])
         self.assertTrue(by_id[blue]["specific_library_preset"])
         self.assertTrue(
-            all(
-                row["generic_identity_material_id"] == generic
-                for row in filtered
-            )
+            all(row["generic_identity_material_id"] == generic for row in filtered)
         )
 
     def test_material_species_hard_filter_keeps_copper_out_of_chrome_and_steel(
         self,
     ) -> None:
         copper = "mdl:Metals/Copper.mdl#Copper"
-        brushed_copper = (
-            "mdl:Metals/Brushed_Antique_Copper.mdl#Brushed_Antique_Copper"
-        )
+        brushed_copper = "mdl:Metals/Brushed_Antique_Copper.mdl#Brushed_Antique_Copper"
         chrome = "mdl:Metals/Chrome.mdl#Chrome"
         steel = "mdl:Metals/Steel_Stainless.mdl#Steel_Stainless"
         catalog = {
@@ -1002,12 +986,8 @@ class PartIdQwenTests(unittest.TestCase):
             {row["material_id"] for row in filtered},
             {copper, brushed_copper},
         )
-        self.assertTrue(
-            all(row["material_species"] == "copper" for row in filtered)
-        )
-        self.assertTrue(
-            all(row["exact_authored_preset_candidate"] for row in filtered)
-        )
+        self.assertTrue(all(row["material_species"] == "copper" for row in filtered))
+        self.assertTrue(all(row["exact_authored_preset_candidate"] for row in filtered))
 
     def test_component_consensus_enforces_one_exact_mdl(self) -> None:
         selections, audit = _apply_component_identity_consensus(
@@ -1118,9 +1098,7 @@ class PartIdQwenTests(unittest.TestCase):
 
         self.assertEqual(refined["AC_green"], ["P1", "P2", "P3"])
         self.assertEqual(audit["summary"]["added_member_count"], 1)
-        self.assertEqual(
-            audit["components"][0]["added_members"][0]["part_id"], "P3"
-        )
+        self.assertEqual(audit["components"][0]["added_members"][0]["part_id"], "P3")
         self.assertGreaterEqual(
             audit["components"][0]["added_members"][0]["spatial_support"],
             0.60,
@@ -1231,9 +1209,9 @@ class PartIdQwenTests(unittest.TestCase):
                         "descriptor": {"surface_class": surface},
                         "observations": [],
                     }
-                    {"Body": body_ids, "Cap": cap_ids, "Tip": tip_ids}[
-                        role
-                    ].append(part_id)
+                    {"Body": body_ids, "Cap": cap_ids, "Tip": tip_ids}[role].append(
+                        part_id
+                    )
             registry = {
                 "schema_version": "qwen-material-parts/v1",
                 "parts": registry_parts,
@@ -1247,20 +1225,23 @@ class PartIdQwenTests(unittest.TestCase):
                     ensure_ascii=False,
                 ).encode("utf-8")
             ).hexdigest()
-            components, audit, strict_ids, scopes = (
-                _apply_repeated_assembly_role_constraints(
-                    evidence={
-                        "inputs": [
-                            {
-                                "label": "rendered_registry",
-                                "path": str(registry_path),
-                                "document_sha256": document_sha256,
-                            }
-                        ]
-                    },
-                    part_by_id=part_by_id,
-                    component_members={"AC_body": body_ids},
-                )
+            (
+                components,
+                audit,
+                strict_ids,
+                scopes,
+            ) = _apply_repeated_assembly_role_constraints(
+                evidence={
+                    "inputs": [
+                        {
+                            "label": "rendered_registry",
+                            "path": str(registry_path),
+                            "document_sha256": document_sha256,
+                        }
+                    ]
+                },
+                part_by_id=part_by_id,
+                component_members={"AC_body": body_ids},
             )
 
         self.assertEqual(audit["summary"]["repeated_structure_count"], 1)
@@ -1324,9 +1305,7 @@ class PartIdQwenTests(unittest.TestCase):
             audit["components"][0]["consensus_mode"],
             "REPEATED_ROLE_JOINT_CONSENSUS",
         )
-        self.assertTrue(
-            audit["components"][0]["exact_shared_material_enforced"]
-        )
+        self.assertTrue(audit["components"][0]["exact_shared_material_enforced"])
 
     def test_component_consensus_never_overwrites_conflicting_exact_presets(
         self,
@@ -1439,9 +1418,7 @@ class PartIdQwenTests(unittest.TestCase):
                         {
                             "material_id": rubber,
                             "family": "plastic",
-                            "surface_semantics": self._surface_semantics(
-                                "elastomer"
-                            ),
+                            "surface_semantics": self._surface_semantics("elastomer"),
                         },
                     ]
                 },
@@ -1463,10 +1440,7 @@ class PartIdQwenTests(unittest.TestCase):
 
             grayscale = np.asarray(
                 Image.open(
-                    root
-                    / "qwen"
-                    / "identity_evidence_grayscale"
-                    / "P0001_front_01.png"
+                    root / "qwen" / "identity_evidence_grayscale" / "P0001_front_01.png"
                 )
             )
 
@@ -1477,9 +1451,7 @@ class PartIdQwenTests(unittest.TestCase):
             {"AC_1"},
         )
         self.assertEqual(
-            result["component_identity_consensus"]["summary"][
-                "constrained_part_count"
-            ],
+            result["component_identity_consensus"]["summary"]["constrained_part_count"],
             2,
         )
         self.assertTrue(np.array_equal(grayscale[:, :, 0], grayscale[:, :, 1]))
@@ -1641,9 +1613,7 @@ class PartIdQwenTests(unittest.TestCase):
                         "material_id": "mdl:Aluminum_Anodized_Black",
                         "selection_allowed": True,
                         "specific_library_preset": True,
-                        "generic_identity_material_id": (
-                            "mdl:Aluminum_Anodized"
-                        ),
+                        "generic_identity_material_id": ("mdl:Aluminum_Anodized"),
                     },
                     {
                         "candidate_index": 2,
@@ -1681,12 +1651,90 @@ class PartIdQwenTests(unittest.TestCase):
             "specific_preset_to_generic_corresponding_fallback",
         )
 
+    def test_exact_preset_requires_shape_guided_photo_instance_evidence(
+        self,
+    ) -> None:
+        specific = "mdl:Aluminum_Anodized_Black"
+        generic = "mdl:Aluminum_Anodized"
+        expected = [
+            {
+                "part_id": "P0001",
+                "candidates": [
+                    {
+                        "candidate_index": 1,
+                        "material_id": specific,
+                        "selection_allowed": True,
+                        "specific_library_preset": True,
+                        "generic_identity_material_id": generic,
+                        "exact_preset_evidence_eligible": False,
+                        "exact_preset_color_gate_passed": None,
+                    },
+                    {
+                        "candidate_index": 2,
+                        "material_id": generic,
+                        "selection_allowed": True,
+                        "specific_library_preset": False,
+                        "exact_preset_evidence_eligible": False,
+                    },
+                ],
+            }
+        ]
+
+        selections = _validate_batch(
+            {
+                "schema_version": MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION,
+                "selections": [
+                    {
+                        "part_id": "P0001",
+                        "candidate_index": 1,
+                        "match_type": "EXACT_LIBRARY_MATCH",
+                        "confidence": 0.9,
+                    }
+                ],
+            },
+            expected=expected,
+            require_material_identity_match=True,
+        )
+
+        self.assertEqual(selections[0]["material_id"], generic)
+        self.assertEqual(selections[0]["match_type"], "CORRESPONDING_MATERIAL")
+        self.assertEqual(
+            selections[0]["index_resolution"],
+            "specific_preset_to_generic_corresponding_fallback",
+        )
+
+    def test_shape_guided_exact_evidence_rejects_tiny_or_projection_only_mask(
+        self,
+    ) -> None:
+        precise = {
+            "photo_part_segmentation_applied": True,
+            "trusted_foreground_pixels": 64,
+            "part_id_sam3_refinement": {
+                "applied": True,
+                "shape_candidate": {
+                    "cad_shape_location_invariant": True,
+                    "cad_shape_iou": 0.82,
+                },
+            },
+        }
+        self.assertTrue(_shape_guided_exact_preset_eligible(precise, required=True))
+        self.assertFalse(
+            _shape_guided_exact_preset_eligible(
+                {**precise, "trusted_foreground_pixels": 6},
+                required=True,
+            )
+        )
+        self.assertFalse(
+            _shape_guided_exact_preset_eligible(
+                {**precise, "photo_part_segmentation_applied": False},
+                required=True,
+            )
+        )
+
     def test_identity_specific_preset_is_promoted_after_measured_confirmation(
         self,
     ) -> None:
-        copper = (
-            "mdl:Metals/Brushed_Antique_Copper.mdl#Brushed_Antique_Copper"
-        )
+        copper = "mdl:Metals/Brushed_Antique_Copper.mdl#Brushed_Antique_Copper"
         expected = [
             {
                 "part_id": "P0161",
@@ -1767,9 +1815,7 @@ class PartIdQwenTests(unittest.TestCase):
             require_material_identity_match=True,
         )
 
-        self.assertEqual(
-            selections[0]["match_type"], "CORRESPONDING_MATERIAL"
-        )
+        self.assertEqual(selections[0]["match_type"], "CORRESPONDING_MATERIAL")
         self.assertEqual(selections[0]["material_species"], "copper")
 
     def test_exact_preset_with_measured_color_mismatch_is_rejected(self) -> None:
@@ -1813,9 +1859,7 @@ class PartIdQwenTests(unittest.TestCase):
         )
 
         self.assertEqual(selections[0]["material_id"], "mdl:Paint_Matte")
-        self.assertEqual(
-            selections[0]["match_type"], "CORRESPONDING_MATERIAL"
-        )
+        self.assertEqual(selections[0]["match_type"], "CORRESPONDING_MATERIAL")
         self.assertEqual(
             selections[0]["index_resolution"],
             "exact_preset_color_gate_rejected_to_generic",
@@ -1929,13 +1973,9 @@ class PartIdQwenTests(unittest.TestCase):
             },
         )
         self.assertFalse(audit["previous_material_plan_consulted"])
-        self.assertEqual(
-            audit["summary"]["fresh_local_baseline_selected_count"], 3
-        )
+        self.assertEqual(audit["summary"]["fresh_local_baseline_selected_count"], 3)
         chromatic_audit = next(
-            row
-            for row in audit["parts"]
-            if row["part_id"] == "P_CHROMATIC"
+            row for row in audit["parts"] if row["part_id"] == "P_CHROMATIC"
         )
         self.assertTrue(chromatic_audit["strict_color_nonregression"])
         self.assertEqual(chromatic_audit["maximum_local_score_regression"], 0.0)
@@ -1991,25 +2031,19 @@ class PartIdQwenTests(unittest.TestCase):
         )
         self.assertEqual(rows[0]["material_id"], "mdl:Paint.mdl#Paint")
         self.assertTrue(
-            next(
-                row
-                for row in rows
-                if row["material_id"] == "mdl:Glass.mdl#Glass"
-            )["transmission_risk"]
+            next(row for row in rows if row["material_id"] == "mdl:Glass.mdl#Glass")[
+                "transmission_risk"
+            ]
         )
         self.assertFalse(
-            next(
-                row
-                for row in rows
-                if row["material_id"] == "mdl:Glass.mdl#Glass"
-            )["selection_allowed"]
+            next(row for row in rows if row["material_id"] == "mdl:Glass.mdl#Glass")[
+                "selection_allowed"
+            ]
         )
         self.assertTrue(
-            next(
-                row
-                for row in rows
-                if row["material_id"] == "mdl:Grass.mdl#Grass"
-            )["texture_mismatch_risk"]
+            next(row for row in rows if row["material_id"] == "mdl:Grass.mdl#Grass")[
+                "texture_mismatch_risk"
+            ]
         )
 
     def test_chromatic_gate_rejects_gray_default_but_accepts_color_tunable_mdl(
@@ -2075,9 +2109,7 @@ class PartIdQwenTests(unittest.TestCase):
             candidate_count=2,
             allow_color_tuning=True,
         )
-        mutable_vinyl = next(
-            row for row in mutable_rows if row["material_id"] == vinyl
-        )
+        mutable_vinyl = next(row for row in mutable_rows if row["material_id"] == vinyl)
         self.assertTrue(mutable_vinyl["color_tunable"])
         self.assertTrue(mutable_vinyl["color_gate_passed"])
         self.assertTrue(mutable_vinyl["selection_allowed"])
@@ -2124,13 +2156,10 @@ class PartIdQwenTests(unittest.TestCase):
                 "mdl:Plastics/Vinyl.mdl#Vinyl",
             ],
         )
-        self.assertTrue(
-            all(row["conditional_h1_evaluation"] for row in promoted)
-        )
+        self.assertTrue(all(row["conditional_h1_evaluation"] for row in promoted))
         self.assertTrue(
             all(
-                row["relaxed_constraints"] == ["default_color_gate"]
-                for row in promoted
+                row["relaxed_constraints"] == ["default_color_gate"] for row in promoted
             )
         )
         self.assertEqual(
