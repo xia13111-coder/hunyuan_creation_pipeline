@@ -17,6 +17,7 @@ from qwen_material_pipeline.workflows.part_id_qwen import (
     _apply_component_identity_consensus,
     _apply_part_id_selective_regression,
     _apply_repeated_assembly_role_constraints,
+    _annotate_library_preset_variants,
     _compatibility_shortlist,
     _direct_exact_library_match,
     _family_filtered_ranking,
@@ -941,6 +942,25 @@ class PartIdQwenTests(unittest.TestCase):
         self.assertTrue(
             all(row["generic_identity_material_id"] == generic for row in filtered)
         )
+
+    def test_color_named_material_without_generic_is_not_a_preset_variant(
+        self,
+    ) -> None:
+        silver = "mdl:Metals/Silver.mdl#Silver"
+        annotated = _annotate_library_preset_variants(
+            [{"rank": 1, "material_id": silver}],
+            catalog_by_id={
+                silver: {
+                    "material_id": silver,
+                    "surface_semantics": self._surface_semantics("metal"),
+                }
+            },
+        )
+
+        self.assertEqual(len(annotated), 1)
+        self.assertIsNone(annotated[0]["generic_identity_material_id"])
+        self.assertFalse(annotated[0]["specific_library_preset"])
+        self.assertEqual(annotated[0]["material_species"], "silver")
 
     def test_material_species_hard_filter_keeps_copper_out_of_chrome_and_steel(
         self,

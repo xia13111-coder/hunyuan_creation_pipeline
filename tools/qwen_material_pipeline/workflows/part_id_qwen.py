@@ -967,8 +967,16 @@ def _annotate_library_preset_variants(
             material_id = str(row["material_id"])
             row["colorless_identity_key"] = list(key)
             row["generic_identity_material_id"] = generic_material_id
+            # ``specific_library_preset`` means an authored variant that can
+            # safely fall back to another, generic MDL for the same physical
+            # identity.  A material whose name happens to contain a colour
+            # token (for example elemental ``Silver``) is not a preset variant
+            # when no such generic counterpart exists.  Marking it as one made
+            # the corresponding-material pass demand an impossible fallback
+            # and abort an otherwise valid full-catalog selection.
             row["specific_library_preset"] = (
-                generic_material_id is None or material_id != generic_material_id
+                generic_material_id is not None
+                and material_id != generic_material_id
             )
             species = str(
                 row.get(
