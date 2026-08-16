@@ -67,3 +67,35 @@ def test_selection_rejects_neighboring_identical_component() -> None:
     neighbor = next(row for row in audit if row["prediction_index"] == 0)
     assert neighbor["accepted"] is False
     assert "cad_centroid_too_far_from_registered_part" in neighbor["reason_codes"]
+
+
+def test_selection_uses_bounded_shared_camera_residual_for_direct_shape_match() -> None:
+    source = np.zeros((100, 120, 3), dtype=np.uint8)
+    seed = np.zeros((100, 120), dtype=bool)
+    shifted = np.zeros_like(seed)
+    seed[30:60, 40:60] = True
+    shifted[32:62, 42:62] = True
+
+    selected, audit = _select_candidate(
+        [
+            {
+                "source": "cad_local_crop",
+                "prediction_index": 0,
+                "model_score": 0.8,
+                "mask": shifted,
+            }
+        ],
+        seed=seed,
+        source_image=source,
+        minimum_shape_iou=0.5,
+        minimum_area_agreement=0.5,
+        maximum_centroid_distance=0.15,
+        box=[250, 200, 700, 800],
+    )
+
+    assert selected is not None
+    row = audit[0]
+    assert row["cad_template_alignment"]["translation_xy_pixels"] == [2.0, 2.0]
+    assert row["cad_template_alignment"]["per_mesh_pose_change_allowed"] is False
+    assert row["cad_direct_iou"] == 1.0
+    assert row["registered_cad_centroid_distance_normalized"] > 0.0

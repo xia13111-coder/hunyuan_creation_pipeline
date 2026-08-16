@@ -54,6 +54,11 @@ DEFAULT_MINIMUM_MASK_PIXELS = 32
 DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS = 16
 DEFAULT_MINIMUM_CAD_SHAPE_IOU = 0.50
 DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT = 0.50
+DEFAULT_MINIMUM_ALIGNED_CAD_OVERLAP_SMALLER = 0.55
+DEFAULT_MAXIMUM_ALIGNED_CAD_AREA_RATIO = 1.60
+DEFAULT_MAXIMUM_FINAL_SAM_TO_CAD_AREA_RATIO = 1.15
+DEFAULT_MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION = 0.04
+DEFAULT_MAXIMUM_NEIGHBOR_NEGATIVE_TARGET_PIXELS = 4096
 CAD_SHAPE_NORMALIZATION_SIZE = 96
 CROSS_GROUP_NEAR_DUPLICATE_IOU = 0.90
 CROSS_GROUP_ARBITRATION_SCHEMA_VERSION = (
@@ -723,15 +728,21 @@ def _segment_points(
         raise Sam3RegionError(str(exc)) from exc
 
 
-def _shape_seed_click_set(
+def _bounded_shared_camera_alignment(
     cad_seed: Any,
     coarse_candidate: Any,
     *,
     box: Sequence[int],
     width: int,
     height: int,
-) -> tuple[dict[str, list[list[int]]], dict[str, Any]]:
-    """Turn a CAD silhouette into bounded automatic SAM3 point prompts."""
+) -> tuple[Any, dict[str, Any]]:
+    """Align a rendered Part-ID silhouette without changing its 3-D pose.
+
+    The silhouette already comes from the calibrated whole-asset camera.  A
+    residual 2-D translation is therefore the only permitted correction: no
+    per-mesh rotation, scale, or deformation is inferred here.  The coarse
+    photo proposal is used only to estimate that bounded image-plane residual.
+    """
 
     import cv2
     import numpy as np
@@ -749,13 +760,16 @@ def _shape_seed_click_set(
             raise Sam3RegionError("automatic shape point mask is empty")
         return float(xs.mean()), float(ys.mean())
 
-    seed_x, seed_y = centroid(seed)
+    seed_center_x, seed_center_y = centroid(seed)
     coarse_x, coarse_y = centroid(coarse)
     left, top, right, bottom = _box_pixels(box, width=width, height=height)
-    maximum_dx = max(2.0, 0.20 * (right - left))
-    maximum_dy = max(2.0, 0.20 * (bottom - top))
-    dx = float(np.clip(coarse_x - seed_x, -maximum_dx, maximum_dx))
-    dy = float(np.clip(coarse_y - seed_y, -maximum_dy, maximum_dy))
+    seed_rows, seed_columns = np.where(seed)
+    seed_width = int(seed_columns.max() - seed_columns.min() + 1)
+    seed_height = int(seed_rows.max() - seed_rows.min() + 1)
+    maximum_dx = max(2.0, min(0.20 * (right - left), 0.75 * seed_width))
+    maximum_dy = max(2.0, min(0.20 * (bottom - top), 0.75 * seed_height))
+    dx = float(np.clip(coarse_x - seed_center_x, -maximum_dx, maximum_dx))
+    dy = float(np.clip(coarse_y - seed_center_y, -maximum_dy, maximum_dy))
     shifted = cv2.warpAffine(
         seed.astype(np.uint8),
         np.asarray([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32),
@@ -763,8 +777,47 @@ def _shape_seed_click_set(
         flags=cv2.INTER_NEAREST,
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
+    ) > 0
+    return shifted, {
+        "translation_xy_pixels": [round(dx, 8), round(dy, 8)],
+        "maximum_translation_xy_pixels": [
+            round(maximum_dx, 8),
+            round(maximum_dy, 8),
+        ],
+        "alignment_model": (
+            "shared_whole_asset_camera_bounded_image_translation_only"
+        ),
+        "per_mesh_pose_change_allowed": False,
+    }
+
+
+def _shape_seed_click_set(
+    cad_seed: Any,
+    coarse_candidate: Any,
+    *,
+    box: Sequence[int],
+    width: int,
+    height: int,
+    other_part_seeds: Any | None = None,
+) -> tuple[dict[str, list[list[int]]], dict[str, Any]]:
+    """Turn a same-view CAD silhouette into automatic SAM3 prompts.
+
+    Positive points come from the selected Part-ID template.  Nearby rendered
+    Part-ID templates contribute negative points, which prevents repeated
+    bolts, knobs, and touching panels from claiming one another.
+    """
+
+    import cv2
+    import numpy as np
+
+    shifted, alignment_audit = _bounded_shared_camera_alignment(
+        cad_seed,
+        coarse_candidate,
+        box=box,
+        width=width,
+        height=height,
     )
-    distance = cv2.distanceTransform(shifted, cv2.DIST_L2, 5)
+    distance = cv2.distanceTransform(shifted.astype(np.uint8), cv2.DIST_L2, 5)
     positive: list[tuple[int, int]] = []
     ranked = np.dstack(
         np.unravel_index(np.argsort(distance.ravel())[::-1], distance.shape)
@@ -789,13 +842,14 @@ def _shape_seed_click_set(
         raise Sam3RegionError("CAD shape seed produced no positive point")
 
     ring_radius = max(4, int(round(0.10 * diagonal)))
+    shifted_u8 = shifted.astype(np.uint8)
     inner = cv2.dilate(
-        shifted,
+        shifted_u8,
         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
         iterations=1,
     )
     outer = cv2.dilate(
-        shifted,
+        shifted_u8,
         cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE,
             (2 * ring_radius + 1, 2 * ring_radius + 1),
@@ -806,7 +860,10 @@ def _shape_seed_click_set(
     negative: list[tuple[int, int]] = []
     center_x = float(shifted_x.mean())
     center_y = float(shifted_y.mean())
-    for angle in np.linspace(0.0, 2.0 * math.pi, 8, endpoint=False):
+    ring_point_limit = 4 if other_part_seeds is not None else 8
+    for angle in np.linspace(
+        0.0, 2.0 * math.pi, ring_point_limit, endpoint=False
+    ):
         if not len(ring_x):
             break
         target_x = center_x + math.cos(float(angle)) * (0.5 * diagonal + ring_radius)
@@ -815,6 +872,44 @@ def _shape_seed_click_set(
         point = (int(ring_x[index]), int(ring_y[index]))
         if point not in negative:
             negative.append(point)
+
+    neighboring_negative_count = 0
+    if other_part_seeds is not None:
+        others = np.asarray(other_part_seeds, dtype=bool)
+        if others.shape != shifted.shape:
+            raise Sam3RegionError("neighbor CAD seed dimensions are incompatible")
+        exclusion = others & ~(
+            cv2.dilate(
+                shifted.astype(np.uint8),
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+                iterations=1,
+            )
+            > 0
+        )
+        left, top, right, bottom = _box_pixels(box, width=width, height=height)
+        local = np.zeros_like(exclusion)
+        local[top:bottom, left:right] = True
+        exclusion &= local
+        count, _labels, statistics, centroids = cv2.connectedComponentsWithStats(
+            exclusion.astype(np.uint8), connectivity=8
+        )
+        components: list[tuple[float, tuple[int, int]]] = []
+        for index in range(1, count):
+            if int(statistics[index, cv2.CC_STAT_AREA]) < 2:
+                continue
+            point = (
+                int(round(float(centroids[index][0]))),
+                int(round(float(centroids[index][1]))),
+            )
+            distance_to_target = math.hypot(
+                point[0] - center_x,
+                point[1] - center_y,
+            )
+            components.append((distance_to_target, point))
+        for _distance, point in sorted(components)[:4]:
+            if point not in negative:
+                negative.append(point)
+                neighboring_negative_count += 1
 
     def grid(point: tuple[int, int]) -> list[int]:
         x, y = point
@@ -827,10 +922,11 @@ def _shape_seed_click_set(
         "positive_points": [grid(point) for point in positive],
         "negative_points": [grid(point) for point in negative],
     }, {
-        "translation_xy_pixels": [round(dx, 8), round(dy, 8)],
-        "translation_policy": "coarse_sam_centroid_bounded_by_local_box",
+        **alignment_audit,
+        "translation_policy": "coarse_sam_centroid_bounded_by_shared_camera_seed",
         "positive_point_count": len(positive),
         "negative_point_count": len(negative),
+        "neighboring_part_negative_point_count": neighboring_negative_count,
         "ring_radius_pixels": ring_radius,
     }
 
@@ -847,8 +943,12 @@ def _segment_shape_guided_points(
     minimum_prompt_overlap: float,
     maximum_image_fraction: float,
     minimum_mask_pixels: int,
+    other_part_seeds: Any | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
     """Refine a coarse box result with CAD-derived positive/negative points."""
+
+    import cv2
+    import numpy as np
 
     click_set, prompt_audit = _shape_seed_click_set(
         cad_seed,
@@ -856,6 +956,7 @@ def _segment_shape_guided_points(
         box=box,
         width=image.width,
         height=image.height,
+        other_part_seeds=other_part_seeds,
     )
     selected, point_audit = _segment_points(
         model=model,
@@ -878,12 +979,88 @@ def _segment_shape_guided_points(
     if selected is None:
         result["reason_codes"].append("no_point_prediction_accepted")
         return None, result
+    aligned_seed = cv2.warpAffine(
+        np.asarray(cad_seed, dtype=np.uint8),
+        np.asarray(
+            [
+                [1.0, 0.0, prompt_audit["translation_xy_pixels"][0]],
+                [0.0, 1.0, prompt_audit["translation_xy_pixels"][1]],
+            ],
+            dtype=np.float32,
+        ),
+        (image.width, image.height),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ) > 0
+    selected_array = np.asarray(selected, dtype=bool)
+    direct_intersection = int(np.count_nonzero(selected_array & aligned_seed))
+    direct_overlap_smaller = direct_intersection / max(
+        1,
+        min(
+            int(np.count_nonzero(selected_array)),
+            int(np.count_nonzero(aligned_seed)),
+        ),
+    )
+    support_audit: dict[str, Any] = {
+        "unbounded_mask_pixels": int(np.count_nonzero(selected_array)),
+        "pre_bound_direct_overlap_smaller": round(direct_overlap_smaller, 8),
+        "applied": False,
+    }
+    if direct_overlap_smaller >= 0.25:
+        rows, columns = np.where(aligned_seed)
+        diagonal = math.hypot(
+            int(columns.max() - columns.min() + 1),
+            int(rows.max() - rows.min() + 1),
+        )
+        maximum_radius = max(
+            2,
+            int(round(DEFAULT_MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION * diagonal)),
+        )
+        maximum_pixels = int(
+            math.floor(
+                DEFAULT_MAXIMUM_FINAL_SAM_TO_CAD_AREA_RATIO
+                * int(np.count_nonzero(aligned_seed))
+            )
+        )
+        bounded = selected_array & aligned_seed
+        selected_radius = 0
+        for radius in range(maximum_radius + 1):
+            support = (
+                aligned_seed
+                if radius == 0
+                else cv2.dilate(
+                    aligned_seed.astype(np.uint8),
+                    cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE,
+                        (2 * radius + 1, 2 * radius + 1),
+                    ),
+                )
+                > 0
+            )
+            candidate = selected_array & support
+            if int(np.count_nonzero(candidate)) > maximum_pixels:
+                break
+            bounded = candidate
+            selected_radius = radius
+        if int(np.count_nonzero(bounded)) >= minimum_mask_pixels:
+            selected = bounded
+            support_audit.update(
+                {
+                    "applied": True,
+                    "selected_support_radius_pixels": selected_radius,
+                    "bounded_mask_pixels": int(np.count_nonzero(bounded)),
+                    "maximum_final_to_cad_area_ratio": (
+                        DEFAULT_MAXIMUM_FINAL_SAM_TO_CAD_AREA_RATIO
+                    ),
+                }
+            )
     metrics = _candidate_metrics(
         selected,
         box=box,
         width=image.width,
         height=image.height,
-        cad_seed=cad_seed,
+        cad_seed=aligned_seed,
     )
     reasons: list[str] = []
     if int(metrics["cad_shape_seed_pixels"]) < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS:
@@ -895,6 +1072,18 @@ def _segment_shape_guided_points(
         < DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
     ):
         reasons.append("cad_shape_area_mismatch")
+    if (
+        float(metrics["cad_seed_overlap_smaller"])
+        < DEFAULT_MINIMUM_ALIGNED_CAD_OVERLAP_SMALLER
+    ):
+        reasons.append("aligned_cad_direct_overlap_below_threshold")
+    area_ratio = float(metrics["candidate_to_cad_seed_area_ratio"])
+    if not (
+        1.0 / DEFAULT_MAXIMUM_ALIGNED_CAD_AREA_RATIO
+        <= area_ratio
+        <= DEFAULT_MAXIMUM_ALIGNED_CAD_AREA_RATIO
+    ):
+        reasons.append("aligned_cad_direct_area_mismatch")
     result.update(
         {
             "accepted": not reasons,
@@ -903,6 +1092,7 @@ def _segment_shape_guided_points(
                 key: round(float(value), 8) if isinstance(value, float) else value
                 for key, value in metrics.items()
             },
+            "aligned_cad_support_bound": support_audit,
         }
     )
     return (selected if not reasons else None), result
@@ -1233,6 +1423,21 @@ def run(
         with Image.open(source_paths[view_id]) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
         image_state = processor.set_image(image)
+        view_cad_seeds: dict[str, Any] = {}
+        for seed_region in regions_by_view[view_id]:
+            seed_record = seed_region.get("cad_projection_seed")
+            if not isinstance(seed_record, Mapping):
+                continue
+            with Image.open(Path(str(seed_record["path"]))) as seed_opened:
+                seed_array = (
+                    np.asarray(seed_opened.convert("L"), dtype=np.uint8) >= 128
+                )
+            if seed_array.shape != (image.height, image.width):
+                raise Sam3RegionError(
+                    f"CAD seed dimensions for {view_id}/"
+                    f"{seed_region['group_id']} differ from the source image"
+                )
+            view_cad_seeds[str(seed_region["group_id"])] = seed_array
         view_records: list[dict[str, Any]] = []
         for region in sorted(
             regions_by_view[view_id], key=lambda item: str(item["group_id"])
@@ -1253,16 +1458,7 @@ def run(
             cad_seed_array = None
             cad_seed_record = region.get("cad_projection_seed")
             if isinstance(cad_seed_record, Mapping):
-                seed_path = Path(str(cad_seed_record["path"]))
-                with Image.open(seed_path) as seed_opened:
-                    cad_seed_array = (
-                        np.asarray(seed_opened.convert("L"), dtype=np.uint8) >= 128
-                    )
-                if cad_seed_array.shape != (image.height, image.width):
-                    raise Sam3RegionError(
-                        f"CAD seed dimensions for {view_id}/"
-                        f"{region['group_id']} differ from the source image"
-                    )
+                cad_seed_array = view_cad_seeds[str(region["group_id"])]
             if click_sets:
                 if model.inst_interactive_predictor is None:
                     raise Sam3RegionError(
@@ -1314,7 +1510,7 @@ def run(
                         union |= selected
             else:
                 for box_index, box in enumerate(region["boxes"]):
-                    selected, audit = _segment_box(
+                    initial_selected, initial_shape_audit = _segment_box(
                         processor=processor,
                         image=image,
                         image_state=image_state,
@@ -1326,27 +1522,44 @@ def run(
                         minimum_mask_pixels=minimum_mask_pixels,
                         cad_seed=cad_seed_array,
                     )
+                    selected = initial_selected
+                    audit = initial_shape_audit
                     if (
-                        selected is None
-                        and cad_seed_array is not None
+                        cad_seed_array is not None
                         and int(np.count_nonzero(cad_seed_array))
                         >= DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS
                     ):
-                        coarse_selected, coarse_audit = _segment_box(
-                            processor=processor,
-                            image=image,
-                            image_state=image_state,
-                            prompt=str(region["prompt"]),
-                            box=box,
-                            minimum_model_score=minimum_model_score,
-                            minimum_prompt_overlap=minimum_prompt_overlap,
-                            maximum_image_fraction=maximum_image_fraction,
-                            minimum_mask_pixels=minimum_mask_pixels,
-                            cad_seed=None,
-                        )
-                        initial_shape_audit = audit
+                        if initial_selected is not None:
+                            coarse_selected = initial_selected
+                            coarse_audit = {
+                                "accepted": True,
+                                "source": "initial_cad_shape_box_candidate",
+                                "reused_initial_candidate": True,
+                            }
+                        else:
+                            coarse_selected, coarse_audit = _segment_box(
+                                processor=processor,
+                                image=image,
+                                image_state=image_state,
+                                prompt=str(region["prompt"]),
+                                box=box,
+                                minimum_model_score=minimum_model_score,
+                                minimum_prompt_overlap=minimum_prompt_overlap,
+                                maximum_image_fraction=maximum_image_fraction,
+                                minimum_mask_pixels=minimum_mask_pixels,
+                                cad_seed=None,
+                            )
                         shape_point_audit: dict[str, Any] | None = None
                         if coarse_selected is not None:
+                            other_part_seeds = None
+                            if (
+                                int(np.count_nonzero(cad_seed_array))
+                                <= DEFAULT_MAXIMUM_NEIGHBOR_NEGATIVE_TARGET_PIXELS
+                            ):
+                                other_part_seeds = np.zeros_like(cad_seed_array)
+                                for other_group_id, other_seed in view_cad_seeds.items():
+                                    if other_group_id != str(region["group_id"]):
+                                        other_part_seeds |= other_seed
                             selected, shape_point_audit = _segment_shape_guided_points(
                                 model=model,
                                 image_state=image_state,
@@ -1358,6 +1571,7 @@ def run(
                                 minimum_prompt_overlap=minimum_prompt_overlap,
                                 maximum_image_fraction=maximum_image_fraction,
                                 minimum_mask_pixels=minimum_mask_pixels,
+                                other_part_seeds=other_part_seeds,
                             )
                         if selected is not None and shape_point_audit is not None:
                             candidate_index = len(initial_shape_audit["candidates"])
@@ -1394,12 +1608,25 @@ def run(
                                 "initial_box_shape_audit": initial_shape_audit,
                                 "coarse_box_audit": coarse_audit,
                                 "shape_point_refinement": shape_point_audit,
+                                "selection_policy": (
+                                    "same_view_cad_template_always_guides_sam3"
+                                ),
                             }
                         else:
+                            # The final hybrid stage will still bind any fallback
+                            # to the aligned CAD support band.  Reuse only a box
+                            # candidate that already passed the CAD-shape gate;
+                            # an unconstrained coarse candidate remains rejected.
+                            selected = initial_selected
                             audit = {
                                 **initial_shape_audit,
                                 "coarse_box_audit": coarse_audit,
                                 "shape_point_refinement": shape_point_audit,
+                                "selection_policy": (
+                                    "aligned_cad_bounded_shape_candidate_fallback"
+                                    if initial_selected is not None
+                                    else "same_view_cad_template_required_fail_closed"
+                                ),
                             }
                     box_audits.append({"box_index": box_index, "box": box, **audit})
                     if selected is not None:
@@ -1590,7 +1817,14 @@ def run(
         "minimum_cad_shape_iou": DEFAULT_MINIMUM_CAD_SHAPE_IOU,
         "minimum_cad_shape_area_agreement": (DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT),
         "cad_shape_candidate_policy": (
-            "location_invariant_isotropic_normalization_bounded_rotation"
+            "same_view_rendered_part_template_bounded_translation_direct_support"
+        ),
+        "per_mesh_pose_change_allowed": False,
+        "maximum_final_sam_to_cad_area_ratio": (
+            DEFAULT_MAXIMUM_FINAL_SAM_TO_CAD_AREA_RATIO
+        ),
+        "maximum_neighbor_negative_target_pixels": (
+            DEFAULT_MAXIMUM_NEIGHBOR_NEGATIVE_TARGET_PIXELS
         ),
         "rejected_mask_policy": "fail_closed_no_mask_evidence",
         "cross_group_arbitration_schema": (CROSS_GROUP_ARBITRATION_SCHEMA_VERSION),
@@ -1603,7 +1837,7 @@ def run(
     if automatic_shape_interactive_requested:
         policy[
             "automatic_shape_point_refinement"
-        ] = "coarse_box_then_bounded_cad_shape_positive_negative_points"
+        ] = "always_run_same_view_cad_shape_positive_negative_points"
     if ordered_interaction_requested:
         policy[
             "human_point_replay_policy"

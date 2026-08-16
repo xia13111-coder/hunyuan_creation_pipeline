@@ -5,6 +5,7 @@ import numpy as np
 from qwen_material_pipeline.segmentation.hybrid_part_masks import (
     _connected_component_count,
     _entity_rejection_reasons,
+    _sam_aligned_cad_seed,
     _trim_entity_to_cad_support,
 )
 
@@ -94,3 +95,43 @@ def test_cad_support_trim_preserves_boundary_already_inside_bound() -> None:
 
     assert np.array_equal(trimmed, entity)
     assert audit["retained_entity_fraction"] == 1.0
+
+
+def test_sam_specific_cad_area_bound_is_stricter_than_entity_default() -> None:
+    seed = np.zeros((80, 100), dtype=bool)
+    candidate = np.zeros_like(seed)
+    seed[20:60, 20:60] = True
+    candidate[17:63, 17:63] = True
+
+    default_trimmed, _default_audit = _trim_entity_to_cad_support(candidate, seed)
+    sam_trimmed, sam_audit = _trim_entity_to_cad_support(
+        candidate,
+        seed,
+        maximum_final_to_cad_area_ratio=1.15,
+    )
+
+    assert np.count_nonzero(sam_trimmed) < np.count_nonzero(default_trimmed)
+    assert sam_audit["final_to_cad_area_ratio"] <= 1.15
+
+
+def test_hybrid_replays_sam_shared_camera_template_translation() -> None:
+    seed = np.zeros((20, 30), dtype=bool)
+    seed[5:10, 7:12] = True
+    aligned, audit = _sam_aligned_cad_seed(
+        seed,
+        {
+            "box_audits": [
+                {
+                    "shape_point_refinement": {
+                        "accepted": True,
+                        "prompt_audit": {"translation_xy_pixels": [3.0, 2.0]},
+                    }
+                }
+            ]
+        },
+    )
+
+    expected = np.zeros_like(seed)
+    expected[7:12, 10:15] = True
+    assert np.array_equal(aligned, expected)
+    assert audit["per_mesh_pose_change_allowed"] is False

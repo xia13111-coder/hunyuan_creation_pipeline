@@ -33,6 +33,7 @@ from .sam3_regions import (
     DEFAULT_MINIMUM_CAD_SHAPE_IOU,
     DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS,
     _box_pixels,
+    _bounded_shared_camera_alignment,
     _normalized_shape_agreement,
 )
 
@@ -269,12 +270,33 @@ def _select_candidate(
     minimum_shape_iou: float,
     minimum_area_agreement: float,
     maximum_centroid_distance: float,
+    box: Sequence[int] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     audited: list[tuple[tuple[float, ...], dict[str, Any], np.ndarray]] = []
     for candidate in candidates:
         mask = np.asarray(candidate["mask"], dtype=bool)
-        metrics = _normalized_shape_agreement(mask, seed)
-        location = _cad_location_agreement(mask, seed)
+        registered_location = _cad_location_agreement(mask, seed)
+        if (
+            box is None
+            or int(np.count_nonzero(seed))
+            < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS
+        ):
+            aligned_seed = seed
+            alignment = {
+                "translation_xy_pixels": [0.0, 0.0],
+                "alignment_model": "registered_cad_seed_without_residual_alignment",
+                "per_mesh_pose_change_allowed": False,
+            }
+        else:
+            aligned_seed, alignment = _bounded_shared_camera_alignment(
+                seed,
+                mask,
+                box=box,
+                width=source_image.shape[1],
+                height=source_image.shape[0],
+            )
+        metrics = _normalized_shape_agreement(mask, aligned_seed)
+        location = _cad_location_agreement(mask, aligned_seed)
         reasons: list[str] = []
         if int(metrics["cad_shape_seed_pixels"]) < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS:
             reasons.append("cad_shape_seed_too_small")
@@ -283,11 +305,11 @@ def _select_candidate(
         if float(metrics["cad_shape_area_agreement"]) < minimum_area_agreement:
             reasons.append("cad_shape_area_mismatch")
         if (
-            float(location["cad_centroid_distance_normalized"])
+            float(registered_location["cad_centroid_distance_normalized"])
             > maximum_centroid_distance
         ):
             reasons.append("cad_centroid_too_far_from_registered_part")
-        seed_intersection = int(np.count_nonzero(mask & seed))
+        seed_intersection = int(np.count_nonzero(mask & aligned_seed))
         row = {
             "source": candidate["source"],
             "prediction_index": int(candidate["prediction_index"]),
@@ -296,12 +318,19 @@ def _select_candidate(
             "cad_seed_intersection_pixels": seed_intersection,
             **metrics,
             **location,
+            "registered_cad_centroid_distance_pixels": registered_location[
+                "cad_centroid_distance_pixels"
+            ],
+            "registered_cad_centroid_distance_normalized": registered_location[
+                "cad_centroid_distance_normalized"
+            ],
+            "cad_template_alignment": alignment,
             "accepted": not reasons,
             "reason_codes": reasons,
             "boundary": _boundary_metrics(source_image, mask),
         }
         rank = (
-            -float(location["cad_centroid_distance_normalized"]),
+            -float(registered_location["cad_centroid_distance_normalized"]),
             float(metrics["cad_shape_iou"]),
             float(metrics["cad_shape_minimum_precision_recall"]),
             float(metrics["cad_shape_area_agreement"]),
@@ -416,6 +445,7 @@ def run(
             minimum_shape_iou=minimum_shape_iou,
             minimum_area_agreement=minimum_area_agreement,
             maximum_centroid_distance=maximum_centroid_distance,
+            box=boxes[0],
         )
         mask_doc: dict[str, Any] | None = None
         if selected is not None:

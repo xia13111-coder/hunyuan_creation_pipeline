@@ -16,6 +16,7 @@ from qwen_material_pipeline.segmentation.sam3_regions import (
     SCHEMA_VERSION,
     Sam3RegionError,
     _arbitrate_view_group_masks,
+    _bounded_shared_camera_alignment,
     _box_pixels,
     _candidate_metrics,
     _load_request,
@@ -823,6 +824,54 @@ def test_automatic_shape_points_refine_a_shifted_component() -> None:
     assert audit["accepted"] is True
     assert audit["shape_metrics"]["cad_shape_location_invariant"] is True
     assert audit["shape_metrics"]["cad_shape_iou"] == pytest.approx(1.0)
+
+
+def test_shared_camera_alignment_only_translates_the_complete_part_shape() -> None:
+    seed = np.zeros((40, 48), dtype=bool)
+    seed[8:20, 10:18] = True
+    seed[12:15, 18:25] = True
+    coarse = np.zeros_like(seed)
+    coarse[12:24, 15:23] = True
+    coarse[16:19, 23:30] = True
+
+    aligned, audit = _bounded_shared_camera_alignment(
+        seed,
+        coarse,
+        box=[0, 0, 1000, 1000],
+        width=48,
+        height=40,
+    )
+
+    assert np.array_equal(aligned, coarse)
+    assert audit["translation_xy_pixels"] == pytest.approx([5.0, 4.0])
+    assert audit["per_mesh_pose_change_allowed"] is False
+    assert "translation_only" in audit["alignment_model"]
+
+
+def test_shape_points_add_neighbor_part_centers_as_negative_prompts() -> None:
+    seed = np.zeros((48, 64), dtype=bool)
+    seed[18:28, 24:34] = True
+    neighbor = np.zeros_like(seed)
+    neighbor[18:28, 38:48] = True
+
+    click_set, audit = _shape_seed_click_set(
+        seed,
+        seed,
+        box=[250, 250, 900, 750],
+        width=64,
+        height=48,
+        other_part_seeds=neighbor,
+    )
+
+    negative_pixels = {
+        (
+            round(point[0] * 63 / 1000),
+            round(point[1] * 47 / 1000),
+        )
+        for point in click_set["negative_points"]
+    }
+    assert any(38 <= x < 48 and 18 <= y < 28 for x, y in negative_pixels)
+    assert audit["neighboring_part_negative_point_count"] == 1
 
 
 class _FakeOrderedInteractiveModel:

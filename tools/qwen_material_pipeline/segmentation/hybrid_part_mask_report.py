@@ -42,6 +42,30 @@ def _record_mask(
     return _mask(path, expected_shape)
 
 
+def _aligned_template(
+    seed: np.ndarray,
+    row: Mapping[str, Any],
+) -> np.ndarray:
+    audit = row.get("aligned_cad_template")
+    translation = (
+        audit.get("translation_xy_pixels") if isinstance(audit, Mapping) else None
+    )
+    if not isinstance(translation, list) or len(translation) != 2:
+        return seed
+    matrix = np.asarray(
+        [[1.0, 0.0, float(translation[0])], [0.0, 1.0, float(translation[1])]],
+        dtype=np.float32,
+    )
+    return cv2.warpAffine(
+        seed.astype(np.uint8),
+        matrix,
+        (seed.shape[1], seed.shape[0]),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ) > 0
+
+
 def _tile(
     *,
     source: np.ndarray,
@@ -62,7 +86,7 @@ def _tile(
     bottom = min(source.shape[0], int(ys.max()) + pad + 1)
     panels: list[np.ndarray] = []
     definitions = (
-        ("CAD projection", seed, (0, 0, 255)),
+        ("same-view CAD template", seed, (0, 0, 255)),
         ("SAM3" if sam_accepted else "SAM3 rejected", sam, (0, 255, 0)),
         (
             "EntitySeg" if entity_accepted else "EntitySeg rejected",
@@ -126,7 +150,10 @@ def build_report(
         )
         if not isinstance(seed_doc, Mapping):
             raise EntitySegRegionError(f"missing CAD seed: {key}")
-        seed = _mask(Path(str(seed_doc["path"])), source.shape[:2])
+        seed = _aligned_template(
+            _mask(Path(str(seed_doc["path"])), source.shape[:2]),
+            final_row,
+        )
         sam_mask = _record_mask(sam_root, sam_row, source.shape[:2])
         entity_mask = _record_mask(entity_root, entity_row, source.shape[:2])
         final_mask = _record_mask(hybrid_root, final_row, source.shape[:2])
@@ -156,6 +183,7 @@ def build_report(
                 ),
                 "metrics": final_row.get("fusion_metrics"),
                 "cad_support_trim": final_row.get("cad_support_trim"),
+                "aligned_cad_template": final_row.get("aligned_cad_template"),
                 "asset": f"assets/{asset_name}",
             }
         )
@@ -186,6 +214,13 @@ def build_report(
                     "CAD 支持域裁剪：保留 "
                     f"{100.0 * float(trim['retained_entity_fraction']):.1f}%"
                 )
+            alignment = row.get("aligned_cad_template")
+            if isinstance(alignment, Mapping):
+                translation = alignment.get("translation_xy_pixels", [0.0, 0.0])
+                details.append(
+                    "整件相机模板残差平移 "
+                    f"({float(translation[0]):+.1f}, {float(translation[1]):+.1f}) px"
+                )
             reasons = row["entityseg_rejection_reasons"]
             if reasons:
                 details.append("拒绝原因：" + ", ".join(reasons))
@@ -211,7 +246,7 @@ h1{{margin:.1em 0}}h2{{margin-top:42px}}.lead,.card p{{color:var(--muted)}}.stat
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(590px,1fr));gap:14px}}.card{{padding:12px;overflow:hidden}}.card h3{{margin:0 0 8px}}
 .card img{{display:block;width:100%;height:auto;border-radius:7px}}.card p{{margin:8px 2px 0}}@media(max-width:650px){{main{{padding:14px}}.grid{{grid-template-columns:1fr}}}}
 </style></head><body><main><h1>SAM3 + EntitySeg 辅助分割</h1>
-<p class="lead">红色为 CAD 投影，绿色为 SAM3，青色为 EntitySeg，紫色为最终选择。CAD/SAM3 确定零件身份，EntitySeg 只在边界改善且未合并邻件时接管。</p>
+<p class="lead">红色为同相机角度渲染的 CAD Part-ID 模板，绿色为模板正/负点引导的 SAM3，青色为同一模板筛选的 EntitySeg，紫色为最终选择。只允许整件相机投影后的有界 2D 残差平移，不允许单独移动、旋转或缩放 mesh。</p>
 <div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">Entity 改善 SAM <b>{summary['decision_counts']['entityseg_replaces_sam3_boundary']}</b></div><div class="stat">Entity 补充缺口 <b>{summary['decision_counts']['entityseg_fills_sam3_gap']}</b></div><div class="stat">最终来源：Entity <b>{summary['selected_source_counts']['entityseg']}</b> / SAM <b>{summary['selected_source_counts']['sam3']}</b></div></div>
 <p class="lead">这是边界融合预览，尚未写回正式材质推理输入。点击图片可查看原始像素。</p>
 <nav>{''.join(f'<a href="#{key}">{value}</a>' for key,value in labels.items())}</nav>{''.join(sections)}</main></body></html>"""

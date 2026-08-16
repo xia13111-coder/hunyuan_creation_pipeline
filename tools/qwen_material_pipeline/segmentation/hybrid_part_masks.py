@@ -90,6 +90,63 @@ def _load_mask(path: Path, expected_shape: tuple[int, int]) -> np.ndarray:
     return mask >= 128
 
 
+def _sam_aligned_cad_seed(
+    seed: np.ndarray,
+    sam_row: Mapping[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Replay the bounded shared-camera residual used to prompt SAM3."""
+
+    for box_audit in sam_row.get("box_audits", []):
+        if not isinstance(box_audit, Mapping):
+            continue
+        refinement = box_audit.get("shape_point_refinement")
+        if (
+            not isinstance(refinement, Mapping)
+            or refinement.get("accepted") is not True
+        ):
+            continue
+        prompt = refinement.get("prompt_audit")
+        translation = (
+            prompt.get("translation_xy_pixels")
+            if isinstance(prompt, Mapping)
+            else None
+        )
+        if (
+            not isinstance(translation, list)
+            or len(translation) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in translation
+            )
+        ):
+            raise EntitySegRegionError("SAM3 aligned CAD translation is malformed")
+        matrix = np.asarray(
+            [
+                [1.0, 0.0, float(translation[0])],
+                [0.0, 1.0, float(translation[1])],
+            ],
+            dtype=np.float32,
+        )
+        aligned = cv2.warpAffine(
+            seed.astype(np.uint8),
+            matrix,
+            (seed.shape[1], seed.shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        ) > 0
+        return aligned, {
+            "source": "sam3_same_view_cad_template_prompt",
+            "translation_xy_pixels": [float(translation[0]), float(translation[1])],
+            "per_mesh_pose_change_allowed": False,
+        }
+    return seed, {
+        "source": "registered_shared_camera_projection",
+        "translation_xy_pixels": [0.0, 0.0],
+        "per_mesh_pose_change_allowed": False,
+    }
+
+
 def _connected_component_count(mask: np.ndarray) -> int:
     count, _labels, statistics, _centroids = cv2.connectedComponentsWithStats(
         mask.astype(np.uint8), connectivity=8
@@ -106,6 +163,8 @@ def _connected_component_count(mask: np.ndarray) -> int:
 def _trim_entity_to_cad_support(
     entity_mask: np.ndarray,
     cad_seed: np.ndarray,
+    *,
+    maximum_final_to_cad_area_ratio: float = MAXIMUM_FINAL_TO_CAD_AREA_RATIO,
 ) -> tuple[np.ndarray, dict[str, float | int]]:
     """Keep EntitySeg detail only inside a bounded CAD Part-ID support band.
 
@@ -113,7 +172,8 @@ def _trim_entity_to_cad_support(
     one visual entity.  Intersecting with the exact CAD projection would throw
     away useful photo-boundary detail, so grow the projection by a small,
     resolution-independent radius.  Select the largest radius whose result is
-    still no more than 1.25x the CAD area.
+    still within the caller's bounded CAD-area ratio.  EntitySeg keeps the
+    1.25x default; SAM3 uses a stricter 1.15x bound after template prompting.
     """
 
     entity = np.asarray(entity_mask, dtype=bool)
@@ -132,7 +192,9 @@ def _trim_entity_to_cad_support(
         int(round(MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION * diagonal)),
     )
     seed_pixels = int(np.count_nonzero(seed))
-    maximum_pixels = int(np.floor(MAXIMUM_FINAL_TO_CAD_AREA_RATIO * seed_pixels))
+    maximum_pixels = int(
+        np.floor(maximum_final_to_cad_area_ratio * seed_pixels)
+    )
     selected_radius = 0
     selected = entity & seed
     for radius in range(maximum_radius + 1):
@@ -155,7 +217,7 @@ def _trim_entity_to_cad_support(
     return selected, {
         "maximum_support_radius_pixels": maximum_radius,
         "selected_support_radius_pixels": selected_radius,
-        "maximum_final_to_cad_area_ratio": MAXIMUM_FINAL_TO_CAD_AREA_RATIO,
+        "maximum_final_to_cad_area_ratio": maximum_final_to_cad_area_ratio,
         "untrimmed_entity_pixels": entity_pixels,
         "trimmed_entity_pixels": selected_pixels,
         "retained_entity_fraction": selected_pixels / entity_pixels,
@@ -290,6 +352,7 @@ def build_hybrid_masks(
             Path(str(seed_doc["path"])).expanduser().resolve(strict=True),
             image.shape[:2],
         )
+        aligned_seed, aligned_seed_audit = _sam_aligned_cad_seed(seed, sam_row)
         sam_accepted = sam_row.get("accepted") is True
         entity_accepted = entity_row.get("accepted") is True
         sam_mask = (
@@ -309,7 +372,7 @@ def build_hybrid_masks(
         if entity_mask is not None:
             metrics = _entity_metrics(
                 image=image,
-                seed=seed,
+                seed=aligned_seed,
                 entity_mask=entity_mask,
                 entity_row=entity_row,
                 sam_mask=sam_mask,
@@ -322,7 +385,7 @@ def build_hybrid_masks(
         cad_support_trim: dict[str, float | int] | None = None
         if entity_mask is not None and not entity_reasons:
             final_mask, cad_support_trim = _trim_entity_to_cad_support(
-                entity_mask, seed
+                entity_mask, aligned_seed
             )
             selected_source = "entityseg"
             decision = (
@@ -331,13 +394,23 @@ def build_hybrid_masks(
                 else "entityseg_fills_sam3_gap"
             )
         elif sam_mask is not None:
-            final_mask = sam_mask
-            selected_source = "sam3"
-            decision = (
-                "sam3_retained_after_entityseg_rejection"
-                if entity_mask is not None
-                else "sam3_only_candidate"
-            )
+            try:
+                final_mask, cad_support_trim = _trim_entity_to_cad_support(
+                    sam_mask,
+                    aligned_seed,
+                    maximum_final_to_cad_area_ratio=1.15,
+                )
+            except EntitySegRegionError:
+                final_mask = None
+                selected_source = "none"
+                decision = "sam3_rejected_outside_aligned_cad_support"
+            else:
+                selected_source = "sam3"
+                decision = (
+                    "sam3_retained_after_entityseg_rejection"
+                    if entity_mask is not None
+                    else "sam3_only_candidate"
+                )
         else:
             final_mask = None
             selected_source = "none"
@@ -367,6 +440,7 @@ def build_hybrid_masks(
                 "entityseg_fusion_rejection_reasons": entity_reasons,
                 "fusion_metrics": metrics,
                 "cad_support_trim": cad_support_trim,
+                "aligned_cad_template": aligned_seed_audit,
                 "mask": mask_document,
             }
         )
