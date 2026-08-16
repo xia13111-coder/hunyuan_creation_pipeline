@@ -128,6 +128,10 @@ COMMANDS: dict[str, CommandSpec] = {
         "qwen_material_pipeline.workflows.appearance_component_qwen",
         "select one immutable Base MDL per photo-supported appearance component",
     ),
+    "color-corresponding-materials": CommandSpec(
+        "qwen_material_pipeline.materials.corresponding_material_color",
+        "add photo-derived colour only to corresponding-material selections",
+    ),
 }
 
 
