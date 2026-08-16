@@ -1443,7 +1443,6 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         self.assertFalse(config.immutable_mdl_after_selection)
         self.assertEqual(config.material_prediction_mode, "disabled")
         self.assertFalse(config.material_identity_local_context)
-        self.assertFalse(config.exact_cad_instance_material_propagation)
         self.assertEqual(
             config.material_selection_objective,
             "semantic_compatible_visual",
@@ -1501,7 +1500,6 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                     "parameter_candidate_mode": "disabled",
                     "prediction_mode": "catalog_family_first",
                     "identity_local_context": True,
-                    "exact_cad_instance_material_propagation": True,
                     "selection_objective": "semantic_compatible_visual",
                 }
             )
@@ -1512,7 +1510,6 @@ class VisualMaterialBridgeTests(unittest.TestCase):
 
         self.assertEqual(config.material_prediction_mode, "catalog_family_first")
         self.assertTrue(config.material_identity_local_context)
-        self.assertTrue(config.exact_cad_instance_material_propagation)
         self.assertEqual(config.material_assignment_unit, "part_id")
         self.assertTrue(config.immutable_mdl_after_selection)
         self.assertEqual(config.material_parameter_candidate_mode, "disabled")
@@ -1649,9 +1646,6 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         self.assertEqual(
             document["materials"]["selection_objective"],
             "semantic_compatible_visual",
-        )
-        self.assertTrue(
-            document["materials"]["exact_cad_instance_material_propagation"],
         )
         self.assertEqual(
             document["retrieval"]["final_top_k"],
