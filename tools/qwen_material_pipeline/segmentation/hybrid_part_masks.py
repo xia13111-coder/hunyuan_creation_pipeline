@@ -29,6 +29,8 @@ MINIMUM_CONNECTED_COMPONENT_PIXELS = 16
 MAXIMUM_FINAL_TO_CAD_AREA_RATIO = 1.25
 MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION = 0.04
 MINIMUM_CAD_SUPPORT_RADIUS_PIXELS = 2
+MINIMUM_AMODAL_CANDIDATE_PRECISION = 0.88
+MINIMUM_AMODAL_COMPLETION_SHAPE_IOU = 0.62
 
 
 def _sha256_file(path: Path) -> str:
@@ -147,6 +149,82 @@ def _sam_aligned_cad_seed(
     }
 
 
+def _entity_aligned_cad_seed(
+    seed: np.ndarray,
+    entity_row: Mapping[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Replay the selected EntitySeg candidate's bounded camera residual."""
+
+    selected = entity_row.get("selected_candidate")
+    alignment = (
+        selected.get("cad_template_alignment")
+        if isinstance(selected, Mapping)
+        else None
+    )
+    translation = (
+        alignment.get("translation_xy_pixels")
+        if isinstance(alignment, Mapping)
+        else None
+    )
+    if translation is None:
+        return seed, {
+            "source": "registered_shared_camera_projection",
+            "translation_xy_pixels": [0.0, 0.0],
+            "per_mesh_pose_change_allowed": False,
+        }
+    if (
+        not isinstance(translation, list)
+        or len(translation) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in translation
+        )
+        or alignment.get("per_mesh_pose_change_allowed") is not False
+    ):
+        raise EntitySegRegionError("EntitySeg aligned CAD translation is malformed")
+    matrix = np.asarray(
+        [
+            [1.0, 0.0, float(translation[0])],
+            [0.0, 1.0, float(translation[1])],
+        ],
+        dtype=np.float32,
+    )
+    aligned = cv2.warpAffine(
+        seed.astype(np.uint8),
+        matrix,
+        (seed.shape[1], seed.shape[0]),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ) > 0
+    return aligned, {
+        "source": "entityseg_selected_candidate_bounded_camera_residual",
+        "translation_xy_pixels": [float(translation[0]), float(translation[1])],
+        "per_mesh_pose_change_allowed": False,
+    }
+
+
+def _align_with_audit(mask: np.ndarray, audit: Mapping[str, Any]) -> np.ndarray:
+    translation = audit.get("translation_xy_pixels")
+    if not isinstance(translation, list) or len(translation) != 2:
+        raise EntitySegRegionError("aligned CAD audit has no translation")
+    matrix = np.asarray(
+        [
+            [1.0, 0.0, float(translation[0])],
+            [0.0, 1.0, float(translation[1])],
+        ],
+        dtype=np.float32,
+    )
+    return cv2.warpAffine(
+        mask.astype(np.uint8),
+        matrix,
+        (mask.shape[1], mask.shape[0]),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    ) > 0
+
+
 def _connected_component_count(mask: np.ndarray) -> int:
     count, _labels, statistics, _centroids = cv2.connectedComponentsWithStats(
         mask.astype(np.uint8), connectivity=8
@@ -235,6 +313,16 @@ def _entity_rejection_reasons(
         reasons.append("entity_direct_cad_iou_below_threshold")
     if float(metrics["entity_cad_shape_iou"]) < MINIMUM_ENTITY_CAD_SHAPE_IOU:
         reasons.append("entity_cad_shape_iou_below_threshold")
+    if "entity_amodal_candidate_precision" in metrics and (
+        float(metrics["entity_amodal_candidate_precision"])
+        < MINIMUM_AMODAL_CANDIDATE_PRECISION
+    ):
+        reasons.append("entity_extends_outside_complete_mesh_shape")
+    if "entity_amodal_shape_iou" in metrics and (
+        float(metrics["entity_amodal_shape_iou"])
+        < MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
+    ):
+        reasons.append("entity_occlusion_aware_amodal_shape_mismatch")
     if (
         float(metrics["entity_cad_centroid_distance"])
         > MAXIMUM_ENTITY_CAD_CENTROID_DISTANCE
@@ -286,6 +374,23 @@ def _entity_metrics(
             entity_boundary["image_edge_support_fraction_025"]
         ),
     }
+    if "cad_amodal_candidate_precision" in selected:
+        output.update(
+            {
+                "entity_amodal_candidate_precision": float(
+                    selected["cad_amodal_candidate_precision"]
+                ),
+                "entity_amodal_completion_iou": float(
+                    selected["cad_amodal_completion_iou"]
+                ),
+                "entity_amodal_shape_iou": float(
+                    selected["cad_amodal_shape_iou"]
+                ),
+                "entity_to_amodal_area_ratio": float(
+                    selected["candidate_to_cad_amodal_area_ratio"]
+                ),
+            }
+        )
     if sam_mask is not None:
         intersection = int(np.count_nonzero(sam_mask & entity_mask))
         sam_pixels = int(np.count_nonzero(sam_mask))
@@ -348,11 +453,60 @@ def build_hybrid_masks(
         )
         if not isinstance(seed_doc, Mapping):
             raise EntitySegRegionError(f"missing CAD seed: {key}")
-        seed = _load_mask(
-            Path(str(seed_doc["path"])).expanduser().resolve(strict=True),
-            image.shape[:2],
+        seed_path = Path(str(seed_doc["path"])).expanduser().resolve(strict=True)
+        if seed_doc.get("sha256") != _sha256_file(seed_path):
+            raise EntitySegRegionError(f"CAD seed hash mismatch: {key}")
+        seed = _load_mask(seed_path, image.shape[:2])
+        sam_aligned_seed, sam_alignment_audit = _sam_aligned_cad_seed(seed, sam_row)
+        entity_aligned_seed, entity_alignment_audit = _entity_aligned_cad_seed(
+            seed, entity_row
         )
-        aligned_seed, aligned_seed_audit = _sam_aligned_cad_seed(seed, sam_row)
+        sam_amodal_doc = sam_row.get("cad_amodal_template")
+        entity_amodal_doc = entity_row.get("cad_amodal_template")
+        amodal_doc = (
+            sam_amodal_doc
+            if isinstance(sam_amodal_doc, Mapping)
+            else entity_amodal_doc
+        )
+        amodal: np.ndarray | None = None
+        if isinstance(amodal_doc, Mapping):
+            amodal_path = Path(str(amodal_doc["path"])).expanduser().resolve(strict=True)
+            expected_amodal_hash = amodal_doc.get("sha256")
+            if (
+                not isinstance(expected_amodal_hash, str)
+                or _sha256_file(amodal_path) != expected_amodal_hash
+            ):
+                raise EntitySegRegionError(f"CAD amodal hash mismatch: {key}")
+            if isinstance(entity_amodal_doc, Mapping):
+                entity_path = Path(
+                    str(entity_amodal_doc["path"])
+                ).expanduser().resolve(strict=True)
+                if (
+                    entity_path != amodal_path
+                    or entity_amodal_doc.get("sha256") != expected_amodal_hash
+                ):
+                    raise EntitySegRegionError(
+                        f"SAM3 and EntitySeg bind different CAD amodal templates: {key}"
+                    )
+            contract = amodal_doc.get("projection_contract")
+            if (
+                not isinstance(contract, Mapping)
+                or contract.get("whole_asset_camera_unchanged") is not True
+                or contract.get("whole_asset_transform_unchanged") is not True
+                or contract.get("per_mesh_pose_change_allowed") is not False
+            ):
+                raise EntitySegRegionError(f"CAD amodal contract mismatch: {key}")
+            amodal = _load_mask(amodal_path, image.shape[:2])
+        sam_aligned_amodal = (
+            _align_with_audit(amodal, sam_alignment_audit)
+            if amodal is not None
+            else None
+        )
+        entity_aligned_amodal = (
+            _align_with_audit(amodal, entity_alignment_audit)
+            if amodal is not None
+            else None
+        )
         sam_accepted = sam_row.get("accepted") is True
         entity_accepted = entity_row.get("accepted") is True
         sam_mask = (
@@ -372,7 +526,7 @@ def build_hybrid_masks(
         if entity_mask is not None:
             metrics = _entity_metrics(
                 image=image,
-                seed=aligned_seed,
+                seed=entity_aligned_seed,
                 entity_mask=entity_mask,
                 entity_row=entity_row,
                 sam_mask=sam_mask,
@@ -385,8 +539,12 @@ def build_hybrid_masks(
         cad_support_trim: dict[str, float | int] | None = None
         if entity_mask is not None and not entity_reasons:
             final_mask, cad_support_trim = _trim_entity_to_cad_support(
-                entity_mask, aligned_seed
+                entity_mask,
+                entity_aligned_amodal
+                if entity_aligned_amodal is not None
+                else entity_aligned_seed,
             )
+            aligned_seed_audit = entity_alignment_audit
             selected_source = "entityseg"
             decision = (
                 "entityseg_replaces_sam3_boundary"
@@ -397,14 +555,18 @@ def build_hybrid_masks(
             try:
                 final_mask, cad_support_trim = _trim_entity_to_cad_support(
                     sam_mask,
-                    aligned_seed,
+                    sam_aligned_amodal
+                    if sam_aligned_amodal is not None
+                    else sam_aligned_seed,
                     maximum_final_to_cad_area_ratio=1.15,
                 )
             except EntitySegRegionError:
                 final_mask = None
+                aligned_seed_audit = sam_alignment_audit
                 selected_source = "none"
                 decision = "sam3_rejected_outside_aligned_cad_support"
             else:
+                aligned_seed_audit = sam_alignment_audit
                 selected_source = "sam3"
                 decision = (
                     "sam3_retained_after_entityseg_rejection"
@@ -413,6 +575,7 @@ def build_hybrid_masks(
                 )
         else:
             final_mask = None
+            aligned_seed_audit = sam_alignment_audit
             selected_source = "none"
             decision = "no_safe_candidate"
 
@@ -441,6 +604,14 @@ def build_hybrid_masks(
                 "fusion_metrics": metrics,
                 "cad_support_trim": cad_support_trim,
                 "aligned_cad_template": aligned_seed_audit,
+                "cad_amodal_template": (
+                    {
+                        **dict(amodal_doc),
+                        "aligned_with_visible_template_translation": True,
+                    }
+                    if isinstance(amodal_doc, Mapping)
+                    else None
+                ),
                 "mask": mask_document,
             }
         )
@@ -473,6 +644,12 @@ def build_hybrid_masks(
             "maximum_final_to_cad_area_ratio": MAXIMUM_FINAL_TO_CAD_AREA_RATIO,
             "maximum_cad_support_radius_fraction": MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION,
             "minimum_cad_support_radius_pixels": MINIMUM_CAD_SUPPORT_RADIUS_PIXELS,
+            "minimum_amodal_candidate_precision": MINIMUM_AMODAL_CANDIDATE_PRECISION,
+            "minimum_amodal_completion_shape_iou": (
+                MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
+            ),
+            "shape_authority": "isolated_mesh_amodal_projection",
+            "visibility_authority": "whole_assembly_part_id_projection",
         },
         "records": records,
         "summary": {

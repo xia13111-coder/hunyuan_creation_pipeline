@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from qwen_material_pipeline.segmentation.hybrid_part_masks import (
     _connected_component_count,
+    _entity_aligned_cad_seed,
     _entity_rejection_reasons,
     _sam_aligned_cad_seed,
     _trim_entity_to_cad_support,
@@ -135,3 +137,40 @@ def test_hybrid_replays_sam_shared_camera_template_translation() -> None:
     expected[7:12, 10:15] = True
     assert np.array_equal(aligned, expected)
     assert audit["per_mesh_pose_change_allowed"] is False
+
+
+def test_hybrid_replays_selected_entity_bounded_camera_translation() -> None:
+    seed = np.zeros((20, 30), dtype=bool)
+    seed[5:10, 7:12] = True
+    aligned, audit = _entity_aligned_cad_seed(
+        seed,
+        {
+            "selected_candidate": {
+                "cad_template_alignment": {
+                    "translation_xy_pixels": [-2.0, 3.0],
+                    "per_mesh_pose_change_allowed": False,
+                }
+            }
+        },
+    )
+
+    expected = np.zeros_like(seed)
+    expected[8:13, 5:10] = True
+    assert np.array_equal(aligned, expected)
+    assert audit["source"] == "entityseg_selected_candidate_bounded_camera_residual"
+    assert audit["per_mesh_pose_change_allowed"] is False
+
+
+def test_hybrid_rejects_entity_alignment_that_changes_one_mesh_pose() -> None:
+    with pytest.raises(ValueError, match="translation is malformed"):
+        _entity_aligned_cad_seed(
+            np.ones((4, 4), dtype=bool),
+            {
+                "selected_candidate": {
+                    "cad_template_alignment": {
+                        "translation_xy_pixels": [1.0, 2.0],
+                        "per_mesh_pose_change_allowed": True,
+                    }
+                }
+            },
+        )

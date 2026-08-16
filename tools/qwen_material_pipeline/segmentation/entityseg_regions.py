@@ -21,6 +21,7 @@ import hashlib
 import json
 import math
 import sys
+import types
 from collections import Counter
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -29,12 +30,17 @@ import cv2
 import numpy as np
 
 from .sam3_regions import (
+    DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO,
+    DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION,
+    DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU,
+    DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL,
     DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT,
     DEFAULT_MINIMUM_CAD_SHAPE_IOU,
     DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS,
     _box_pixels,
     _bounded_shared_camera_alignment,
     _normalized_shape_agreement,
+    _occlusion_aware_amodal_agreement,
 )
 
 
@@ -199,6 +205,26 @@ def _setup_predictor(
     for path in (str(demo_root), str(root)):
         if path not in sys.path:
             sys.path.insert(0, path)
+    # CropFormer imports one MMCV helper while registering optional training
+    # datasets, even for inference-only runs.  Some frozen inference
+    # environments intentionally omit the large MMCV package.  Supply only
+    # the exact text-file helper that registration imports; model operators
+    # remain owned by Detectron2 and CropFormer.
+    try:
+        import mmcv  # type: ignore[import-not-found]  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if exc.name != "mmcv":
+            raise
+        compatibility = types.ModuleType("mmcv")
+
+        def list_from_file(filename: str, prefix: str = "", offset: int = 0) -> list[str]:
+            with Path(filename).expanduser().resolve(strict=True).open(
+                "r", encoding="utf-8"
+            ) as handle:
+                return [prefix + line.rstrip("\r\n") for line in list(handle)[offset:]]
+
+        compatibility.list_from_file = list_from_file  # type: ignore[attr-defined]
+        sys.modules["mmcv"] = compatibility
     try:
         from detectron2.config import get_cfg
         from detectron2.projects.deeplab import add_deeplab_config
@@ -266,6 +292,7 @@ def _select_candidate(
     candidates: Sequence[Mapping[str, Any]],
     *,
     seed: np.ndarray,
+    amodal: np.ndarray | None = None,
     source_image: np.ndarray,
     minimum_shape_iou: float,
     minimum_area_agreement: float,
@@ -295,15 +322,63 @@ def _select_candidate(
                 width=source_image.shape[1],
                 height=source_image.shape[0],
             )
+        aligned_amodal = None
+        if amodal is not None:
+            if amodal.shape != seed.shape:
+                raise EntitySegRegionError("CAD amodal template shape is incompatible")
+            translation = alignment["translation_xy_pixels"]
+            aligned_amodal = cv2.warpAffine(
+                amodal.astype(np.uint8),
+                np.asarray(
+                    [
+                        [1.0, 0.0, float(translation[0])],
+                        [0.0, 1.0, float(translation[1])],
+                    ],
+                    dtype=np.float32,
+                ),
+                (source_image.shape[1], source_image.shape[0]),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            ) > 0
         metrics = _normalized_shape_agreement(mask, aligned_seed)
+        amodal_metrics = (
+            _occlusion_aware_amodal_agreement(mask, aligned_seed, aligned_amodal)
+            if aligned_amodal is not None
+            else {}
+        )
         location = _cad_location_agreement(mask, aligned_seed)
         reasons: list[str] = []
         if int(metrics["cad_shape_seed_pixels"]) < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS:
             reasons.append("cad_shape_seed_too_small")
-        if float(metrics["cad_shape_iou"]) < minimum_shape_iou:
-            reasons.append("cad_shape_iou_below_threshold")
-        if float(metrics["cad_shape_area_agreement"]) < minimum_area_agreement:
-            reasons.append("cad_shape_area_mismatch")
+        if aligned_amodal is not None:
+            visible_intersection = int(np.count_nonzero(mask & aligned_seed))
+            visible_recall = visible_intersection / max(
+                1, int(np.count_nonzero(aligned_seed))
+            )
+            amodal_metrics["cad_visible_seed_recall"] = visible_recall
+            if visible_recall < DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL:
+                reasons.append("insufficient_visible_cad_seed_recall")
+            if (
+                float(amodal_metrics["cad_amodal_candidate_precision"])
+                < DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION
+            ):
+                reasons.append("candidate_extends_outside_complete_mesh_shape")
+            if (
+                float(amodal_metrics["cad_amodal_shape_iou"])
+                < DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
+            ):
+                reasons.append("occlusion_aware_amodal_shape_mismatch")
+            if (
+                float(amodal_metrics["candidate_to_cad_amodal_area_ratio"])
+                > DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO
+            ):
+                reasons.append("candidate_area_exceeds_complete_mesh_shape")
+        else:
+            if float(metrics["cad_shape_iou"]) < minimum_shape_iou:
+                reasons.append("cad_shape_iou_below_threshold")
+            if float(metrics["cad_shape_area_agreement"]) < minimum_area_agreement:
+                reasons.append("cad_shape_area_mismatch")
         if (
             float(registered_location["cad_centroid_distance_normalized"])
             > maximum_centroid_distance
@@ -317,6 +392,7 @@ def _select_candidate(
             "mask_pixels": int(np.count_nonzero(mask)),
             "cad_seed_intersection_pixels": seed_intersection,
             **metrics,
+            **amodal_metrics,
             **location,
             "registered_cad_centroid_distance_pixels": registered_location[
                 "cad_centroid_distance_pixels"
@@ -331,7 +407,8 @@ def _select_candidate(
         }
         rank = (
             -float(registered_location["cad_centroid_distance_normalized"]),
-            float(metrics["cad_shape_iou"]),
+            float(amodal_metrics.get("cad_amodal_shape_iou", metrics["cad_shape_iou"])),
+            float(amodal_metrics.get("cad_amodal_candidate_precision", 1.0)),
             float(metrics["cad_shape_minimum_precision_recall"]),
             float(metrics["cad_shape_area_agreement"]),
             float(row["boundary"]["normalized_image_edge_mean"]),
@@ -420,9 +497,44 @@ def run(
         if seed is None:
             raise EntitySegRegionError(f"unable to decode CAD seed: {seed_path}")
         seed = seed >= 128
+        amodal_doc = raw.get("cad_amodal_template")
+        amodal: np.ndarray | None = None
+        amodal_path: Path | None = None
+        if amodal_doc is not None:
+            if not isinstance(amodal_doc, Mapping):
+                raise EntitySegRegionError(
+                    f"{view_id}/{part_id} has a malformed CAD amodal template"
+                )
+            amodal_path = _resolve_file(
+                amodal_doc.get("path"), owner=owner, label="CAD amodal template"
+            )
+            if amodal_doc.get("sha256") != _sha256_file(amodal_path):
+                raise EntitySegRegionError(
+                    f"CAD amodal template hash mismatch: {view_id}/{part_id}"
+                )
+            contract = amodal_doc.get("projection_contract")
+            if (
+                not isinstance(contract, Mapping)
+                or contract.get("whole_asset_camera_unchanged") is not True
+                or contract.get("whole_asset_transform_unchanged") is not True
+                or contract.get("per_mesh_pose_change_allowed") is not False
+            ):
+                raise EntitySegRegionError(
+                    f"CAD amodal template contract mismatch: {view_id}/{part_id}"
+                )
+            decoded = cv2.imread(str(amodal_path), cv2.IMREAD_GRAYSCALE)
+            if decoded is None:
+                raise EntitySegRegionError(
+                    f"unable to decode CAD amodal template: {amodal_path}"
+                )
+            amodal = decoded >= 128
         image_path, image = source_by_view[view_id]
         if seed.shape != image.shape[:2]:
             raise EntitySegRegionError(f"CAD seed shape mismatch: {view_id}/{part_id}")
+        if amodal is not None and amodal.shape != image.shape[:2]:
+            raise EntitySegRegionError(
+                f"CAD amodal shape mismatch: {view_id}/{part_id}"
+            )
         left, top, right, bottom = _expanded_crop(
             boxes[0],
             width=image.shape[1],
@@ -441,6 +553,7 @@ def run(
         selected, audits = _select_candidate(
             [*local_candidates, *full_candidates[view_id]],
             seed=seed,
+            amodal=amodal,
             source_image=image,
             minimum_shape_iou=minimum_shape_iou,
             minimum_area_agreement=minimum_area_agreement,
@@ -467,6 +580,15 @@ def run(
                     "sha256": _sha256_file(seed_path),
                     "mask_pixels": int(np.count_nonzero(seed)),
                 },
+                "cad_amodal_template": (
+                    {
+                        "path": str(amodal_path),
+                        "sha256": _sha256_file(amodal_path),
+                        "mask_pixels": int(np.count_nonzero(amodal)),
+                    }
+                    if amodal is not None and amodal_path is not None
+                    else None
+                ),
                 "local_crop_xyxy": [left, top, right, bottom],
                 "full_candidate_count": len(full_candidates[view_id]),
                 "local_candidate_count": len(local_candidates),
@@ -508,8 +630,22 @@ def run(
             "minimum_model_score": minimum_score,
             "minimum_cad_shape_iou": minimum_shape_iou,
             "minimum_cad_shape_area_agreement": minimum_area_agreement,
+            "minimum_amodal_candidate_precision": (
+                DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION
+            ),
+            "minimum_amodal_completion_shape_iou": (
+                DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
+            ),
+            "maximum_candidate_to_amodal_area_ratio": (
+                DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO
+            ),
+            "minimum_visible_cad_seed_recall": (
+                DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL
+            ),
             "maximum_cad_centroid_distance_normalized": maximum_centroid_distance,
             "local_context_fraction": local_context_fraction,
+            "shape_authority": "isolated_mesh_amodal_projection",
+            "visibility_authority": "whole_assembly_part_id_projection",
             "role": "boundary_candidate_only_cad_part_id_remains_identity_authority",
         },
         "records": records,

@@ -70,6 +70,7 @@ def _tile(
     *,
     source: np.ndarray,
     seed: np.ndarray,
+    amodal: np.ndarray,
     sam: np.ndarray,
     entity: np.ndarray,
     hybrid: np.ndarray,
@@ -77,7 +78,7 @@ def _tile(
     entity_accepted: bool,
     selected_source: str,
 ) -> np.ndarray:
-    union = seed | sam | entity | hybrid
+    union = seed | amodal | sam | entity | hybrid
     ys, xs = np.where(union)
     pad = 20
     left = max(0, int(xs.min()) - pad)
@@ -86,7 +87,8 @@ def _tile(
     bottom = min(source.shape[0], int(ys.max()) + pad + 1)
     panels: list[np.ndarray] = []
     definitions = (
-        ("same-view CAD template", seed, (0, 0, 255)),
+        ("CAD visible (occluded)", seed, (0, 0, 255)),
+        ("isolated mesh shape", amodal, (0, 165, 255)),
         ("SAM3" if sam_accepted else "SAM3 rejected", sam, (0, 255, 0)),
         (
             "EntitySeg" if entity_accepted else "EntitySeg rejected",
@@ -94,14 +96,36 @@ def _tile(
             (255, 255, 0),
         ),
         (
-            "FINAL: Entity+CAD" if selected_source == "entityseg" else "FINAL: SAM3",
+            (
+                "FINAL: Entity+CAD"
+                if selected_source == "entityseg"
+                else "FINAL: SAM3"
+                if selected_source == "sam3"
+                else "FINAL: rejected"
+            ),
             hybrid,
             (255, 0, 255),
         ),
     )
     for label, mask, color in definitions:
         crop = _overlay(source, mask, color)[top:bottom, left:right]
-        panel = cv2.resize(crop, (300, 230), interpolation=cv2.INTER_NEAREST)
+        # Keep the original crop aspect ratio.  The old fixed resize made a
+        # correct CAD silhouette look wider or taller than its mesh.
+        scale = min(300.0 / max(1, crop.shape[1]), 230.0 / max(1, crop.shape[0]))
+        resized_width = max(1, int(round(crop.shape[1] * scale)))
+        resized_height = max(1, int(round(crop.shape[0] * scale)))
+        resized = cv2.resize(
+            crop,
+            (resized_width, resized_height),
+            interpolation=cv2.INTER_NEAREST,
+        )
+        panel = np.zeros((230, 300, 3), dtype=np.uint8)
+        left_pad = (300 - resized_width) // 2
+        top_pad = (230 - resized_height) // 2
+        panel[
+            top_pad : top_pad + resized_height,
+            left_pad : left_pad + resized_width,
+        ] = resized
         _annotate(panel, label)
         panels.append(panel)
     return np.hstack(panels)
@@ -135,8 +159,6 @@ def build_report(
     rows: list[dict[str, Any]] = []
     for key in sorted(hybrid):
         final_row = hybrid[key]
-        if final_row.get("accepted") is not True:
-            continue
         sam_row = sam[key]
         entity_row = entity[key]
         source_path = Path(str(final_row["source_image"])).expanduser().resolve(
@@ -154,6 +176,16 @@ def build_report(
             _mask(Path(str(seed_doc["path"])), source.shape[:2]),
             final_row,
         )
+        amodal_doc = final_row.get("cad_amodal_template") or entity_row.get(
+            "cad_amodal_template"
+        ) or sam_row.get("cad_amodal_template")
+        if isinstance(amodal_doc, Mapping) and isinstance(amodal_doc.get("path"), str):
+            amodal = _aligned_template(
+                _mask(Path(str(amodal_doc["path"])), source.shape[:2]),
+                final_row,
+            )
+        else:
+            amodal = seed
         sam_mask = _record_mask(sam_root, sam_row, source.shape[:2])
         entity_mask = _record_mask(entity_root, entity_row, source.shape[:2])
         final_mask = _record_mask(hybrid_root, final_row, source.shape[:2])
@@ -163,6 +195,7 @@ def build_report(
         tile = _tile(
             source=source,
             seed=seed,
+            amodal=amodal,
             sam=sam_mask,
             entity=entity_mask,
             hybrid=final_mask,
@@ -184,6 +217,7 @@ def build_report(
                 "metrics": final_row.get("fusion_metrics"),
                 "cad_support_trim": final_row.get("cad_support_trim"),
                 "aligned_cad_template": final_row.get("aligned_cad_template"),
+                "accepted": final_row.get("accepted") is True,
                 "asset": f"assets/{asset_name}",
             }
         )
@@ -193,6 +227,8 @@ def build_report(
         "entityseg_fills_sam3_gap": "EntitySeg 补充 SAM3 未通过区域",
         "sam3_retained_after_entityseg_rejection": "EntitySeg 不安全，保留 SAM3",
         "sam3_only_candidate": "仅 SAM3 有安全候选",
+        "sam3_rejected_outside_aligned_cad_support": "SAM3 超出完整 mesh 形状，拒绝",
+        "no_safe_candidate": "没有通过双模板约束的候选",
     }
     sections: list[str] = []
     for decision in labels:
@@ -246,7 +282,7 @@ h1{{margin:.1em 0}}h2{{margin-top:42px}}.lead,.card p{{color:var(--muted)}}.stat
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(590px,1fr));gap:14px}}.card{{padding:12px;overflow:hidden}}.card h3{{margin:0 0 8px}}
 .card img{{display:block;width:100%;height:auto;border-radius:7px}}.card p{{margin:8px 2px 0}}@media(max-width:650px){{main{{padding:14px}}.grid{{grid-template-columns:1fr}}}}
 </style></head><body><main><h1>SAM3 + EntitySeg 辅助分割</h1>
-<p class="lead">红色为同相机角度渲染的 CAD Part-ID 模板，绿色为模板正/负点引导的 SAM3，青色为同一模板筛选的 EntitySeg，紫色为最终选择。只允许整件相机投影后的有界 2D 残差平移，不允许单独移动、旋转或缩放 mesh。</p>
+<p class="lead">红色是整机渲染得到的可见 Part-ID（定位与遮挡先验），黄色是保持同一整机相机和刚体位姿、仅隐藏其他 mesh 后投影出的完整零件形状。绿色和青色分别是 SAM3 与 EntitySeg 候选，紫色才是最终通过双模板约束的结果。只允许整件相机投影后的有界 2D 残差平移，不允许单独移动、旋转或缩放 mesh。</p>
 <div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">Entity 改善 SAM <b>{summary['decision_counts']['entityseg_replaces_sam3_boundary']}</b></div><div class="stat">Entity 补充缺口 <b>{summary['decision_counts']['entityseg_fills_sam3_gap']}</b></div><div class="stat">最终来源：Entity <b>{summary['selected_source_counts']['entityseg']}</b> / SAM <b>{summary['selected_source_counts']['sam3']}</b></div></div>
 <p class="lead">这是边界融合预览，尚未写回正式材质推理输入。点击图片可查看原始像素。</p>
 <nav>{''.join(f'<a href="#{key}">{value}</a>' for key,value in labels.items())}</nav>{''.join(sections)}</main></body></html>"""

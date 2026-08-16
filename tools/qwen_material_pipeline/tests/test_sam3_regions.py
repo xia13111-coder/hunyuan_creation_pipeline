@@ -21,6 +21,7 @@ from qwen_material_pipeline.segmentation.sam3_regions import (
     _candidate_metrics,
     _load_request,
     _normalized_cxcywh,
+    _occlusion_aware_amodal_agreement,
     _segment_box,
     _segment_ordered_points,
     _segment_points,
@@ -846,6 +847,38 @@ def test_shared_camera_alignment_only_translates_the_complete_part_shape() -> No
     assert audit["translation_xy_pixels"] == pytest.approx([5.0, 4.0])
     assert audit["per_mesh_pose_change_allowed"] is False
     assert "translation_only" in audit["alignment_model"]
+
+
+def test_amodal_shape_restores_only_renderer_known_occlusion() -> None:
+    amodal = np.zeros((40, 50), dtype=bool)
+    amodal[10:30, 10:40] = True
+    visible = amodal.copy()
+    visible[14:26, 22:28] = False
+    candidate = visible.copy()
+
+    metrics = _occlusion_aware_amodal_agreement(candidate, visible, amodal)
+
+    assert metrics["cad_known_occluded_pixels"] == 72
+    assert metrics["cad_amodal_candidate_precision"] == 1.0
+    assert metrics["cad_amodal_completion_iou"] == 1.0
+    assert metrics["cad_amodal_shape_iou"] == 1.0
+    assert metrics["cad_amodal_shape_rotation_search_degrees"] == 0.0
+
+
+def test_amodal_shape_rejects_neighbor_extension_even_when_visible_seed_matches() -> None:
+    amodal = np.zeros((60, 80), dtype=bool)
+    amodal[15:45, 20:50] = True
+    visible = amodal.copy()
+    visible[25:35, 30:40] = False
+    merged_neighbor = visible.copy()
+    merged_neighbor[20:45, 50:75] = True
+
+    metrics = _occlusion_aware_amodal_agreement(
+        merged_neighbor, visible, amodal
+    )
+
+    assert metrics["cad_amodal_candidate_precision"] < 0.88
+    assert metrics["cad_amodal_completion_iou"] < 0.75
 
 
 def test_shape_points_add_neighbor_part_centers_as_negative_prompts() -> None:

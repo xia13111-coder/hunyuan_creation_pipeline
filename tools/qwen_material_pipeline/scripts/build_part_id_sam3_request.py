@@ -16,6 +16,7 @@ from PIL import Image
 
 
 SCHEMA_VERSION = "qwen-sam3-region-request/v1"
+AMODAL_TEMPLATE_SCHEMA_VERSION = "qwen-cad-amodal-part-templates/v1"
 MINIMUM_PROJECTED_MASK_PIXELS = 6
 
 
@@ -186,9 +187,31 @@ def build_request(
     evidence_path: Path,
     *,
     part_ids: set[str] | None = None,
+    amodal_templates_path: Path | None = None,
 ) -> dict[str, Any]:
     evidence_path = evidence_path.expanduser().resolve(strict=True)
     evidence = _read(evidence_path)
+    amodal_manifest: dict[str, Any] | None = None
+    amodal_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    if amodal_templates_path is not None:
+        amodal_templates_path = amodal_templates_path.expanduser().resolve(strict=True)
+        amodal_manifest = _read(amodal_templates_path)
+        if amodal_manifest.get("schema_version") != AMODAL_TEMPLATE_SCHEMA_VERSION:
+            raise ValueError("amodal CAD template schema is unsupported")
+        bound_evidence = amodal_manifest.get("inputs", {}).get("part_id_evidence", {})
+        if (
+            not isinstance(bound_evidence, dict)
+            or bound_evidence.get("path") != str(evidence_path)
+            or bound_evidence.get("sha256") != _sha256(evidence_path)
+        ):
+            raise ValueError("amodal CAD templates bind a different Part-ID evidence")
+        for index, row in enumerate(amodal_manifest.get("records", [])):
+            if not isinstance(row, dict):
+                raise ValueError(f"amodal template record {index} is malformed")
+            identity = (str(row.get("view_id")), str(row.get("part_id")))
+            if identity in amodal_by_identity:
+                raise ValueError(f"duplicate amodal CAD template: {identity}")
+            amodal_by_identity[identity] = row
     source_by_view: dict[str, dict[str, Any]] = {}
     regions: list[dict[str, Any]] = []
     for part in evidence.get("parts", []):
@@ -228,6 +251,36 @@ def build_request(
                     "image_sha256": _sha256(image),
                 },
             )
+            amodal_record = amodal_by_identity.get((view_id, part_id))
+            if amodal_manifest is not None and amodal_record is None:
+                raise ValueError(f"missing amodal CAD template for {view_id}/{part_id}")
+            amodal_template: dict[str, Any] | None = None
+            if amodal_record is not None:
+                aligned = amodal_record.get("aligned_amodal_mask")
+                if not isinstance(aligned, dict):
+                    raise ValueError(
+                        f"amodal CAD template for {view_id}/{part_id} is malformed"
+                    )
+                amodal_path = Path(str(aligned.get("path", ""))).expanduser().resolve(
+                    strict=True
+                )
+                if aligned.get("sha256") != _sha256(amodal_path):
+                    raise ValueError(
+                        f"amodal CAD template hash mismatch for {view_id}/{part_id}"
+                    )
+                amodal_template = {
+                    "path": str(amodal_path),
+                    "sha256": _sha256(amodal_path),
+                    "mask_size": aligned.get("mask_size"),
+                    "amodal_mask_pixels": aligned.get("mask_pixels"),
+                    "amodal_bbox_pixels": aligned.get("bbox_pixels"),
+                    "render_view_id": amodal_record.get("render_view_id"),
+                    "mesh_prim_path": amodal_record.get("mesh_prim_path"),
+                    "projection_contract": amodal_record.get("projection_contract"),
+                    "selection_role": (
+                        "complete_mesh_shape_prior_occlusion_aware_candidate_gate"
+                    ),
+                }
             regions.append(
                 {
                     "view_id": view_id,
@@ -244,6 +297,11 @@ def build_request(
                         "sha256": _sha256(mask),
                         **audit,
                     },
+                    **(
+                        {"cad_amodal_template": amodal_template}
+                        if amodal_template is not None
+                        else {}
+                    ),
                 }
             )
     if not regions:
@@ -257,13 +315,27 @@ def build_request(
             regions, key=lambda row: (row["view_id"], row["group_id"])
         ),
         "prompt_authority": (
-            "all_visible_cad_part_id_projection_boxes_inside_"
-            "human_sam3_foreground"
+            "whole_asset_visible_part_id_location_plus_isolated_mesh_shape"
+            if amodal_manifest is not None
+            else "all_visible_cad_part_id_projection_boxes_inside_human_sam3_foreground"
         ),
         "part_id_evidence": {
             "path": str(evidence_path),
             "sha256": _sha256(evidence_path),
         },
+        **(
+            {
+                "cad_amodal_templates": {
+                    "path": str(amodal_templates_path),
+                    "sha256": _sha256(amodal_templates_path),
+                    "document_sha256": amodal_manifest.get("integrity", {}).get(
+                        "result_sha256"
+                    ),
+                }
+            }
+            if amodal_manifest is not None and amodal_templates_path is not None
+            else {}
+        ),
     }
 
 
@@ -271,6 +343,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--amodal-templates",
+        type=Path,
+        help="Optional isolated-mesh template manifest used as the shape prior",
+    )
     parser.add_argument(
         "--part-id",
         action="append",
@@ -285,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
     document = build_request(
         args.evidence,
         part_ids=set(args.part_id) if args.part_id else None,
+        amodal_templates_path=args.amodal_templates,
     )
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -52,10 +52,14 @@ DEFAULT_MINIMUM_PROMPT_OVERLAP = 0.25
 DEFAULT_MAXIMUM_IMAGE_FRACTION = 0.80
 DEFAULT_MINIMUM_MASK_PIXELS = 32
 DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS = 16
-DEFAULT_MINIMUM_CAD_SHAPE_IOU = 0.50
+DEFAULT_MINIMUM_CAD_SHAPE_IOU = 0.60
 DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT = 0.50
 DEFAULT_MINIMUM_ALIGNED_CAD_OVERLAP_SMALLER = 0.55
 DEFAULT_MAXIMUM_ALIGNED_CAD_AREA_RATIO = 1.60
+DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION = 0.88
+DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU = 0.62
+DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO = 1.25
+DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL = 0.68
 DEFAULT_MAXIMUM_FINAL_SAM_TO_CAD_AREA_RATIO = 1.15
 DEFAULT_MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION = 0.04
 DEFAULT_MAXIMUM_NEIGHBOR_NEGATIVE_TARGET_PIXELS = 4096
@@ -300,6 +304,44 @@ def _load_request(path: Path) -> tuple[dict[str, Any], dict[str, Path]]:
                     **dict(cad_seed),
                     "path": str(seed_path),
                 }
+            amodal_template = raw.get("cad_amodal_template")
+            if amodal_template is not None:
+                if not isinstance(amodal_template, Mapping):
+                    raise Sam3RegionError(
+                        f"regions[{index}].cad_amodal_template must be an object"
+                    )
+                if cad_seed is None:
+                    raise Sam3RegionError(
+                        f"regions[{index}] cannot use an amodal template without a visible CAD seed"
+                    )
+                amodal_path = _resolve_file(
+                    amodal_template.get("path"),
+                    base=path.parent,
+                    label=f"regions[{index}].cad_amodal_template.path",
+                )
+                expected_digest = amodal_template.get("sha256")
+                if not isinstance(
+                    expected_digest, str
+                ) or expected_digest != _sha256_file(amodal_path):
+                    raise Sam3RegionError(
+                        f"regions[{index}].cad_amodal_template hash mismatch"
+                    )
+                contract = amodal_template.get("projection_contract")
+                if (
+                    not isinstance(contract, Mapping)
+                    or contract.get("whole_asset_camera_unchanged") is not True
+                    or contract.get("whole_asset_transform_unchanged") is not True
+                    or contract.get("per_mesh_pose_change_allowed") is not False
+                    or contract.get("other_mesh_occlusion_disabled_for_shape_only")
+                    is not True
+                ):
+                    raise Sam3RegionError(
+                        f"regions[{index}].cad_amodal_template projection contract is invalid"
+                    )
+                raw["cad_amodal_template"] = {
+                    **dict(amodal_template),
+                    "path": str(amodal_path),
+                }
     if request_schema == ORDERED_POINT_SCHEMA_VERSION:
         if request.get("prompt_authority") != (
             "human_confirmed_sam3_interactive_points"
@@ -394,6 +436,7 @@ def _normalized_shape_agreement(
     cad_seed_mask: Any,
     *,
     normalization_size: int = CAD_SHAPE_NORMALIZATION_SIZE,
+    maximum_rotation_degrees: float = 35.0,
 ) -> dict[str, Any]:
     """Compare a SAM mask with a CAD silhouette independently of position.
 
@@ -445,7 +488,23 @@ def _normalized_shape_agreement(
     seed, seed_pixels, seed_aspect = normalize(cad_seed_mask, "CAD shape seed")
     center = ((normalization_size - 1) * 0.5, (normalization_size - 1) * 0.5)
     best: tuple[float, float, float, float, float] | None = None
-    for rotation in np.linspace(-35.0, 35.0, 15):
+    if (
+        isinstance(maximum_rotation_degrees, bool)
+        or not isinstance(maximum_rotation_degrees, (int, float))
+        or not math.isfinite(float(maximum_rotation_degrees))
+        or not 0.0 <= float(maximum_rotation_degrees) <= 35.0
+    ):
+        raise Sam3RegionError("shape rotation bound must be between zero and 35 degrees")
+    rotations = (
+        np.asarray([0.0], dtype=np.float64)
+        if float(maximum_rotation_degrees) == 0.0
+        else np.linspace(
+            -float(maximum_rotation_degrees),
+            float(maximum_rotation_degrees),
+            15,
+        )
+    )
+    for rotation in rotations:
         matrix = cv2.getRotationMatrix2D(center, float(rotation), 1.0)
         rotated_seed = (
             cv2.warpAffine(
@@ -490,6 +549,85 @@ def _normalized_shape_agreement(
         "cad_shape_area_agreement": area_agreement,
         "cad_shape_normalization_size": normalization_size,
         "cad_shape_location_invariant": True,
+        "cad_shape_rotation_search_degrees": float(maximum_rotation_degrees),
+    }
+
+
+def _occlusion_aware_amodal_agreement(
+    candidate_mask: Any,
+    visible_seed_mask: Any,
+    amodal_mask: Any,
+) -> dict[str, Any]:
+    """Compare a photo mask with complete CAD shape without penalizing occlusion.
+
+    ``visible_seed_mask`` is the full-assembly modal Part-ID projection.  Pixels
+    present in the isolated mesh but absent from that mask are known CAD
+    occlusion.  Completing the photo candidate only at those known pixels lets
+    the full mesh constrain shape while keeping the modal mask authoritative
+    for photo visibility and location.
+    """
+
+    import cv2
+    import numpy as np
+
+    candidate = np.asarray(candidate_mask, dtype=bool)
+    visible = np.asarray(visible_seed_mask, dtype=bool)
+    amodal = np.asarray(amodal_mask, dtype=bool)
+    if candidate.ndim != 2 or visible.shape != candidate.shape or amodal.shape != candidate.shape:
+        raise Sam3RegionError("candidate, visible CAD seed, and amodal template must align")
+    candidate_pixels = int(np.count_nonzero(candidate))
+    visible_pixels = int(np.count_nonzero(visible))
+    amodal_pixels = int(np.count_nonzero(amodal))
+    if min(candidate_pixels, visible_pixels, amodal_pixels) <= 0:
+        raise Sam3RegionError("occlusion-aware CAD masks must be non-empty")
+    rows, columns = np.where(amodal)
+    diagonal = math.hypot(
+        int(columns.max() - columns.min() + 1),
+        int(rows.max() - rows.min() + 1),
+    )
+    support_radius = max(1, int(round(0.02 * diagonal)))
+    support = cv2.dilate(
+        amodal.astype(np.uint8),
+        cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (2 * support_radius + 1, 2 * support_radius + 1),
+        ),
+    ) > 0
+    supported_pixels = int(np.count_nonzero(candidate & support))
+    visible_inside_amodal = visible & support
+    known_occlusion = amodal & ~visible_inside_amodal
+    completed = candidate | known_occlusion
+    completed_intersection = int(np.count_nonzero(completed & amodal))
+    completed_union = int(np.count_nonzero(completed | amodal))
+    normalized = _normalized_shape_agreement(
+        completed,
+        amodal,
+        maximum_rotation_degrees=0.0,
+    )
+    return {
+        "cad_amodal_pixels": amodal_pixels,
+        "cad_visible_seed_pixels": visible_pixels,
+        "cad_known_occluded_pixels": int(np.count_nonzero(known_occlusion)),
+        "cad_visible_fraction_of_amodal": int(np.count_nonzero(visible & amodal))
+        / max(1, amodal_pixels),
+        "cad_amodal_support_radius_pixels": support_radius,
+        "cad_amodal_candidate_precision": supported_pixels / max(1, candidate_pixels),
+        "cad_amodal_completion_iou": completed_intersection
+        / max(1, completed_union),
+        "candidate_to_cad_amodal_area_ratio": candidate_pixels
+        / max(1, amodal_pixels),
+        "cad_amodal_shape_iou": float(normalized["cad_shape_iou"]),
+        "cad_amodal_shape_minimum_precision_recall": float(
+            normalized["cad_shape_minimum_precision_recall"]
+        ),
+        "cad_amodal_shape_overlap_smaller": float(
+            normalized["cad_shape_overlap_smaller"]
+        ),
+        "cad_amodal_shape_rotation_degrees": float(
+            normalized["cad_shape_rotation_degrees"]
+        ),
+        "cad_amodal_shape_rotation_search_degrees": 0.0,
+        "cad_amodal_occlusion_aware": True,
     }
 
 
@@ -500,6 +638,7 @@ def _candidate_metrics(
     width: int,
     height: int,
     cad_seed: Any | None = None,
+    cad_amodal: Any | None = None,
 ) -> dict[str, Any]:
     import numpy as np
 
@@ -550,6 +689,12 @@ def _candidate_metrics(
                 **_normalized_shape_agreement(candidate, seed),
             }
         )
+        if cad_amodal is not None:
+            result.update(
+                _occlusion_aware_amodal_agreement(candidate, seed, cad_amodal)
+            )
+    elif cad_amodal is not None:
+        raise Sam3RegionError("amodal CAD template requires a visible CAD seed")
     return result
 
 
@@ -565,6 +710,7 @@ def _segment_box(
     maximum_image_fraction: float,
     minimum_mask_pixels: int,
     cad_seed: Any | None = None,
+    cad_amodal: Any | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
     import numpy as np
 
@@ -609,6 +755,7 @@ def _segment_box(
             width=width,
             height=height,
             cad_seed=cad_seed,
+            cad_amodal=cad_amodal,
         )
         reasons: list[str] = []
         if score < minimum_model_score:
@@ -626,18 +773,37 @@ def _segment_box(
         ):
             reasons.append("prompt_not_localized")
         if cad_seed is not None:
-            if (
-                int(metrics["cad_shape_seed_pixels"])
-                < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS
-            ):
+            if int(metrics["cad_shape_seed_pixels"]) < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS:
                 reasons.append("cad_shape_seed_too_small")
-            elif float(metrics["cad_shape_iou"]) < DEFAULT_MINIMUM_CAD_SHAPE_IOU:
-                reasons.append("cad_shape_iou_below_threshold")
-            elif (
-                float(metrics["cad_shape_area_agreement"])
-                < DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
-            ):
-                reasons.append("cad_shape_area_mismatch")
+            elif cad_amodal is not None:
+                if (
+                    float(metrics["cad_seed_recall"])
+                    < DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL
+                ):
+                    reasons.append("insufficient_visible_cad_seed_recall")
+                if (
+                    float(metrics["cad_amodal_candidate_precision"])
+                    < DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION
+                ):
+                    reasons.append("candidate_extends_outside_complete_mesh_shape")
+                if (
+                    float(metrics["cad_amodal_shape_iou"])
+                    < DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
+                ):
+                    reasons.append("occlusion_aware_amodal_shape_mismatch")
+                if (
+                    float(metrics["candidate_to_cad_amodal_area_ratio"])
+                    > DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO
+                ):
+                    reasons.append("candidate_area_exceeds_complete_mesh_shape")
+            else:
+                if float(metrics["cad_shape_iou"]) < DEFAULT_MINIMUM_CAD_SHAPE_IOU:
+                    reasons.append("cad_shape_iou_below_threshold")
+                if (
+                    float(metrics["cad_shape_area_agreement"])
+                    < DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
+                ):
+                    reasons.append("cad_shape_area_mismatch")
         audit = {
             "candidate_index": index,
             "model_score": round(score, 8),
@@ -652,7 +818,10 @@ def _segment_box(
         if not reasons:
             if cad_seed is not None:
                 rank = (
-                    float(metrics["cad_shape_iou"]),
+                    float(
+                        metrics.get("cad_amodal_shape_iou", metrics["cad_shape_iou"])
+                    ),
+                    float(metrics.get("cad_amodal_candidate_precision", 1.0)),
                     float(metrics["cad_shape_minimum_precision_recall"]),
                     float(metrics["cad_shape_overlap_smaller"]),
                     float(metrics["cad_shape_area_agreement"]),
@@ -943,6 +1112,7 @@ def _segment_shape_guided_points(
     minimum_prompt_overlap: float,
     maximum_image_fraction: float,
     minimum_mask_pixels: int,
+    cad_amodal: Any | None = None,
     other_part_seeds: Any | None = None,
 ) -> tuple[Any | None, dict[str, Any]]:
     """Refine a coarse box result with CAD-derived positive/negative points."""
@@ -993,6 +1163,22 @@ def _segment_shape_guided_points(
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=0,
     ) > 0
+    aligned_amodal = None
+    if cad_amodal is not None:
+        aligned_amodal = cv2.warpAffine(
+            np.asarray(cad_amodal, dtype=np.uint8),
+            np.asarray(
+                [
+                    [1.0, 0.0, prompt_audit["translation_xy_pixels"][0]],
+                    [0.0, 1.0, prompt_audit["translation_xy_pixels"][1]],
+                ],
+                dtype=np.float32,
+            ),
+            (image.width, image.height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        ) > 0
     selected_array = np.asarray(selected, dtype=bool)
     direct_intersection = int(np.count_nonzero(selected_array & aligned_seed))
     direct_overlap_smaller = direct_intersection / max(
@@ -1008,7 +1194,8 @@ def _segment_shape_guided_points(
         "applied": False,
     }
     if direct_overlap_smaller >= 0.25:
-        rows, columns = np.where(aligned_seed)
+        support_seed = aligned_amodal if aligned_amodal is not None else aligned_seed
+        rows, columns = np.where(support_seed)
         diagonal = math.hypot(
             int(columns.max() - columns.min() + 1),
             int(rows.max() - rows.min() + 1),
@@ -1020,17 +1207,17 @@ def _segment_shape_guided_points(
         maximum_pixels = int(
             math.floor(
                 DEFAULT_MAXIMUM_FINAL_SAM_TO_CAD_AREA_RATIO
-                * int(np.count_nonzero(aligned_seed))
+                * int(np.count_nonzero(support_seed))
             )
         )
-        bounded = selected_array & aligned_seed
+        bounded = selected_array & support_seed
         selected_radius = 0
         for radius in range(maximum_radius + 1):
             support = (
-                aligned_seed
+                support_seed
                 if radius == 0
                 else cv2.dilate(
-                    aligned_seed.astype(np.uint8),
+                    support_seed.astype(np.uint8),
                     cv2.getStructuringElement(
                         cv2.MORPH_ELLIPSE,
                         (2 * radius + 1, 2 * radius + 1),
@@ -1061,17 +1248,40 @@ def _segment_shape_guided_points(
         width=image.width,
         height=image.height,
         cad_seed=aligned_seed,
+        cad_amodal=aligned_amodal,
     )
     reasons: list[str] = []
     if int(metrics["cad_shape_seed_pixels"]) < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS:
         reasons.append("cad_shape_seed_too_small")
-    if float(metrics["cad_shape_iou"]) < DEFAULT_MINIMUM_CAD_SHAPE_IOU:
-        reasons.append("cad_shape_iou_below_threshold")
-    if (
-        float(metrics["cad_shape_area_agreement"])
-        < DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
-    ):
-        reasons.append("cad_shape_area_mismatch")
+    if aligned_amodal is not None:
+        if (
+            float(metrics["cad_seed_recall"])
+            < DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL
+        ):
+            reasons.append("insufficient_visible_cad_seed_recall")
+        if (
+            float(metrics["cad_amodal_candidate_precision"])
+            < DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION
+        ):
+            reasons.append("candidate_extends_outside_complete_mesh_shape")
+        if (
+            float(metrics["cad_amodal_shape_iou"])
+            < DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
+        ):
+            reasons.append("occlusion_aware_amodal_shape_mismatch")
+        if (
+            float(metrics["candidate_to_cad_amodal_area_ratio"])
+            > DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO
+        ):
+            reasons.append("candidate_area_exceeds_complete_mesh_shape")
+    else:
+        if float(metrics["cad_shape_iou"]) < DEFAULT_MINIMUM_CAD_SHAPE_IOU:
+            reasons.append("cad_shape_iou_below_threshold")
+        if (
+            float(metrics["cad_shape_area_agreement"])
+            < DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
+        ):
+            reasons.append("cad_shape_area_mismatch")
     if (
         float(metrics["cad_seed_overlap_smaller"])
         < DEFAULT_MINIMUM_ALIGNED_CAD_OVERLAP_SMALLER
@@ -1093,6 +1303,11 @@ def _segment_shape_guided_points(
                 for key, value in metrics.items()
             },
             "aligned_cad_support_bound": support_audit,
+            "shape_authority": (
+                "isolated_mesh_amodal_plus_whole_assembly_visibility"
+                if aligned_amodal is not None
+                else "whole_assembly_visible_part_id_only"
+            ),
         }
     )
     return (selected if not reasons else None), result
@@ -1392,6 +1607,7 @@ def run(
     )
     automatic_shape_interactive_requested = any(
         isinstance(region.get("cad_projection_seed"), Mapping)
+        or isinstance(region.get("cad_amodal_template"), Mapping)
         for region in request["regions"]
     )
     interactive_requested = (
@@ -1424,6 +1640,7 @@ def run(
             image = ImageOps.exif_transpose(opened).convert("RGB")
         image_state = processor.set_image(image)
         view_cad_seeds: dict[str, Any] = {}
+        view_cad_amodal: dict[str, Any] = {}
         for seed_region in regions_by_view[view_id]:
             seed_record = seed_region.get("cad_projection_seed")
             if not isinstance(seed_record, Mapping):
@@ -1438,6 +1655,18 @@ def run(
                     f"{seed_region['group_id']} differ from the source image"
                 )
             view_cad_seeds[str(seed_region["group_id"])] = seed_array
+            amodal_record = seed_region.get("cad_amodal_template")
+            if isinstance(amodal_record, Mapping):
+                with Image.open(Path(str(amodal_record["path"]))) as amodal_opened:
+                    amodal_array = (
+                        np.asarray(amodal_opened.convert("L"), dtype=np.uint8) >= 128
+                    )
+                if amodal_array.shape != (image.height, image.width):
+                    raise Sam3RegionError(
+                        f"CAD amodal template dimensions for {view_id}/"
+                        f"{seed_region['group_id']} differ from the source image"
+                    )
+                view_cad_amodal[str(seed_region["group_id"])] = amodal_array
         view_records: list[dict[str, Any]] = []
         for region in sorted(
             regions_by_view[view_id], key=lambda item: str(item["group_id"])
@@ -1457,8 +1686,12 @@ def run(
             click_sets = region.get("click_sets")
             cad_seed_array = None
             cad_seed_record = region.get("cad_projection_seed")
+            cad_amodal_record = region.get("cad_amodal_template")
+            cad_amodal_array = None
             if isinstance(cad_seed_record, Mapping):
                 cad_seed_array = view_cad_seeds[str(region["group_id"])]
+            if isinstance(cad_amodal_record, Mapping):
+                cad_amodal_array = view_cad_amodal[str(region["group_id"])]
             if click_sets:
                 if model.inst_interactive_predictor is None:
                     raise Sam3RegionError(
@@ -1521,6 +1754,7 @@ def run(
                         maximum_image_fraction=maximum_image_fraction,
                         minimum_mask_pixels=minimum_mask_pixels,
                         cad_seed=cad_seed_array,
+                        cad_amodal=cad_amodal_array,
                     )
                     selected = initial_selected
                     audit = initial_shape_audit
@@ -1565,6 +1799,7 @@ def run(
                                 image_state=image_state,
                                 image=image,
                                 cad_seed=cad_seed_array,
+                                cad_amodal=cad_amodal_array,
                                 coarse_candidate=coarse_selected,
                                 box=box,
                                 minimum_model_score=minimum_model_score,
@@ -1609,7 +1844,9 @@ def run(
                                 "coarse_box_audit": coarse_audit,
                                 "shape_point_refinement": shape_point_audit,
                                 "selection_policy": (
-                                    "same_view_cad_template_always_guides_sam3"
+                                    "modal_visibility_plus_amodal_mesh_shape_guides_sam3"
+                                    if cad_amodal_array is not None
+                                    else "same_view_cad_template_always_guides_sam3"
                                 ),
                             }
                         else:
@@ -1769,6 +2006,16 @@ def run(
                         if isinstance(cad_seed_record, Mapping)
                         else None
                     ),
+                    "cad_amodal_template": (
+                        {
+                            **dict(cad_amodal_record),
+                            "selection_role": (
+                                "complete_mesh_shape_prior_occlusion_aware_gate"
+                            ),
+                        }
+                        if isinstance(cad_amodal_record, Mapping)
+                        else None
+                    ),
                     "_mask": union if accepted else None,
                 }
             )
@@ -1816,6 +2063,20 @@ def run(
         "minimum_cad_shape_seed_pixels": DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS,
         "minimum_cad_shape_iou": DEFAULT_MINIMUM_CAD_SHAPE_IOU,
         "minimum_cad_shape_area_agreement": (DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT),
+        "minimum_amodal_candidate_precision": (
+            DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION
+        ),
+        "minimum_amodal_completion_shape_iou": (
+            DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
+        ),
+        "maximum_candidate_to_amodal_area_ratio": (
+            DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO
+        ),
+        "minimum_visible_cad_seed_recall": DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL,
+        "dual_template_roles": {
+            "whole_assembly_part_id": "location_visibility_and_occlusion_prior",
+            "isolated_mesh_projection": "complete_shape_prior",
+        },
         "cad_shape_candidate_policy": (
             "same_view_rendered_part_template_bounded_translation_direct_support"
         ),
