@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""Build a browser report for the CAD/SAM3/EntitySeg hybrid decision."""
+
+from __future__ import annotations
+
+import argparse
+import html
+import json
+from pathlib import Path
+from typing import Any, Mapping
+
+import cv2
+import numpy as np
+
+from .entityseg_comparison_report import _annotate, _mask, _overlay, _read_manifest
+from .entityseg_regions import EntitySegRegionError
+
+
+def _all_records(
+    document: Mapping[str, Any], label: str
+) -> dict[tuple[str, str], Mapping[str, Any]]:
+    output: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for index, row in enumerate(document["records"]):
+        if not isinstance(row, Mapping):
+            raise EntitySegRegionError(f"{label} record {index} is malformed")
+        key = (str(row.get("view_id")), str(row.get("group_id")))
+        if key in output:
+            raise EntitySegRegionError(f"duplicate {label} record: {key}")
+        output[key] = row
+    return output
+
+
+def _record_mask(
+    root: Path, row: Mapping[str, Any], expected_shape: tuple[int, int]
+) -> np.ndarray:
+    mask = row.get("mask")
+    if not isinstance(mask, Mapping) or not isinstance(mask.get("path"), str):
+        return np.zeros(expected_shape, dtype=bool)
+    path = Path(mask["path"])
+    if not path.is_absolute():
+        path = root / path
+    return _mask(path, expected_shape)
+
+
+def _tile(
+    *,
+    source: np.ndarray,
+    seed: np.ndarray,
+    sam: np.ndarray,
+    entity: np.ndarray,
+    hybrid: np.ndarray,
+    sam_accepted: bool,
+    entity_accepted: bool,
+    selected_source: str,
+) -> np.ndarray:
+    union = seed | sam | entity | hybrid
+    ys, xs = np.where(union)
+    pad = 20
+    left = max(0, int(xs.min()) - pad)
+    right = min(source.shape[1], int(xs.max()) + pad + 1)
+    top = max(0, int(ys.min()) - pad)
+    bottom = min(source.shape[0], int(ys.max()) + pad + 1)
+    panels: list[np.ndarray] = []
+    definitions = (
+        ("CAD projection", seed, (0, 0, 255)),
+        ("SAM3" if sam_accepted else "SAM3 rejected", sam, (0, 255, 0)),
+        (
+            "EntitySeg" if entity_accepted else "EntitySeg rejected",
+            entity,
+            (255, 255, 0),
+        ),
+        (f"FINAL: {selected_source}", hybrid, (255, 0, 255)),
+    )
+    for label, mask, color in definitions:
+        crop = _overlay(source, mask, color)[top:bottom, left:right]
+        panel = cv2.resize(crop, (300, 230), interpolation=cv2.INTER_NEAREST)
+        _annotate(panel, label)
+        panels.append(panel)
+    return np.hstack(panels)
+
+
+def build_report(
+    *,
+    sam_manifest_path: Path,
+    entity_manifest_path: Path,
+    hybrid_manifest_path: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    sam_manifest_path = sam_manifest_path.expanduser().resolve(strict=True)
+    entity_manifest_path = entity_manifest_path.expanduser().resolve(strict=True)
+    hybrid_manifest_path = hybrid_manifest_path.expanduser().resolve(strict=True)
+    sam_root = sam_manifest_path.parent
+    entity_root = entity_manifest_path.parent
+    hybrid_root = hybrid_manifest_path.parent
+    sam = _all_records(_read_manifest(sam_manifest_path, "SAM3 manifest"), "SAM3")
+    entity = _all_records(
+        _read_manifest(entity_manifest_path, "EntitySeg manifest"), "EntitySeg"
+    )
+    hybrid_document = _read_manifest(hybrid_manifest_path, "hybrid manifest")
+    hybrid = _all_records(hybrid_document, "hybrid")
+    if set(sam) != set(entity) or set(sam) != set(hybrid):
+        raise EntitySegRegionError("comparison manifests have different region sets")
+
+    output_dir = output_dir.expanduser().resolve()
+    assets_dir = output_dir / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, Any]] = []
+    for key in sorted(hybrid):
+        final_row = hybrid[key]
+        if final_row.get("accepted") is not True:
+            continue
+        sam_row = sam[key]
+        entity_row = entity[key]
+        source_path = Path(str(final_row["source_image"])).expanduser().resolve(
+            strict=True
+        )
+        source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
+        if source is None:
+            raise EntitySegRegionError(f"unable to decode source: {source_path}")
+        seed_doc = entity_row.get("cad_projection_seed") or sam_row.get(
+            "cad_projection_seed"
+        )
+        if not isinstance(seed_doc, Mapping):
+            raise EntitySegRegionError(f"missing CAD seed: {key}")
+        seed = _mask(Path(str(seed_doc["path"])), source.shape[:2])
+        sam_mask = _record_mask(sam_root, sam_row, source.shape[:2])
+        entity_mask = _record_mask(entity_root, entity_row, source.shape[:2])
+        final_mask = _record_mask(hybrid_root, final_row, source.shape[:2])
+        decision = str(final_row["decision"])
+        asset_name = f"{decision}__{key[0]}__{key[1]}.png"
+        asset_path = assets_dir / asset_name
+        tile = _tile(
+            source=source,
+            seed=seed,
+            sam=sam_mask,
+            entity=entity_mask,
+            hybrid=final_mask,
+            sam_accepted=sam_row.get("accepted") is True,
+            entity_accepted=entity_row.get("accepted") is True,
+            selected_source=str(final_row["selected_source"]),
+        )
+        if not cv2.imwrite(str(asset_path), tile):
+            raise EntitySegRegionError(f"unable to write hybrid tile: {asset_path}")
+        rows.append(
+            {
+                "view_id": key[0],
+                "part_id": key[1],
+                "decision": decision,
+                "selected_source": final_row["selected_source"],
+                "entityseg_rejection_reasons": final_row.get(
+                    "entityseg_fusion_rejection_reasons", []
+                ),
+                "metrics": final_row.get("fusion_metrics"),
+                "asset": f"assets/{asset_name}",
+            }
+        )
+
+    labels = {
+        "entityseg_replaces_sam3_boundary": "EntitySeg 改善 SAM3 边界",
+        "entityseg_fills_sam3_gap": "EntitySeg 补充 SAM3 未通过区域",
+        "sam3_retained_after_entityseg_rejection": "EntitySeg 不安全，保留 SAM3",
+        "sam3_only_candidate": "仅 SAM3 有安全候选",
+    }
+    sections: list[str] = []
+    for decision in labels:
+        cards: list[str] = []
+        for row in rows:
+            if row["decision"] != decision:
+                continue
+            metrics = row.get("metrics") or {}
+            details: list[str] = []
+            if "entity_edge_improvement" in metrics:
+                details.append(f"边缘增益 {metrics['entity_edge_improvement']:+.3f}")
+            if "entity_cad_direct_iou" in metrics:
+                details.append(f"CAD 直接 IoU {metrics['entity_cad_direct_iou']:.3f}")
+            if "entity_to_cad_area_ratio" in metrics:
+                details.append(f"面积比 {metrics['entity_to_cad_area_ratio']:.2f}")
+            reasons = row["entityseg_rejection_reasons"]
+            if reasons:
+                details.append("拒绝原因：" + ", ".join(reasons))
+            cards.append(
+                '<article class="card">'
+                f"<h3>{html.escape(row['view_id'])} / {html.escape(row['part_id'])}</h3>"
+                f'<a href="{html.escape(row["asset"])}" target="_blank">'
+                f'<img src="{html.escape(row["asset"])}" loading="lazy"></a>'
+                f"<p>{html.escape(' · '.join(details))}</p></article>"
+            )
+        sections.append(
+            f'<section id="{decision}"><h2>{labels[decision]} ({len(cards)})</h2>'
+            f'<div class="grid">{"".join(cards)}</div></section>'
+        )
+
+    summary = hybrid_document["summary"]
+    page = f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SAM3 + EntitySeg 融合结果</title><style>
+:root{{--bg:#0b0f14;--panel:#131a22;--text:#e8eef5;--muted:#9fb0c1;--accent:#40ded7}}*{{box-sizing:border-box}}
+body{{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,sans-serif}}main{{max-width:1560px;margin:auto;padding:28px}}
+h1{{margin:.1em 0}}h2{{margin-top:42px}}.lead,.card p{{color:var(--muted)}}.stats{{display:flex;gap:10px;flex-wrap:wrap;margin:20px 0}}
+.stat,.card{{background:var(--panel);border:1px solid #253342;border-radius:11px}}.stat{{padding:12px 16px}}nav a{{color:var(--accent);margin-right:18px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(590px,1fr));gap:14px}}.card{{padding:12px;overflow:hidden}}.card h3{{margin:0 0 8px}}
+.card img{{display:block;width:100%;height:auto;border-radius:7px}}.card p{{margin:8px 2px 0}}@media(max-width:650px){{main{{padding:14px}}.grid{{grid-template-columns:1fr}}}}
+</style></head><body><main><h1>SAM3 + EntitySeg 辅助分割</h1>
+<p class="lead">红色为 CAD 投影，绿色为 SAM3，青色为 EntitySeg，紫色为最终选择。CAD/SAM3 确定零件身份，EntitySeg 只在边界改善且未合并邻件时接管。</p>
+<div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">Entity 改善 SAM <b>{summary['decision_counts']['entityseg_replaces_sam3_boundary']}</b></div><div class="stat">Entity 补充缺口 <b>{summary['decision_counts']['entityseg_fills_sam3_gap']}</b></div><div class="stat">最终来源：Entity <b>{summary['selected_source_counts']['entityseg']}</b> / SAM <b>{summary['selected_source_counts']['sam3']}</b></div></div>
+<p class="lead">这是边界融合预览，尚未写回正式材质推理输入。点击图片可查看原始像素。</p>
+<nav>{''.join(f'<a href="#{key}">{value}</a>' for key,value in labels.items())}</nav>{''.join(sections)}</main></body></html>"""
+    (output_dir / "index.html").write_text(page, encoding="utf-8")
+    result = {"summary": summary, "records": rows}
+    (output_dir / "comparison.json").write_text(
+        json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    return result
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--sam-manifest", required=True, type=Path)
+    parser.add_argument("--entity-manifest", required=True, type=Path)
+    parser.add_argument("--hybrid-manifest", required=True, type=Path)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    args = parser.parse_args()
+    result = build_report(
+        sam_manifest_path=args.sam_manifest,
+        entity_manifest_path=args.entity_manifest,
+        hybrid_manifest_path=args.hybrid_manifest,
+        output_dir=args.output_dir,
+    )
+    print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
