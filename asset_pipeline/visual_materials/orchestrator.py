@@ -2421,9 +2421,6 @@ def _run_policy_part_id_stage(
             propagate_exact_cad_instances=(
                 config.exact_cad_instance_material_propagation
             ),
-            propagate_source_material_bindings=(
-                config.source_material_binding_propagation
-            ),
         )
         if (
             appearance_component_document is not None
@@ -2486,9 +2483,6 @@ def _run_policy_part_id_stage(
             propagation_summary = direct_audit_document.get(
                 "exact_cad_instance_material_propagation", {}
             ).get("summary", {})
-            binding_summary = direct_audit_document.get(
-                "source_material_binding_propagation", {}
-            ).get("summary", {})
             log_message(
                 log_cb,
                 "Material-identity-first Part-ID assignment completed: "
@@ -2500,11 +2494,6 @@ def _run_policy_part_id_stage(
                 "CAD instances inherited a unanimous library material; "
                 f"{propagation_summary.get('conflict_unobserved_part_count', 0)} "
                 "conflicting instances remained fail-closed. "
-                f"{binding_summary.get('propagated_part_count', 0)} members "
-                "in unanimous authored CAD material bindings inherited the "
-                "same library material; "
-                f"{binding_summary.get('conflict_unobserved_part_count', 0)} "
-                "binding-conflict members remained fail-closed. "
                 "No colour parameters or appearance-component identity sharing "
                 "were allowed in this stage.",
             )
@@ -7667,9 +7656,6 @@ def _run_finalize_assignment_stage(
         "material_identity_local_context": config.material_identity_local_context,
         "exact_cad_instance_material_propagation": (
             config.exact_cad_instance_material_propagation
-        ),
-        "source_material_binding_propagation": (
-            config.source_material_binding_propagation
         ),
         "part_id_parameter_tournament": (
             str(part_id_parameter_tournament_audit.resolve(strict=True))

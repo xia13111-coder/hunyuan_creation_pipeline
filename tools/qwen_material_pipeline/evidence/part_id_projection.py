@@ -61,9 +61,6 @@ COLOR_EVIDENCE_GATE_SCHEMA_VERSION = "qwen-part-id-color-evidence-gate/v1"
 EXACT_CAD_INSTANCE_PROPAGATION_SCHEMA_VERSION = (
     "qwen-exact-cad-instance-material-propagation/v1"
 )
-SOURCE_MATERIAL_BINDING_PROPAGATION_SCHEMA_VERSION = (
-    "qwen-source-material-binding-propagation/v1"
-)
 DEFAULT_MAXIMUM_COATING_ALBEDO_DISTANCE = 0.12
 DEFAULT_MINIMUM_COATING_COMPONENT_PARTS = 2
 DEFAULT_MINIMUM_COATING_ANCHOR_PIXELS = 128
@@ -3301,314 +3298,6 @@ def _apply_exact_cad_instance_material_propagation(
     }
 
 
-def _source_material_binding_signature(
-    row: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    """Return one exact authored CAD material-slot identity, when present."""
-
-    material_path = row.get("existing_visual_material")
-    properties = row.get("existing_visual_material_properties")
-    if material_path is None and properties is None:
-        return None
-    if (
-        not isinstance(material_path, str)
-        or not material_path.startswith("/")
-        or not isinstance(properties, Mapping)
-        or not properties
-        or not _is_sha256(row.get("source_appearance_sha256"))
-        or not _is_sha256(row.get("source_subset_layout_sha256"))
-    ):
-        raise PartIdProjectionError(
-            "Part-ID registry has an invalid source material binding identity"
-        )
-    return {
-        "existing_visual_material": material_path,
-        "existing_visual_material_properties_sha256": _canonical_sha256(
-            properties
-        ),
-        "source_appearance_sha256": row["source_appearance_sha256"],
-        "source_subset_layout_sha256": row["source_subset_layout_sha256"],
-    }
-
-
-def _apply_source_material_binding_propagation(
-    *,
-    assignments: list[dict[str, Any]],
-    audit_rows: list[dict[str, Any]],
-    evidence_by_part: Mapping[str, Mapping[str, Any]],
-    part_registry: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Propagate an MDL across one exact authored CAD material binding.
-
-    A shared PreviewSurface/material slot is an authored relationship, not a
-    visual guess.  It is nevertheless used only when every photo-observed
-    member independently selected the same library MDL.  A disagreement, a
-    low-confidence anchor, or a clash with exact-instance propagation leaves
-    the entire cohort fail-closed.
-    """
-
-    raw_parts = part_registry.get("parts")
-    if not isinstance(raw_parts, list) or not raw_parts:
-        raise PartIdProjectionError(
-            "source material binding propagation requires a Part-ID registry"
-        )
-    registry_by_part: dict[str, Mapping[str, Any]] = {}
-    binding_rows: list[dict[str, Any]] = []
-    signature_by_part: dict[str, dict[str, Any] | None] = {}
-    groups: dict[str, list[str]] = defaultdict(list)
-    for index, raw in enumerate(raw_parts):
-        part_id = raw.get("part_id") if isinstance(raw, Mapping) else None
-        if (
-            not isinstance(part_id, str)
-            or not part_id
-            or part_id in registry_by_part
-        ):
-            raise PartIdProjectionError(
-                f"Part-ID registry row {index} has an invalid Part-ID"
-            )
-        signature = _source_material_binding_signature(raw)
-        registry_by_part[part_id] = raw
-        signature_by_part[part_id] = signature
-        binding_rows.append(
-            {"part_id": part_id, "source_material_binding": signature}
-        )
-        if signature is not None:
-            groups[_canonical_sha256(signature)].append(part_id)
-    if set(registry_by_part) != set(evidence_by_part):
-        raise PartIdProjectionError(
-            "source material binding registry does not cover the evidence Part-IDs"
-        )
-
-    assignment_by_part = {str(row["part_id"]): row for row in assignments}
-    audit_by_part = {str(row["part_id"]): row for row in audit_rows}
-    if (
-        set(assignment_by_part) != set(evidence_by_part)
-        or set(audit_by_part) != set(evidence_by_part)
-    ):
-        raise PartIdProjectionError(
-            "source material binding propagation inputs are not an exact Part-ID cover"
-        )
-
-    propagated_groups: list[dict[str, Any]] = []
-    conflict_groups: list[dict[str, Any]] = []
-    propagated_part_ids: set[str] = set()
-    for signature_sha256, raw_members in sorted(groups.items()):
-        members = sorted(raw_members)
-        if len(members) < 2:
-            continue
-        observed_members = sorted(
-            part_id
-            for part_id in members
-            if evidence_by_part[part_id].get("status") == "observed"
-        )
-        unobserved_members = sorted(set(members) - set(observed_members))
-        if not observed_members or not unobserved_members:
-            continue
-        observed_statuses = {
-            part_id: str(audit_by_part[part_id].get("status"))
-            for part_id in observed_members
-        }
-        observed_materials = {
-            part_id: assignment_by_part[part_id].get("material_id")
-            for part_id in observed_members
-        }
-        eligible = (
-            all(
-                status == "independently_selected"
-                for status in observed_statuses.values()
-            )
-            and all(
-                isinstance(material_id, str) and material_id.startswith("mdl:")
-                for material_id in observed_materials.values()
-            )
-            and len(set(observed_materials.values())) == 1
-        )
-        signature = signature_by_part[members[0]]
-        assert signature is not None
-        group_base = {
-            "binding_signature_sha256": signature_sha256,
-            "binding_signature": copy.deepcopy(signature),
-            "member_part_ids": members,
-            "observed_anchor_part_ids": observed_members,
-            "unobserved_member_part_ids": unobserved_members,
-            "observed_material_ids": {
-                part_id: material_id
-                for part_id, material_id in sorted(observed_materials.items())
-            },
-            "observed_audit_statuses": {
-                part_id: status
-                for part_id, status in sorted(observed_statuses.items())
-            },
-        }
-        if not eligible:
-            conflict_groups.append(
-                {
-                    **group_base,
-                    "status": "CONFLICT_REQUIRES_JOINT_RERANK",
-                    "reason": (
-                        "observed_member_not_independently_selected"
-                        if any(
-                            status != "independently_selected"
-                            for status in observed_statuses.values()
-                        )
-                        else "observed_material_identity_disagreement"
-                    ),
-                }
-            )
-            continue
-        material_id = next(iter(observed_materials.values()))
-        anchor_confidences = [
-            float(assignment_by_part[part_id].get("confidence", 0.0))
-            for part_id in observed_members
-        ]
-        if any(
-            not math.isfinite(value)
-            or value < MINIMUM_APPLYABLE_REVIEW_CONFIDENCE
-            or value > 1.0
-            for value in anchor_confidences
-        ):
-            conflict_groups.append(
-                {
-                    **group_base,
-                    "status": "CONFLICT_REQUIRES_JOINT_RERANK",
-                    "reason": "observed_anchor_confidence_below_review_floor",
-                }
-            )
-            continue
-        prior_exact = sorted(
-            part_id
-            for part_id in unobserved_members
-            if audit_by_part[part_id].get("status")
-            == "unobserved_exact_instance_propagated"
-        )
-        if any(
-            assignment_by_part[part_id].get("material_id") != material_id
-            for part_id in prior_exact
-        ):
-            conflict_groups.append(
-                {
-                    **group_base,
-                    "status": "CONFLICT_REQUIRES_JOINT_RERANK",
-                    "reason": "exact_instance_and_source_binding_disagreement",
-                    "prior_exact_instance_part_ids": prior_exact,
-                }
-            )
-            continue
-
-        propagated: list[str] = []
-        for part_id in unobserved_members:
-            if part_id in prior_exact:
-                continue
-            assignment = assignment_by_part[part_id]
-            provenance = assignment.get("provenance")
-            forbidden_group_keys = {
-                "canonical_group_id",
-                "material_region_group_id",
-                "group_id",
-            }
-            if (
-                evidence_by_part[part_id].get("status") == "observed"
-                or audit_by_part[part_id].get("status") != "unobserved_preserved"
-                or assignment.get("status") != "policy_fallback"
-                or any(assignment.get(key) is not None for key in forbidden_group_keys)
-                or (
-                    isinstance(provenance, Mapping)
-                    and any(
-                        provenance.get(key) is not None
-                        for key in forbidden_group_keys
-                    )
-                )
-            ):
-                raise PartIdProjectionError(
-                    f"source material binding target {part_id} is not an "
-                    "independent unobserved policy fallback"
-                )
-            baseline_sha256 = _canonical_sha256(assignment)
-            baseline_material_id = assignment.get("material_id")
-            assignment["material_id"] = material_id
-            assignment["semantic"] = (
-                "unanimous photo-observed members of the exact authored CAD "
-                "material binding"
-            )
-            assignment["confidence"] = min(anchor_confidences)
-            assignment["evidence_views"] = []
-            assignment["status"] = "review"
-            for stale_field in _OBSERVED_ASSIGNMENT_RESET_FIELDS:
-                assignment.pop(stale_field, None)
-            assignment["provenance"] = {
-                "assignment_unit": "part_id",
-                "part_id": part_id,
-                "palette_fusion_used": False,
-                "selection_basis": (
-                    "unanimous_exact_authored_cad_material_binding_consensus"
-                ),
-                "source_material_binding_propagation": True,
-                "binding_signature_sha256": signature_sha256,
-                "observed_anchor_part_ids": observed_members,
-                "source_policy_assignment_sha256": baseline_sha256,
-                "source_policy_material_id": baseline_material_id,
-                "photo_observed": False,
-                "color_parameters_authored": False,
-            }
-            audit_by_part[part_id].clear()
-            audit_by_part[part_id].update(
-                {
-                    "part_id": part_id,
-                    "status": "unobserved_source_binding_propagated",
-                    "material_id": material_id,
-                    "source_policy_material_id": baseline_material_id,
-                    "source_policy_assignment_sha256": baseline_sha256,
-                    "binding_signature_sha256": signature_sha256,
-                    "observed_anchor_part_ids": observed_members,
-                    "evidence_view_ids": [],
-                }
-            )
-            propagated.append(part_id)
-            propagated_part_ids.add(part_id)
-        if propagated:
-            propagated_groups.append(
-                {
-                    **group_base,
-                    "status": "PROPAGATED",
-                    "material_id": material_id,
-                    "propagated_part_ids": propagated,
-                    "consistent_prior_exact_instance_part_ids": prior_exact,
-                }
-            )
-
-    return {
-        "schema_version": SOURCE_MATERIAL_BINDING_PROPAGATION_SCHEMA_VERSION,
-        "status": "COMPLETED",
-        "policy": {
-            "exact_existing_visual_material_path_required": True,
-            "exact_existing_material_properties_required": True,
-            "exact_source_appearance_required": True,
-            "exact_source_subset_layout_required": True,
-            "all_observed_members_must_be_independently_selected": True,
-            "unanimous_observed_material_required": True,
-            "color_parameters_never_propagated": True,
-            "conflicts_fail_closed_to_policy_fallback": True,
-        },
-        "source_material_binding_registry_sha256": _canonical_sha256(
-            sorted(binding_rows, key=lambda row: str(row["part_id"]))
-        ),
-        "propagated_groups": propagated_groups,
-        "conflict_groups": conflict_groups,
-        "summary": {
-            "propagated_group_count": len(propagated_groups),
-            "propagated_part_count": len(propagated_part_ids),
-            "conflict_group_count": len(conflict_groups),
-            "conflict_unobserved_part_count": len(
-                {
-                    part_id
-                    for group in conflict_groups
-                    for part_id in group["unobserved_member_part_ids"]
-                }
-            ),
-        },
-    }
-
-
 def build_part_id_material_plan(
     *,
     base_plan: Mapping[str, Any],
@@ -3621,7 +3310,6 @@ def build_part_id_material_plan(
     part_registry: Mapping[str, Any] | None = None,
     enforce_coating_consistency: bool = True,
     propagate_exact_cad_instances: bool = False,
-    propagate_source_material_bindings: bool = False,
     maximum_coating_albedo_distance: float = (DEFAULT_MAXIMUM_COATING_ALBEDO_DISTANCE),
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Replace observed parts independently while preserving hidden fallbacks."""
@@ -3764,23 +3452,12 @@ def build_part_id_material_plan(
         raise PartIdProjectionError(
             "propagate_exact_cad_instances must be boolean"
         )
-    if not isinstance(propagate_source_material_bindings, bool):
-        raise PartIdProjectionError(
-            "propagate_source_material_bindings must be boolean"
-        )
     if propagate_exact_cad_instances and (
         part_registry is None or not selected_material_predictions
     ):
         raise PartIdProjectionError(
             "exact CAD instance propagation requires a Part-ID registry and "
             "catalog-family-first material predictions"
-        )
-    if propagate_source_material_bindings and (
-        part_registry is None or not selected_material_predictions
-    ):
-        raise PartIdProjectionError(
-            "source material binding propagation requires a Part-ID registry "
-            "and catalog-family-first material predictions"
         )
     if (
         isinstance(maximum_coating_albedo_distance, bool)
@@ -4017,34 +3694,6 @@ def build_part_id_material_plan(
             )
         )
 
-    source_binding_propagation = {
-        "schema_version": SOURCE_MATERIAL_BINDING_PROPAGATION_SCHEMA_VERSION,
-        "status": "NOT_RUN",
-        "reason": (
-            "part_registry_not_supplied"
-            if part_registry is None
-            else "disabled_by_caller"
-        ),
-        "propagated_groups": [],
-        "conflict_groups": [],
-        "summary": {
-            "propagated_group_count": 0,
-            "propagated_part_count": 0,
-            "conflict_group_count": 0,
-            "conflict_unobserved_part_count": 0,
-        },
-    }
-    if propagate_source_material_bindings:
-        assert part_registry is not None
-        source_binding_propagation = (
-            _apply_source_material_binding_propagation(
-                assignments=output_assignments,
-                audit_rows=audit_rows,
-                evidence_by_part=evidence_by_part,
-                part_registry=part_registry,
-            )
-        )
-
     coating_consistency = {
         "schema_version": COATING_CONSISTENCY_SCHEMA_VERSION,
         "status": "NOT_RUN",
@@ -4140,12 +3789,6 @@ def build_part_id_material_plan(
             "exact_cad_instance_material_propagation_schema_version": (
                 EXACT_CAD_INSTANCE_PROPAGATION_SCHEMA_VERSION
             ),
-            "source_material_binding_propagation_enabled": (
-                propagate_source_material_bindings
-            ),
-            "source_material_binding_propagation_schema_version": (
-                SOURCE_MATERIAL_BINDING_PROPAGATION_SCHEMA_VERSION
-            ),
         }
     )
     if selected_material_predictions:
@@ -4169,7 +3812,6 @@ def build_part_id_material_plan(
         "output_plan_sha256": _canonical_sha256(plan),
         "coating_consistency_gate": coating_consistency,
         "exact_cad_instance_material_propagation": exact_instance_propagation,
-        "source_material_binding_propagation": source_binding_propagation,
         "parts": audit_rows,
         "summary": {
             "part_count": len(output_assignments),
@@ -4181,10 +3823,6 @@ def build_part_id_material_plan(
             ),
             "unobserved_exact_instance_propagated_count": sum(
                 row["status"] == "unobserved_exact_instance_propagated"
-                for row in audit_rows
-            ),
-            "unobserved_source_binding_propagated_count": sum(
-                row["status"] == "unobserved_source_binding_propagated"
                 for row in audit_rows
             ),
             "observed_low_confidence_baseline_retained_count": sum(

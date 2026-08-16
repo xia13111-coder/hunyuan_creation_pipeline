@@ -28,9 +28,6 @@ PART_ID_AUDIT_SCHEMA_VERSION = "qwen-part-id-material-plan-audit/v1"
 EXACT_CAD_INSTANCE_PROPAGATION_SCHEMA_VERSION = (
     "qwen-exact-cad-instance-material-propagation/v1"
 )
-SOURCE_MATERIAL_BINDING_PROPAGATION_SCHEMA_VERSION = (
-    "qwen-source-material-binding-propagation/v1"
-)
 QUEUE_SCHEMA_VERSION = "qwen-multigroup-exact-mdl-queue/v1"
 TOURNAMENT_SCHEMA_VERSION = "qwen-multigroup-exact-mdl-coordinate-descent/v1"
 RENDERED_REGISTRY_SCHEMA_VERSION = "qwen-material-parts/v1"
@@ -156,71 +153,6 @@ def _part_identity_registry(
         by_part,
         {key: sorted(value) for key, value in groups.items()},
         _canonical_sha256(sorted(identity_rows, key=lambda row: str(row["part_id"]))),
-    )
-
-
-def _source_material_binding_registry(
-    rendered_registry: Mapping[str, Any],
-    *,
-    expected_part_ids: set[str],
-) -> tuple[dict[str, dict[str, Any]], dict[str, list[str]], str]:
-    raw_parts = _array(rendered_registry.get("parts"), "rendered_registry.parts")
-    by_part: dict[str, dict[str, Any] | None] = {}
-    groups: dict[str, list[str]] = {}
-    binding_rows: list[dict[str, Any]] = []
-    for index, raw in enumerate(raw_parts):
-        row = _object(raw, f"rendered_registry.parts[{index}]")
-        part_id = row.get("part_id")
-        material_path = row.get("existing_visual_material")
-        properties = row.get("existing_visual_material_properties")
-        if (
-            not isinstance(part_id, str)
-            or not part_id
-            or part_id in by_part
-        ):
-            raise PublishQualityGateError(
-                "rendered registry has an invalid source material binding Part-ID"
-            )
-        signature: dict[str, Any] | None
-        if material_path is None and properties is None:
-            signature = None
-        elif (
-            not isinstance(material_path, str)
-            or not material_path.startswith("/")
-            or not isinstance(properties, Mapping)
-            or not properties
-            or not _is_sha256(row.get("source_appearance_sha256"))
-            or not _is_sha256(row.get("source_subset_layout_sha256"))
-        ):
-            raise PublishQualityGateError(
-                "rendered registry has an invalid source material binding identity"
-            )
-        else:
-            signature = {
-                "existing_visual_material": material_path,
-                "existing_visual_material_properties_sha256": _canonical_sha256(
-                    properties
-                ),
-                "source_appearance_sha256": row["source_appearance_sha256"],
-                "source_subset_layout_sha256": row[
-                    "source_subset_layout_sha256"
-                ],
-            }
-            groups.setdefault(_canonical_sha256(signature), []).append(part_id)
-        by_part[part_id] = signature
-        binding_rows.append(
-            {"part_id": part_id, "source_material_binding": signature}
-        )
-    if set(by_part) != expected_part_ids:
-        raise PublishQualityGateError(
-            "rendered registry does not exactly cover source material bindings"
-        )
-    return (
-        {part_id: value for part_id, value in by_part.items() if value is not None},
-        {key: sorted(value) for key, value in groups.items()},
-        _canonical_sha256(
-            sorted(binding_rows, key=lambda row: str(row["part_id"]))
-        ),
     )
 
 
@@ -1150,7 +1082,6 @@ def _verified_part_id_policy_replacements(
     independently_selected_part_ids: list[str] = []
     unobserved_preserved_part_ids: list[str] = []
     exact_instance_propagated_part_ids: list[str] = []
-    source_binding_propagated_part_ids: list[str] = []
     neutral_tiers = {
         "neutral_default",
         "source_preserve_unavailable_neutral_fallback",
@@ -1217,39 +1148,6 @@ def _verified_part_id_policy_replacements(
                 and base_provenance.get("tier") in neutral_tiers
             ):
                 independently_replaced_neutral_count += 1
-        elif row_status == "unobserved_source_binding_propagated":
-            provenance = final_assignment.get("provenance")
-            if (
-                base_assignment.get("status") != "policy_fallback"
-                or final_assignment.get("status") != "review"
-                or final_assignment == base_assignment
-                or row.get("material_id") != final_assignment.get("material_id")
-                or not isinstance(provenance, Mapping)
-                or provenance.get("assignment_unit") != "part_id"
-                or provenance.get("source_material_binding_propagation")
-                is not True
-                or provenance.get("photo_observed") is not False
-                or provenance.get("color_parameters_authored") is not False
-                or provenance.get("source_policy_assignment_sha256")
-                != _canonical_sha256(base_assignment)
-                or row.get("source_policy_assignment_sha256")
-                != _canonical_sha256(base_assignment)
-                or row.get("source_policy_material_id")
-                != base_assignment.get("material_id")
-                or provenance.get("source_policy_material_id")
-                != base_assignment.get("material_id")
-            ):
-                raise PublishQualityGateError(
-                    f"source material binding propagation lineage is invalid "
-                    f"for {part_id}"
-                )
-            source_binding_propagated_part_ids.append(part_id)
-            base_provenance = base_assignment.get("provenance")
-            if (
-                isinstance(base_provenance, Mapping)
-                and base_provenance.get("tier") in neutral_tiers
-            ):
-                independently_replaced_neutral_count += 1
         else:
             raise PublishQualityGateError(
                 f"part_id_material_audit has unsupported status for {part_id}"
@@ -1273,11 +1171,6 @@ def _verified_part_id_policy_replacements(
             "Part-ID unobserved_exact_instance_propagated_count",
         )
         != len(exact_instance_propagated_part_ids)
-        or _count(
-            summary.get("unobserved_source_binding_propagated_count", 0),
-            "Part-ID unobserved_source_binding_propagated_count",
-        )
-        != len(source_binding_propagated_part_ids)
         or summary.get("exact_cover") is not True
         or not independently_selected_part_ids
     ):
@@ -1396,151 +1289,10 @@ def _verified_part_id_policy_replacements(
             raise PublishQualityGateError(
                 "exact CAD instance propagation summary is inconsistent"
             )
-    if source_binding_propagated_part_ids:
-        if rendered_registry is None:
-            raise PublishQualityGateError(
-                "source material binding propagation requires the rendered registry"
-            )
-        propagation = _object(
-            audit.get("source_material_binding_propagation"),
-            "part_id_material_audit.source_material_binding_propagation",
-        )
-        if (
-            propagation.get("schema_version")
-            != SOURCE_MATERIAL_BINDING_PROPAGATION_SCHEMA_VERSION
-            or propagation.get("status") != "COMPLETED"
-        ):
-            raise PublishQualityGateError(
-                "source material binding propagation audit is incomplete"
-            )
-        bindings, registry_groups, registry_sha256 = (
-            _source_material_binding_registry(
-                rendered_registry,
-                expected_part_ids=set(rows),
-            )
-        )
-        if (
-            propagation.get("source_material_binding_registry_sha256")
-            != registry_sha256
-        ):
-            raise PublishQualityGateError(
-                "source material binding propagation is not bound to the registry"
-            )
-        raw_groups = _array(
-            propagation.get("propagated_groups"),
-            "source_material_binding_propagation.propagated_groups",
-        )
-        group_by_signature: dict[str, Mapping[str, Any]] = {}
-        declared_targets: set[str] = set()
-        for index, raw_group in enumerate(raw_groups):
-            group = _object(raw_group, f"source propagated_groups[{index}]")
-            signature_sha256 = group.get("binding_signature_sha256")
-            members = group.get("member_part_ids")
-            anchors = group.get("observed_anchor_part_ids")
-            unobserved = group.get("unobserved_member_part_ids")
-            targets = group.get("propagated_part_ids")
-            prior_exact = group.get(
-                "consistent_prior_exact_instance_part_ids", []
-            )
-            material_id = group.get("material_id")
-            observed_material_ids = group.get("observed_material_ids")
-            observed_audit_statuses = group.get("observed_audit_statuses")
-            if (
-                not _is_sha256(signature_sha256)
-                or signature_sha256 in group_by_signature
-                or group.get("status") != "PROPAGATED"
-                or not isinstance(members, list)
-                or not isinstance(anchors, list)
-                or not anchors
-                or not isinstance(unobserved, list)
-                or not isinstance(targets, list)
-                or not targets
-                or not isinstance(prior_exact, list)
-                or not isinstance(material_id, str)
-                or not material_id.startswith("mdl:")
-                or not isinstance(observed_material_ids, Mapping)
-                or not isinstance(observed_audit_statuses, Mapping)
-                or members != registry_groups.get(str(signature_sha256))
-                or members[0] not in bindings
-                or group.get("binding_signature") != bindings[members[0]]
-                or set(anchors) & set(unobserved)
-                or set(anchors) | set(unobserved) != set(members)
-                or set(targets) & set(prior_exact)
-                or set(targets) | set(prior_exact) != set(unobserved)
-                or set(observed_material_ids) != set(anchors)
-                or observed_audit_statuses
-                != {part_id: "independently_selected" for part_id in anchors}
-                or any(
-                    rows.get(part_id, {}).get("status")
-                    != "independently_selected"
-                    for part_id in anchors
-                )
-                or any(
-                    rows.get(part_id, {}).get("status")
-                    != "unobserved_source_binding_propagated"
-                    for part_id in targets
-                )
-                or any(
-                    rows.get(part_id, {}).get("status")
-                    != "unobserved_exact_instance_propagated"
-                    for part_id in prior_exact
-                )
-                or any(
-                    final_assignments[part_id].get("material_id") != material_id
-                    for part_id in members
-                )
-                or any(
-                    rows[part_id].get("binding_signature_sha256")
-                    != signature_sha256
-                    or rows[part_id].get("observed_anchor_part_ids") != anchors
-                    or final_assignments[part_id].get("provenance", {}).get(
-                        "binding_signature_sha256"
-                    )
-                    != signature_sha256
-                    or final_assignments[part_id].get("provenance", {}).get(
-                        "observed_anchor_part_ids"
-                    )
-                    != anchors
-                    for part_id in targets
-                )
-                or any(
-                    row_material != material_id
-                    for row_material in observed_material_ids.values()
-                )
-            ):
-                raise PublishQualityGateError(
-                    "source material binding propagation group is not reproducible"
-                )
-            group_by_signature[str(signature_sha256)] = group
-            declared_targets.update(str(part_id) for part_id in targets)
-        if declared_targets != set(source_binding_propagated_part_ids):
-            raise PublishQualityGateError(
-                "source material binding propagation target cover is inconsistent"
-            )
-        propagation_summary = _object(
-            propagation.get("summary"),
-            "source_material_binding_propagation.summary",
-        )
-        if (
-            _count(
-                propagation_summary.get("propagated_group_count"),
-                "source binding propagated_group_count",
-            )
-            != len(group_by_signature)
-            or _count(
-                propagation_summary.get("propagated_part_count"),
-                "source binding propagated_part_count",
-            )
-            != len(source_binding_propagated_part_ids)
-        ):
-            raise PublishQualityGateError(
-                "source material binding propagation summary is inconsistent"
-            )
     return {
         "independently_selected_part_ids": independently_selected_part_ids,
         "unobserved_preserved_part_ids": unobserved_preserved_part_ids,
         "exact_instance_propagated_part_ids": exact_instance_propagated_part_ids,
-        "source_binding_propagated_part_ids": source_binding_propagated_part_ids,
         "independently_replaced_neutral_count": (
             independently_replaced_neutral_count
         ),
@@ -1667,9 +1419,6 @@ def build_publish_quality_gate(
             expected_final_fallback_count = policy_fallback_count - len(
                 part_id_lineage["independently_selected_part_ids"]
             ) - len(part_id_lineage["exact_instance_propagated_part_ids"])
-            expected_final_fallback_count -= len(
-                part_id_lineage["source_binding_propagated_part_ids"]
-            )
             if final_policy_fallback_count != expected_final_fallback_count:
                 raise PublishQualityGateError(
                     "final Part-ID policy-fallback count does not match its "
@@ -1840,9 +1589,6 @@ def build_publish_quality_gate(
         effective_policy_fallback_count -= len(
             part_id_lineage["exact_instance_propagated_part_ids"]
         )
-        effective_policy_fallback_count -= len(
-            part_id_lineage["source_binding_propagated_part_ids"]
-        )
     neutral_tiers = {
         "neutral_default",
         "source_preserve_unavailable_neutral_fallback",
@@ -1864,14 +1610,13 @@ def build_publish_quality_gate(
             part_id_lineage["independently_replaced_neutral_count"]
         )
     coverage_scope = (
-        "photo_observed_and_verified_cad_relationship_part_ids"
+        "photo_observed_and_exact_cad_instance_part_ids"
         if part_id_lineage is not None
         else "all_plan_assignments"
     )
     coverage_denominator = (
         len(part_id_lineage["independently_selected_part_ids"])
         + len(part_id_lineage["exact_instance_propagated_part_ids"])
-        + len(part_id_lineage["source_binding_propagated_part_ids"])
         if part_id_lineage is not None
         else policy_output_count
     )
@@ -1881,7 +1626,6 @@ def build_publish_quality_gate(
             for part_id in (
                 part_id_lineage["independently_selected_part_ids"]
                 + part_id_lineage["exact_instance_propagated_part_ids"]
-                + part_id_lineage["source_binding_propagated_part_ids"]
             )
         )
         if part_id_lineage is not None
