@@ -201,13 +201,13 @@ class _SpecificPresetRunner:
                             {
                                 "part_id": "P0001",
                                 "physical_substrate": "metal",
-                                "material_species": "unknown",
-                                "surface_treatment": "unknown",
+                                "material_species": "aluminum",
+                                "surface_treatment": "anodized",
                                 "optical_behavior": "opaque",
                                 "surface_finish": "matte",
                                 "substrate_confidence": 0.94,
-                                "species_confidence": 0.25,
-                                "treatment_confidence": 0.35,
+                                "species_confidence": 0.92,
+                                "treatment_confidence": 0.91,
                             }
                         ],
                     }
@@ -1192,6 +1192,116 @@ class PartIdQwenTests(unittest.TestCase):
         self.assertNotIn("P3", refined["AC_2"])
         self.assertEqual(audit["ambiguous_part_ids"], ["P3"])
 
+    def test_final_evidence_accepts_unique_large_shape_validated_single_view_panel(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            registry_path = root / "registry.json"
+            registry = {
+                "default_prim": "/Asset",
+                "parts": [
+                    {
+                        "part_id": part_id,
+                        "prim_path": f"/Asset/Asset/Housing/{part_id}/Mesh",
+                    }
+                    for part_id in ("P1", "P2", "P3", "P4")
+                ],
+            }
+            registry_path.write_text(json.dumps(registry))
+            registry_sha = hashlib.sha256(registry_path.read_bytes()).hexdigest()
+
+            def part(
+                part_id: str,
+                box: list[int],
+                *,
+                shape_validated: bool = False,
+                other_part_overlap: float = 0.0,
+            ) -> dict[str, object]:
+                observation: dict[str, object] = {
+                    "view_id": "side",
+                    "target_box_xyxy": box,
+                    "trusted_foreground_pixels": 8192,
+                    "camera_alignment_evidence_weight": 0.35,
+                }
+                if shape_validated:
+                    observation.update(
+                        {
+                            "foreground_overlap": 0.91,
+                            "photo_part_segmentation_applied": True,
+                            "part_id_sam3_refinement": {
+                                "applied": True,
+                                "shape_candidate": {
+                                    "accepted": True,
+                                    "cad_shape_minimum_precision_recall": 0.88,
+                                    "other_part_overlap_fraction": (
+                                        other_part_overlap
+                                    ),
+                                },
+                            },
+                        }
+                    )
+                return {
+                    "part_id": part_id,
+                    "descriptor": {
+                        "surface_class": "dielectric",
+                        "median_rgb": [0.15, 0.35, 0.17],
+                        "robust_color_evidence": {
+                            "sample_count": 8192,
+                            "inlier_fraction": 0.98,
+                            "robust_reference_srgb": [0.15, 0.35, 0.17],
+                        },
+                    },
+                    "observations": [observation],
+                }
+
+            parts = {
+                row["part_id"]: row
+                for row in (
+                    part("P1", [0, 0, 60, 300]),
+                    part("P2", [55, 0, 110, 300]),
+                    part("P3", [100, 0, 240, 300], shape_validated=True),
+                    # A mask that substantially leaks into another CAD Part ID
+                    # cannot use the one-view exception.
+                    part(
+                        "P4",
+                        [100, 0, 240, 300],
+                        shape_validated=True,
+                        other_part_overlap=0.12,
+                    ),
+                )
+            }
+            refined, audit = _refine_component_memberships_with_final_evidence(
+                appearance_components={
+                    "inputs": {
+                        "rendered_registry": str(registry_path),
+                        "rendered_registry_sha256": registry_sha,
+                    },
+                    "components": [
+                        {
+                            "component_id": "AC_green",
+                            "member_part_ids": ["P1", "P2"],
+                            "canonical_reference_rgb": [0.16, 0.37, 0.18],
+                            "supporting_view_ids": ["front", "iso"],
+                        }
+                    ],
+                },
+                component_members={"AC_green": ["P1", "P2"]},
+                part_by_id=parts,
+            )
+
+        self.assertEqual(refined["AC_green"], ["P1", "P2", "P3"])
+        added = audit["components"][0]["added_members"]
+        self.assertEqual([row["part_id"] for row in added], ["P3"])
+        self.assertEqual(
+            added[0]["membership_authority"],
+            "cad_shape_validated_large_single_view_component_extension",
+        )
+        self.assertEqual(
+            added[0]["single_view_evidence"]["component_supporting_view_ids"],
+            ["front", "iso"],
+        )
+
     def test_repeated_cad_instances_share_each_homologous_material_role(
         self,
     ) -> None:
@@ -1799,6 +1909,14 @@ class PartIdQwenTests(unittest.TestCase):
         expected = [
             {
                 "part_id": "P0161",
+                "material_prediction": {
+                    "status": "APPLYABLE",
+                    "identity_resolution": "exact_material",
+                    "material_species": "copper",
+                    "species_confidence": 0.88,
+                    "surface_treatment": "bare",
+                    "treatment_confidence": 0.90,
+                },
                 "candidates": [
                     {
                         "candidate_index": 1,
@@ -1837,6 +1955,61 @@ class PartIdQwenTests(unittest.TestCase):
         self.assertEqual(
             selections[0]["index_resolution"],
             "deterministic_exact_authored_preset_promotion",
+        )
+
+    def test_corresponding_identity_cannot_be_promoted_by_selection_confidence(
+        self,
+    ) -> None:
+        steel = "mdl:Metals/Steel_Cast.mdl#Steel_Cast"
+        expected = [
+            {
+                "part_id": "P_GREEN_PANEL",
+                "material_prediction": {
+                    "status": "APPLYABLE",
+                    "identity_resolution": "corresponding_material",
+                    "material_species": "unknown",
+                    "species_confidence": 0.45,
+                    "surface_treatment": "unknown",
+                    "treatment_confidence": 0.30,
+                },
+                "candidates": [
+                    {
+                        "candidate_index": 1,
+                        "material_id": steel,
+                        "material_species": "steel",
+                        "selection_allowed": True,
+                        "specific_library_preset": False,
+                        "exact_authored_preset_candidate": True,
+                        "physical_identity_applyable": True,
+                        "exact_preset_evidence_eligible": True,
+                        "exact_preset_color_gate_passed": True,
+                        "exact_preset_color_delta_e": 8.0,
+                    }
+                ],
+            }
+        ]
+
+        selections = _validate_batch(
+            {
+                "schema_version": MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION,
+                "selections": [
+                    {
+                        "part_id": "P_GREEN_PANEL",
+                        "candidate_index": 1,
+                        "match_type": "EXACT_LIBRARY_MATCH",
+                        "confidence": 0.95,
+                    }
+                ],
+            },
+            expected=expected,
+            require_material_identity_match=True,
+        )
+
+        self.assertEqual(selections[0]["material_id"], steel)
+        self.assertEqual(selections[0]["match_type"], "CORRESPONDING_MATERIAL")
+        self.assertEqual(
+            selections[0]["index_resolution"],
+            "exact_material_identity_not_confirmed",
         )
 
     def test_identity_specific_preset_is_not_promoted_on_color_mismatch(

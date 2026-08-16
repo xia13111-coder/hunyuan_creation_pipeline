@@ -56,11 +56,18 @@ MINIMUM_MATERIAL_FAMILY_CONFIDENCE = 0.60
 MINIMUM_MATERIAL_SPECIES_CONFIDENCE = 0.75
 MINIMUM_EXACT_TREATMENT_CONFIDENCE = 0.85
 MINIMUM_COMPONENT_EXACT_PRESET_CONFIDENCE = 0.80
-EXACT_LIBRARY_PRESET_MAXIMUM_DELTA_E = 25.0
+EXACT_LIBRARY_PRESET_MAXIMUM_DELTA_E = 12.0
 MINIMUM_COMPONENT_REFINEMENT_PIXELS = 256
 MINIMUM_COMPONENT_REFINEMENT_INLIER_FRACTION = 0.75
 MAXIMUM_COMPONENT_REFINEMENT_DELTA_E = 18.0
 MINIMUM_COMPONENT_REFINEMENT_SPATIAL_SUPPORT = 0.60
+MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_PIXELS = 4096
+MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_INLIER_FRACTION = 0.90
+MAXIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_DELTA_E = 10.0
+MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_SPATIAL_SUPPORT = 0.25
+MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_FOREGROUND_OVERLAP = 0.80
+MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_CAD_SHAPE_RECALL = 0.80
+MAXIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_OTHER_PART_OVERLAP = 0.05
 MINIMUM_REPEATED_ASSEMBLY_INSTANCE_COUNT = 2
 MINIMUM_REPEATED_ASSEMBLY_PART_COUNT = 3
 MAXIMUM_DIRECT_EXACT_PBR_ERROR = 0.12
@@ -2571,6 +2578,18 @@ def _validate_batch(
         requested_exact_preset_color_gate_passed = candidate.get(
             "exact_preset_color_gate_passed"
         )
+        material_prediction = expected_by_id[part_id].get("material_prediction")
+        exact_identity_prediction = (
+            isinstance(material_prediction, Mapping)
+            and material_prediction.get("status") == "APPLYABLE"
+            and material_prediction.get("identity_resolution") == "exact_material"
+            and material_prediction.get("material_species") not in {None, "unknown"}
+            and float(material_prediction.get("species_confidence", 0.0))
+            >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
+            and material_prediction.get("surface_treatment") not in {None, "unknown"}
+            and float(material_prediction.get("treatment_confidence", 0.0))
+            >= MINIMUM_EXACT_TREATMENT_CONFIDENCE
+        )
         if (
             isinstance(confidence, bool)
             or not isinstance(confidence, (int, float))
@@ -2585,20 +2604,16 @@ def _validate_batch(
             raise PartIdQwenError(
                 f"Qwen returned an invalid material match type for {part_id}"
             )
-        if (
-            require_material_identity_match
-            and match_type == "EXACT_LIBRARY_MATCH"
-            and candidate.get("exact_preset_evidence_eligible") is False
-        ):
-            match_type = "CORRESPONDING_MATERIAL"
-            index_resolution = "shape_guided_exact_evidence_unavailable"
-        if (
-            require_material_identity_match
-            and match_type == "EXACT_LIBRARY_MATCH"
-            and candidate.get("exact_preset_color_gate_passed") is False
-        ):
-            match_type = "CORRESPONDING_MATERIAL"
-            index_resolution = "exact_preset_color_gate_rejected"
+        if require_material_identity_match and match_type == "EXACT_LIBRARY_MATCH":
+            if candidate.get("exact_preset_evidence_eligible") is False:
+                match_type = "CORRESPONDING_MATERIAL"
+                index_resolution = "shape_guided_exact_evidence_unavailable"
+            elif candidate.get("exact_preset_color_gate_passed") is False:
+                match_type = "CORRESPONDING_MATERIAL"
+                index_resolution = "exact_preset_color_gate_rejected"
+            elif not exact_identity_prediction:
+                match_type = "CORRESPONDING_MATERIAL"
+                index_resolution = "exact_material_identity_not_confirmed"
         if (
             require_material_identity_match
             and match_type == "CORRESPONDING_MATERIAL"
@@ -2607,6 +2622,7 @@ def _validate_batch(
             and candidate.get("exact_preset_evidence_eligible") is not False
             and candidate.get("exact_preset_color_gate_passed") is True
             and float(confidence) >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
+            and exact_identity_prediction
         ):
             # Qwen ranks the actual MDL renders but does not own the final
             # exact/corresponding state transition.  A physically compatible,
@@ -2939,6 +2955,130 @@ def _component_refinement_observation_weight(
     )
 
 
+def _component_refinement_single_view_evidence(
+    *,
+    part: Mapping[str, Any],
+    metadata: Mapping[str, Any] | None,
+    best_by_view: Mapping[str, tuple[float, str, float]],
+    sample_count: int,
+    inlier_fraction: float,
+    color_delta_e: float,
+) -> dict[str, Any] | None:
+    """Authorize one strong local view without weakening multi-view consensus.
+
+    A camera view marked local-only can never accumulate the ordinary 0.60
+    weighted support by itself.  That excluded even large, clean housing
+    panels whose photo mask is directly shape-validated against the CAD Part
+    ID.  Admit such a panel only when an existing component is independently
+    supported by multiple views and every local signal is strong: a large
+    robust colour sample, an accepted CAD-guided photo mask, negligible
+    neighbour leakage, exact spatial contact, and close component colour.
+    Ambiguity is still resolved by the caller by retaining no component.
+    """
+
+    if len(best_by_view) != 1 or not isinstance(metadata, Mapping):
+        return None
+    supporting_component_views = metadata.get("supporting_view_ids")
+    if (
+        not isinstance(supporting_component_views, list)
+        or len(
+            {
+                view_id
+                for view_id in supporting_component_views
+                if isinstance(view_id, str) and view_id
+            }
+        )
+        < 2
+    ):
+        return None
+    view_id, (spatial_support, adjacent_member, bbox_gap) = next(
+        iter(best_by_view.items())
+    )
+    observation = next(
+        (
+            row
+            for row in part.get("observations", [])
+            if isinstance(row, Mapping) and row.get("view_id") == view_id
+        ),
+        None,
+    )
+    refinement = (
+        observation.get("part_id_sam3_refinement")
+        if isinstance(observation, Mapping)
+        else None
+    )
+    shape_candidate = (
+        refinement.get("shape_candidate")
+        if isinstance(refinement, Mapping)
+        else None
+    )
+    foreground_overlap = (
+        observation.get("foreground_overlap")
+        if isinstance(observation, Mapping)
+        else None
+    )
+    trusted_pixels = (
+        observation.get("trusted_foreground_pixels")
+        if isinstance(observation, Mapping)
+        else None
+    )
+    cad_shape_recall = (
+        shape_candidate.get("cad_shape_minimum_precision_recall")
+        if isinstance(shape_candidate, Mapping)
+        else None
+    )
+    other_part_overlap = (
+        shape_candidate.get("other_part_overlap_fraction")
+        if isinstance(shape_candidate, Mapping)
+        else None
+    )
+    numeric_values = (
+        spatial_support,
+        bbox_gap,
+        foreground_overlap,
+        cad_shape_recall,
+        other_part_overlap,
+    )
+    if (
+        any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in numeric_values
+        )
+        or isinstance(trusted_pixels, bool)
+        or not isinstance(trusted_pixels, int)
+        or trusted_pixels < MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_PIXELS
+        or sample_count < MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_PIXELS
+        or inlier_fraction < MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_INLIER_FRACTION
+        or color_delta_e > MAXIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_DELTA_E
+        or float(spatial_support)
+        < MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_SPATIAL_SUPPORT
+        or float(bbox_gap) > 1.0
+        or float(foreground_overlap)
+        < MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_FOREGROUND_OVERLAP
+        or float(cad_shape_recall)
+        < MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_CAD_SHAPE_RECALL
+        or float(other_part_overlap)
+        > MAXIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_OTHER_PART_OVERLAP
+        or observation.get("photo_part_segmentation_applied") is not True
+        or not isinstance(refinement, Mapping)
+        or refinement.get("applied") is not True
+        or not isinstance(shape_candidate, Mapping)
+        or shape_candidate.get("accepted") is not True
+    ):
+        return None
+    return {
+        "view_id": view_id,
+        "support": round(float(spatial_support), 8),
+        "adjacent_member_part_id": adjacent_member,
+        "bbox_gap_px": round(float(bbox_gap), 8),
+        "trusted_foreground_pixels": trusted_pixels,
+        "foreground_overlap": round(float(foreground_overlap), 8),
+        "cad_shape_minimum_precision_recall": round(float(cad_shape_recall), 8),
+        "other_part_overlap_fraction": round(float(other_part_overlap), 8),
+        "component_supporting_view_ids": sorted(set(supporting_component_views)),
+    }
+
+
 def _refine_component_memberships_with_final_evidence(
     *,
     appearance_components: Mapping[str, Any] | None,
@@ -3150,11 +3290,26 @@ def _refine_component_memberships_with_final_evidence(
                         ):
                             best_by_view[view_id] = (support, member, gap)
             spatial_support = sum(row[0] for row in best_by_view.values())
+            single_view_evidence = None
+            membership_authority = "weighted_multiview_spatial_consensus"
             if spatial_support < MINIMUM_COMPONENT_REFINEMENT_SPATIAL_SUPPORT:
-                continue
+                single_view_evidence = _component_refinement_single_view_evidence(
+                    part=part,
+                    metadata=metadata,
+                    best_by_view=best_by_view,
+                    sample_count=sample_count,
+                    inlier_fraction=float(inlier_fraction),
+                    color_delta_e=float(delta_e),
+                )
+                if single_view_evidence is None:
+                    continue
+                membership_authority = (
+                    "cad_shape_validated_large_single_view_component_extension"
+                )
             matches.append(
                 {
                     "component_id": component_id,
+                    "membership_authority": membership_authority,
                     "assembly_branch": candidate_branch,
                     "surface_class": candidate_surface,
                     "sample_count": sample_count,
@@ -3169,6 +3324,7 @@ def _refine_component_memberships_with_final_evidence(
                         }
                         for view_id, values in sorted(best_by_view.items())
                     },
+                    "single_view_evidence": single_view_evidence,
                 }
             )
         if matches:
@@ -3218,6 +3374,33 @@ def _refine_component_memberships_with_final_evidence(
                 "minimum_multiview_spatial_support": (
                     MINIMUM_COMPONENT_REFINEMENT_SPATIAL_SUPPORT
                 ),
+                "single_view_extension": {
+                    "existing_component_minimum_supporting_view_count": 2,
+                    "minimum_trusted_pixels": (
+                        MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_PIXELS
+                    ),
+                    "minimum_inlier_fraction": (
+                        MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_INLIER_FRACTION
+                    ),
+                    "maximum_color_delta_e": (
+                        MAXIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_DELTA_E
+                    ),
+                    "minimum_spatial_support": (
+                        MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_SPATIAL_SUPPORT
+                    ),
+                    "maximum_bbox_gap_px": 1.0,
+                    "minimum_foreground_overlap": (
+                        MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_FOREGROUND_OVERLAP
+                    ),
+                    "minimum_cad_shape_recall": (
+                        MINIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_CAD_SHAPE_RECALL
+                    ),
+                    "maximum_other_part_overlap": (
+                        MAXIMUM_COMPONENT_REFINEMENT_SINGLE_VIEW_OTHER_PART_OVERLAP
+                    ),
+                    "accepted_cad_guided_photo_mask_required": True,
+                    "unique_component_match_required": True,
+                },
                 "ambiguous_candidates_remain_independent": True,
             },
             "components": component_audits,
@@ -4817,7 +5000,7 @@ def run_part_id_qwen_rerank(
             ),
             "observation_bank": str(bank_root) if bank_root is not None else None,
             "exact_preset_color_gate": {
-                "metric": "CIE76_delta_e_on_sealed_target_and_library_profile_medians",
+                "metric": "CIEDE2000_on_sealed_target_and_library_profile_medians",
                 "maximum_delta_e": EXACT_LIBRARY_PRESET_MAXIMUM_DELTA_E,
                 "action_on_failure": (
                     "reject_exact_match_and_run_independent_grayscale_corresponding_pass"
