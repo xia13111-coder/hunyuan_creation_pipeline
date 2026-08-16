@@ -56,7 +56,7 @@ MINIMUM_MATERIAL_FAMILY_CONFIDENCE = 0.60
 MINIMUM_MATERIAL_SPECIES_CONFIDENCE = 0.75
 MINIMUM_EXACT_TREATMENT_CONFIDENCE = 0.85
 MINIMUM_COMPONENT_EXACT_PRESET_CONFIDENCE = 0.80
-EXACT_LIBRARY_PRESET_MAXIMUM_DELTA_E = 12.0
+EXACT_LIBRARY_PRESET_MAXIMUM_DELTA_E = 15.0
 MINIMUM_COMPONENT_REFINEMENT_PIXELS = 256
 MINIMUM_COMPONENT_REFINEMENT_INLIER_FRACTION = 0.75
 MAXIMUM_COMPONENT_REFINEMENT_DELTA_E = 18.0
@@ -2590,6 +2590,16 @@ def _validate_batch(
             and float(material_prediction.get("treatment_confidence", 0.0))
             >= MINIMUM_EXACT_TREATMENT_CONFIDENCE
         )
+        exact_preset_appearance_confirmation = (
+            candidate.get("physical_identity_applyable") is True
+            and candidate.get("exact_authored_preset_candidate") is True
+            and candidate.get("exact_preset_evidence_eligible") is not False
+            and candidate.get("exact_preset_color_gate_passed") is True
+            and float(confidence) >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
+        )
+        exact_material_authorized = (
+            exact_identity_prediction or exact_preset_appearance_confirmation
+        )
         if (
             isinstance(confidence, bool)
             or not isinstance(confidence, (int, float))
@@ -2611,7 +2621,7 @@ def _validate_batch(
             elif candidate.get("exact_preset_color_gate_passed") is False:
                 match_type = "CORRESPONDING_MATERIAL"
                 index_resolution = "exact_preset_color_gate_rejected"
-            elif not exact_identity_prediction:
+            elif not exact_material_authorized:
                 match_type = "CORRESPONDING_MATERIAL"
                 index_resolution = "exact_material_identity_not_confirmed"
         if (
@@ -2622,7 +2632,7 @@ def _validate_batch(
             and candidate.get("exact_preset_evidence_eligible") is not False
             and candidate.get("exact_preset_color_gate_passed") is True
             and float(confidence) >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
-            and exact_identity_prediction
+            and exact_material_authorized
         ):
             # Qwen ranks the actual MDL renders but does not own the final
             # exact/corresponding state transition.  A physically compatible,

@@ -1957,7 +1957,7 @@ class PartIdQwenTests(unittest.TestCase):
             "deterministic_exact_authored_preset_promotion",
         )
 
-    def test_corresponding_identity_cannot_be_promoted_by_selection_confidence(
+    def test_corresponding_identity_with_color_mismatch_is_not_promoted(
         self,
     ) -> None:
         steel = "mdl:Metals/Steel_Cast.mdl#Steel_Cast"
@@ -1982,8 +1982,8 @@ class PartIdQwenTests(unittest.TestCase):
                         "exact_authored_preset_candidate": True,
                         "physical_identity_applyable": True,
                         "exact_preset_evidence_eligible": True,
-                        "exact_preset_color_gate_passed": True,
-                        "exact_preset_color_delta_e": 8.0,
+                        "exact_preset_color_gate_passed": False,
+                        "exact_preset_color_delta_e": 24.35,
                     }
                 ],
             }
@@ -2009,7 +2009,7 @@ class PartIdQwenTests(unittest.TestCase):
         self.assertEqual(selections[0]["match_type"], "CORRESPONDING_MATERIAL")
         self.assertEqual(
             selections[0]["index_resolution"],
-            "exact_material_identity_not_confirmed",
+            "exact_preset_color_gate_rejected",
         )
 
     def test_identity_specific_preset_is_not_promoted_on_color_mismatch(
