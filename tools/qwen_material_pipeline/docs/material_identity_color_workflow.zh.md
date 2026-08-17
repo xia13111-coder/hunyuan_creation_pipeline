@@ -7,6 +7,7 @@ NVIDIA Base MDL 目录的 CAD 资产，不包含针对某个资产或某个 Part
 
 ```text
 CAD Part-ID 与参考照片对应
+  -> 四视角完整性校验 + 同相机隔离 mesh amodal 形状模板
   -> 逐零件材质预测与目录检索
   -> 精确材质 / 对应材质分类
   -> 同照片材质组件收敛
@@ -28,7 +29,10 @@ CAD Part-ID 与参考照片对应
 ## 2. 逐零件证据
 
 零件证据来自相机配准后的 CAD 投影、隔离 mesh 形状、SAM3/EntitySeg 精细掩码、MVInverse
-物理外观、SigLIP2/DINOv2 检索和 Qwen 有限候选判断。模型输出只提出候选，不能直接写 USD。
+物理外观、SigLIP2/DINOv2 检索和 Qwen 有限候选判断。正式配置关闭快速相机候选搜索，并要求
+全部已注册参考视角都产生真实的已选 Part-ID observation。隔离 mesh 模板使用相同的整件相机
+和原始 CAD 变换，只补足被邻件遮挡的目标形状，不允许移动单个 Mesh。模型输出只提出候选，
+不能直接写 USD。
 
 `workflows/part_id_qwen.py` 对精确材质使用双重入口：
 

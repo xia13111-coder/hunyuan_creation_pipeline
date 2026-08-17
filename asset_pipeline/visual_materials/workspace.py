@@ -194,6 +194,8 @@ class PartIdArtifacts:
     evidence: Path
     coarse_evidence_dir: Path
     coarse_evidence: Path
+    amodal_template_dir: Path
+    amodal_template_manifest: Path
     sam3_request: Path
     sam3_dir: Path
     sam3_manifest: Path
@@ -217,6 +219,10 @@ class PartIdArtifacts:
             evidence=analysis / "part_id_reference_evidence.json",
             coarse_evidence_dir=analysis / "part_id_reference_evidence_coarse",
             coarse_evidence=analysis / "part_id_reference_evidence_coarse.json",
+            amodal_template_dir=analysis / "part_id_cad_amodal_templates",
+            amodal_template_manifest=(
+                analysis / "part_id_cad_amodal_templates" / "manifest.json"
+            ),
             sam3_request=analysis / "part_id_sam3_request.json",
             sam3_dir=analysis / "part_id_sam3_regions",
             sam3_manifest=analysis / "part_id_sam3_regions" / "manifest.json",

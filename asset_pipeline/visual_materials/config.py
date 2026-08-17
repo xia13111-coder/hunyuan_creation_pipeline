@@ -23,6 +23,7 @@ MATERIAL_ASSIGNMENT_UNITS = frozenset({"palette_group", "part_id"})
 MATERIAL_PARAMETER_CANDIDATE_MODES = frozenset({"disabled", "evidence_gated_h0_h1"})
 MATERIAL_PREDICTION_MODES = frozenset({"disabled", "catalog_family_first"})
 CORRESPONDING_COLOR_CALIBRATION_MODES = frozenset({"disabled", "adaptive_actual_cad"})
+CAMERA_FAST_SEARCH_MODES = frozenset({"auto", "disabled", "required"})
 QWEN_MODEL_FAMILIES = frozenset({"qwen3_5", "qwen3_vl", "openai_compatible"})
 REMOTE_REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
 _ENVIRONMENT_VARIABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -73,6 +74,7 @@ class VisualMaterialConfig:
     render_rt_subframes: int
     analysis_up_axis: str
     analysis_front_axis: str
+    camera_fast_search_mode: str
     mvinverse_mode: str
     mvinverse_python: Path
     mvinverse_repository: Path
@@ -460,7 +462,9 @@ def load_visual_material_config(
                 "analysis_front_axis",
             }
         ),
-        optional=frozenset({"quality_lighting_profile", "final_visual_gate"}),
+        optional=frozenset(
+            {"quality_lighting_profile", "camera_fast_search", "final_visual_gate"}
+        ),
     )
     require_keys(
         final_visual_gate,
@@ -799,6 +803,11 @@ def load_visual_material_config(
         ),
         analysis_front_axis=require_string(
             render.get("analysis_front_axis"), "config.render.analysis_front_axis"
+        ),
+        camera_fast_search_mode=require_choice(
+            render.get("camera_fast_search", "auto"),
+            "config.render.camera_fast_search",
+            CAMERA_FAST_SEARCH_MODES,
         ),
         mvinverse_mode=mode,
         mvinverse_python=resolve_path(

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from asset_pipeline.visual_materials.commands import (
+    cad_mesh_template_command,
     camera_registration_command,
     policy_exact_cover_command,
     staged_material_command,
@@ -42,6 +43,12 @@ def test_workspace_centralizes_the_existing_artifact_layout(tmp_path: Path) -> N
     )
     assert workspace.part_id.material_audit == (
         destination / "analysis" / "part_id_material_audit.json"
+    )
+    assert workspace.part_id.amodal_template_manifest == (
+        destination
+        / "analysis"
+        / "part_id_cad_amodal_templates"
+        / "manifest.json"
     )
     assert workspace.source.camera_acceptance == (
         destination / "camera_calibration" / "camera_alignment_acceptance.json"
@@ -131,6 +138,23 @@ def test_render_and_camera_builders_handle_optional_arguments() -> None:
     assert camera[camera.index("--search-phases") + 1] == ("orthographic,micro,pico")
     assert camera[camera.index("--fast-search") + 1] == "auto"
     assert camera[-1] == "--analysis-front-axis=-y"
+
+    templates = cad_mesh_template_command(
+        isaac_python=Path("/runtime/python.sh"),
+        registry=Path("/run/registry.json"),
+        spatial_report=Path("/run/spatial.json"),
+        evidence=Path("/run/coarse-evidence.json"),
+        output_dir=Path("/run/amodal"),
+    )
+    assert templates[0] == "/runtime/python.sh"
+    assert templates[1].endswith(
+        "/tools/qwen_material_pipeline/segmentation/cad_mesh_templates.py"
+    )
+    assert templates[templates.index("--registry") + 1] == "/run/registry.json"
+    assert templates[templates.index("--evidence") + 1] == (
+        "/run/coarse-evidence.json"
+    )
+    assert templates[-2:] == ["--output-dir", "/run/amodal"]
 
 
 def test_staged_material_command_owns_the_model_runtime_contract() -> None:

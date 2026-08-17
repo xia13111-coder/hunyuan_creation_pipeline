@@ -51,6 +51,7 @@ from .config import (
     write_object,
 )
 from .commands import (
+    cad_mesh_template_command,
     policy_exact_cover_command,
 )
 from .corresponding_color import (
@@ -210,6 +211,117 @@ from qwen_material_pipeline.workflows.part_id_qwen import (
 from qwen_material_pipeline.scripts.build_part_id_sam3_request import (
     build_request as build_part_id_sam3_request,
 )
+
+
+def _require_complete_part_id_reference_views(
+    *,
+    evidence: Mapping[str, Any],
+    expected_view_ids: set[str],
+    label: str,
+) -> None:
+    """Require every registered photo view to contribute material evidence.
+
+    Family-first material inference must not silently continue when camera or
+    spatial registration drops a reference view.  Validate both the reported
+    coverage and the underlying per-Part-ID observations so a stale or
+    incomplete summary cannot turn a two-view run into an apparent four-view
+    run.
+    """
+
+    expected = {
+        view_id.strip()
+        for view_id in expected_view_ids
+        if isinstance(view_id, str) and view_id.strip()
+    }
+    if not expected or len(expected) != len(expected_view_ids):
+        raise RuntimeError(f"{label} has an invalid expected reference-view set")
+    summary = evidence.get("summary")
+    if not isinstance(summary, Mapping):
+        raise RuntimeError(f"{label} has no summary")
+    coverage = summary.get("selected_reference_view_coverage")
+    if not isinstance(coverage, Mapping) or any(
+        not isinstance(view_id, str) or not isinstance(row, Mapping)
+        for view_id, row in coverage.items()
+    ):
+        raise RuntimeError(f"{label} has invalid selected reference-view coverage")
+    actual_coverage = set(coverage)
+    if actual_coverage != expected:
+        raise RuntimeError(
+            f"{label} does not cover every registered reference view: "
+            f"expected={sorted(expected)}, actual={sorted(actual_coverage)}"
+        )
+    trusted_count = summary.get("trusted_reference_view_count")
+    if (
+        isinstance(trusted_count, bool)
+        or not isinstance(trusted_count, int)
+        or trusted_count != len(expected)
+    ):
+        raise RuntimeError(
+            f"{label} trusted reference-view count does not match the "
+            "registered reference set"
+        )
+
+    parts = evidence.get("parts")
+    if not isinstance(parts, list):
+        raise RuntimeError(f"{label} has no Part-ID observations")
+    visible_parts_by_view = {view_id: 0 for view_id in expected}
+    selected_parts_by_view = {view_id: 0 for view_id in expected}
+    observed_view_ids: set[str] = set()
+    selected_view_ids: set[str] = set()
+    for part_index, part in enumerate(parts):
+        if not isinstance(part, Mapping):
+            raise RuntimeError(f"{label} Part-ID row {part_index} is invalid")
+        observations = part.get("observations")
+        if not isinstance(observations, list):
+            raise RuntimeError(
+                f"{label} Part-ID row {part_index} has invalid observations"
+            )
+        part_visible_views: set[str] = set()
+        part_selected_views: set[str] = set()
+        for observation_index, observation in enumerate(observations):
+            if not isinstance(observation, Mapping):
+                raise RuntimeError(
+                    f"{label} observation {part_index}:{observation_index} is invalid"
+                )
+            view_id = observation.get("view_id")
+            if not isinstance(view_id, str) or not view_id:
+                raise RuntimeError(
+                    f"{label} observation {part_index}:{observation_index} has "
+                    "no view_id"
+                )
+            observed_view_ids.add(view_id)
+            part_visible_views.add(view_id)
+            if observation.get("selected_for_material_inference") is True:
+                selected_view_ids.add(view_id)
+                part_selected_views.add(view_id)
+        for view_id in part_visible_views & expected:
+            visible_parts_by_view[view_id] += 1
+        for view_id in part_selected_views & expected:
+            selected_parts_by_view[view_id] += 1
+
+    if observed_view_ids != expected or selected_view_ids != expected:
+        raise RuntimeError(
+            f"{label} underlying observations do not use every registered "
+            "reference view"
+        )
+    for view_id in sorted(expected):
+        row = coverage[view_id]
+        visible = row.get("visible_part_count")
+        selected = row.get("selected_part_count")
+        if (
+            isinstance(visible, bool)
+            or not isinstance(visible, int)
+            or visible < 1
+            or visible != visible_parts_by_view[view_id]
+            or isinstance(selected, bool)
+            or not isinstance(selected, int)
+            or selected < 1
+            or selected != selected_parts_by_view[view_id]
+        ):
+            raise RuntimeError(
+                f"{label} coverage for {view_id!r} does not match its "
+                "underlying selected observations"
+            )
 
 
 def _complete_coverage_assignment_statuses(
@@ -1776,6 +1888,8 @@ def _run_policy_part_id_stage(
     part_id_evidence_path = part_id_paths.evidence
     part_id_coarse_evidence_dir = part_id_paths.coarse_evidence_dir
     part_id_coarse_evidence_path = part_id_paths.coarse_evidence
+    part_id_amodal_template_dir = part_id_paths.amodal_template_dir
+    part_id_amodal_template_manifest = part_id_paths.amodal_template_manifest
     part_id_sam3_request = part_id_paths.sam3_request
     part_id_sam3_dir = part_id_paths.sam3_dir
     part_id_sam3_manifest = part_id_paths.sam3_manifest
@@ -2027,7 +2141,11 @@ def _run_policy_part_id_stage(
         # residual is estimated once from the whole workpiece and shared by
         # every Part-ID in that view; no individual mesh may move to follow a
         # segmentation candidate. CAD/USD geometry is never moved.
-        for stale_dir in (part_id_coarse_evidence_dir, part_id_evidence_dir):
+        for stale_dir in (
+            part_id_coarse_evidence_dir,
+            part_id_evidence_dir,
+            part_id_amodal_template_dir,
+        ):
             if stale_dir.exists() or stale_dir.is_symlink():
                 archived = unique_path(
                     analysis_dir / "recovery_archive" / f"stale_{stale_dir.name}"
@@ -2049,9 +2167,31 @@ def _run_policy_part_id_stage(
             output_dir=part_id_coarse_evidence_dir,
         )
         write_object(part_id_coarse_evidence_path, coarse_evidence_document)
+        if config.material_prediction_mode == "catalog_family_first":
+            _require_complete_part_id_reference_views(
+                evidence=coarse_evidence_document,
+                expected_view_ids={view_id for view_id, _path in context.references},
+                label="coarse Part-ID evidence",
+            )
+        _run_stage(
+            "part_id_cad_amodal_templates",
+            cad_mesh_template_command(
+                isaac_python=context.isaac_python,
+                registry=rendered_registry,
+                spatial_report=analysis_dir / "spatial_mapping_report.json",
+                evidence=part_id_coarse_evidence_path,
+                output_dir=part_id_amodal_template_dir,
+            ),
+            log_cb,
+            command_runner=_command_runner,
+            required_files=(part_id_amodal_template_manifest,),
+        )
         write_object(
             part_id_sam3_request,
-            build_part_id_sam3_request(part_id_coarse_evidence_path),
+            build_part_id_sam3_request(
+                part_id_coarse_evidence_path,
+                amodal_templates_path=part_id_amodal_template_manifest,
+            ),
         )
         if part_id_sam3_dir.exists() or part_id_sam3_dir.is_symlink():
             archived = unique_path(
@@ -2107,6 +2247,12 @@ def _run_policy_part_id_stage(
             output_dir=part_id_evidence_dir,
         )
         write_object(part_id_evidence_path, evidence_document)
+        if config.material_prediction_mode == "catalog_family_first":
+            _require_complete_part_id_reference_views(
+                evidence=evidence_document,
+                expected_view_ids={view_id for view_id, _path in context.references},
+                label="refined Part-ID evidence",
+            )
         log_message(
             log_cb,
             "Two-layer one-to-one Part-ID mapping completed: every coarse box "

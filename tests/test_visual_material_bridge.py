@@ -25,6 +25,7 @@ from asset_pipeline.visual_materials.orchestrator import (
     _prepare_live_material_catalog,
     _quality_can_measure_lighting_statistics,
     _quality_has_lighting_normalized_groups,
+    _require_complete_part_id_reference_views,
     _run_qwen_mvinverse_with_recovery,
     _validate_catalog_family_first_result,
     _validated_exact_mdl_tournament_mapping,
@@ -45,6 +46,66 @@ from asset_pipeline.visual_materials.quality import (
 
 
 class VisualMaterialBridgeTests(unittest.TestCase):
+    @staticmethod
+    def _complete_part_id_evidence(*view_ids: str) -> dict[str, object]:
+        observations = [
+            {
+                "view_id": view_id,
+                "selected_for_material_inference": True,
+            }
+            for view_id in view_ids
+        ]
+        return {
+            "parts": [
+                {
+                    "part_id": "P0001",
+                    "status": "observed",
+                    "observations": observations,
+                }
+            ],
+            "summary": {
+                "trusted_reference_view_count": len(view_ids),
+                "selected_reference_view_coverage": {
+                    view_id: {
+                        "visible_part_count": 1,
+                        "selected_part_count": 1,
+                        "selected_chromatic_part_count": 0,
+                    }
+                    for view_id in view_ids
+                },
+            },
+        }
+
+    def test_family_first_evidence_requires_all_registered_views(self) -> None:
+        evidence = self._complete_part_id_evidence("front", "side", "top", "iso")
+
+        _require_complete_part_id_reference_views(
+            evidence=evidence,
+            expected_view_ids={"front", "side", "top", "iso"},
+            label="coarse Part-ID evidence",
+        )
+
+        missing = self._complete_part_id_evidence("side", "top", "iso")
+        with self.assertRaisesRegex(RuntimeError, "does not cover every"):
+            _require_complete_part_id_reference_views(
+                evidence=missing,
+                expected_view_ids={"front", "side", "top", "iso"},
+                label="coarse Part-ID evidence",
+            )
+
+    def test_family_first_evidence_rejects_spoofed_view_summary(self) -> None:
+        evidence = self._complete_part_id_evidence("front", "side", "top", "iso")
+        parts = evidence["parts"]
+        self.assertIsInstance(parts, list)
+        parts[0]["observations"] = parts[0]["observations"][:-1]
+
+        with self.assertRaisesRegex(RuntimeError, "underlying observations"):
+            _require_complete_part_id_reference_views(
+                evidence=evidence,
+                expected_view_ids={"front", "side", "top", "iso"},
+                label="refined Part-ID evidence",
+            )
+
     def test_family_first_assignment_binding_accepts_only_predicted_family(
         self,
     ) -> None:
@@ -1556,6 +1617,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             config_path, _isaac, _references = self._fixture(Path(temp_dir))
             config = load_visual_material_config(config_path)
         self.assertEqual(config.render_resolution, 256)
+        self.assertEqual(config.camera_fast_search_mode, "auto")
         self.assertEqual(config.mvinverse_oom_retry_max_sides, (392,))
         self.assertEqual(config.qwen_model_family, "qwen3_5")
         self.assertEqual(config.qwen_model_revision, "revision-qwen")
@@ -1765,6 +1827,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             document["materials"]["corresponding_color_calibration"],
             "adaptive_actual_cad",
         )
+        self.assertEqual(document["render"]["camera_fast_search"], "disabled")
 
     def test_family_first_profile_runs_identity_then_actual_cad_colour(self) -> None:
         profile = (
@@ -1803,6 +1866,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             document["retrieval"]["final_top_k"],
             document["retrieval"]["siglip_top_k"],
         )
+        self.assertEqual(document["render"]["camera_fast_search"], "disabled")
 
     def test_actual_cad_colour_requires_family_first_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2081,6 +2145,15 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             document["render"]["quality_lighting_profile"] = "showcase"
             config_path.write_text(json.dumps(document), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "quality_lighting_profile"):
+                load_visual_material_config(config_path)
+
+    def test_config_rejects_unknown_camera_fast_search_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path, _isaac, _references = self._fixture(Path(temp_dir))
+            document = json.loads(config_path.read_text(encoding="utf-8"))
+            document["render"]["camera_fast_search"] = "sometimes"
+            config_path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "camera_fast_search"):
                 load_visual_material_config(config_path)
 
     def test_config_validates_final_visual_gate_policy(self) -> None:

@@ -19,6 +19,7 @@ import argparse
 import hashlib
 import json
 import math
+import traceback
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -33,6 +34,23 @@ MINIMUM_TEMPLATE_PIXELS = 4
 
 class CadMeshTemplateError(ValueError):
     """Raised when an isolated mesh template cannot be reproduced safely."""
+
+
+def _start_isaac_if_needed():
+    """Load USD bindings without requiring an already-running Kit process."""
+
+    try:
+        from pxr import Usd  # noqa: F401
+
+        return None
+    except ImportError:
+        try:
+            from isaacsim import SimulationApp
+        except ImportError as exc:
+            raise CadMeshTemplateError(
+                "USD Python bindings are unavailable; run with Isaac Sim python.sh"
+            ) from exc
+        return SimulationApp({"headless": True})
 
 
 def _sha256_file(path: Path) -> str:
@@ -501,15 +519,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--part-id", action="append", default=[])
     args = parser.parse_args(argv)
-    result = build_templates(
-        registry_path=args.registry,
-        spatial_report_path=args.spatial_report,
-        evidence_path=args.evidence,
-        output_dir=args.output_dir,
-        part_ids=set(args.part_id) if args.part_id else None,
-    )
-    print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
-    return 0
+    app = _start_isaac_if_needed()
+    exit_code = 0
+    try:
+        result = build_templates(
+            registry_path=args.registry,
+            spatial_report_path=args.spatial_report,
+            evidence_path=args.evidence,
+            output_dir=args.output_dir,
+            part_ids=set(args.part_id) if args.part_id else None,
+        )
+        print(json.dumps(result["summary"], ensure_ascii=False, indent=2), flush=True)
+    except Exception:
+        traceback.print_exc()
+        exit_code = 1
+    finally:
+        if app is not None:
+            app.close()
+    return exit_code
 
 
 if __name__ == "__main__":

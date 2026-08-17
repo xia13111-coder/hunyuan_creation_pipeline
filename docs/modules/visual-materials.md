@@ -22,15 +22,13 @@ STEP/STP conversion
 The delivered CAD is never resized, rotated, or deformed to match a photograph.
 Camera transforms used during analysis do not modify the USD.
 
-### Accelerated camera search
+### Camera search in the production material path
 
-Camera hypothesis search loads the complete CAD once in Kaolin's CUDA
-rasterizer and generates stable Part-ID, silhouette, and occlusion buffers. It
-keeps the established whole-assembly camera parameters, search phases, and
-objective; it never moves an individual Mesh or uses material and lighting
-appearance. The five highest-ranked cameras per reference are still rendered
-at final resolution by Isaac Sim, and only that Isaac evidence selects the
-published camera.
+`calibrate-cameras` can accelerate hypothesis search by loading the complete
+CAD once in Kaolin's CUDA rasterizer and generating Part-ID, silhouette, and
+occlusion buffers. It never moves an individual Mesh or uses material and
+lighting appearance. The highest-ranked candidates are still rendered at final
+resolution by Isaac Sim.
 
 `calibrate-cameras --fast-search` accepts `auto` (the default, with fallback
 when the optional runtime is unavailable), `required` (fail if the fast backend
@@ -38,6 +36,13 @@ is unavailable), and `disabled` (the legacy all-Isaac candidate search). The
 report binds asset hashes, triangle and candidate counts, timings, and every
 fast candidate to its full-resolution Isaac verification under
 `candidate_search`.
+
+The production material profiles set `camera_fast_search: disabled` and use
+the complete Isaac candidate search. Material identity depends on every
+registered reference view surviving camera and spatial registration; losing a
+view turns visible small parts into false hidden-part fallbacks. Fast search
+therefore remains available for explicit experiments, while the default
+material path prioritizes complete four-view evidence.
 
 `asset_pipeline/visual_materials/` coordinates the workflow.
 `tools/qwen_material_pipeline/` provides segmentation, evidence extraction,
@@ -49,12 +54,18 @@ rendering, physics, and final validation. See [Architecture](../architecture.md)
 The SAM3 UI records the accepted whole-workpiece mask for each photograph. The
 run verifies the image hashes, then estimates one analysis camera per view.
 
-Each CAD Part-ID is projected separately. The global camera supplies an initial
-box, and SAM3 searches for the corresponding local component inside that box.
-A bounded 2-D translation, uniform scale, and rotation may refine the match.
-If this local fit is unreliable, the workflow uses the global projection or
-marks the part as unobserved. These adjustments affect evidence extraction
-only, never CAD geometry.
+Each CAD Part-ID is projected separately. The global camera supplies its modal
+visible region and initial box. With that same sealed camera, the workflow also
+projects the target mesh in isolation to obtain its complete amodal shape.
+SAM3 is guided jointly by the location/visibility template and isolated-mesh
+shape template. If local refinement is unreliable, the workflow uses the
+global projection or marks the part as unobserved. These adjustments affect
+evidence extraction only, never CAD geometry.
+
+The identity-first path requires every registered reference view to contribute
+real visible and selected Part-ID observations. It checks both per-part rows and
+summary counts. A view rejected by camera or spatial registration stops the
+run instead of silently continuing with a two-view material decision.
 
 | Component | Role |
 | --- | --- |

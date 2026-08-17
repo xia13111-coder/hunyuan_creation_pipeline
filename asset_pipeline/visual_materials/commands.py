@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
+from ..project_layout import SOURCE_LAYOUT
+
 if TYPE_CHECKING:
     from .config import VisualMaterialConfig
 
@@ -142,6 +144,34 @@ def camera_registration_command(
         ]
     )
     return command
+
+
+def cad_mesh_template_command(
+    *,
+    isaac_python: Path,
+    registry: Path,
+    spatial_report: Path,
+    evidence: Path,
+    output_dir: Path,
+) -> list[str]:
+    """Build isolated-mesh amodal masks with the sealed whole-asset cameras."""
+
+    return [
+        str(isaac_python),
+        str(
+            SOURCE_LAYOUT.material_pipeline
+            / "segmentation"
+            / "cad_mesh_templates.py"
+        ),
+        "--registry",
+        str(registry),
+        "--spatial-report",
+        str(spatial_report),
+        "--evidence",
+        str(evidence),
+        "--output-dir",
+        str(output_dir),
+    ]
 
 
 def staged_material_command(
