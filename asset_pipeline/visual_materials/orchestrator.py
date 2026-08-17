@@ -7315,6 +7315,14 @@ def _run_finalize_assignment_stage(
                     if config.material_assignment_unit == "part_id"
                     else None
                 ),
+                part_id_evidence=(
+                    read_object(
+                        part_id_evidence_path,
+                        "pre-publish Part-ID reference evidence",
+                    )
+                    if config.material_assignment_unit == "part_id"
+                    else None
+                ),
                 queue_audit=publish_queue_document,
                 tournament_audit=(
                     read_object(
