@@ -106,6 +106,7 @@ def camera_registration_command(
     analysis_front_axis: str,
     initial_view_specs: Path | None = None,
     search_phases: Sequence[str] = (),
+    fast_search_mode: str = "auto",
 ) -> list[str]:
     command = [
         str(python),
@@ -133,6 +134,8 @@ def camera_registration_command(
             str(final_resolution),
             "--rt-subframes",
             str(rt_subframes),
+            "--fast-search",
+            fast_search_mode,
             "--analysis-up-axis",
             analysis_up_axis,
             f"--analysis-front-axis={analysis_front_axis}",

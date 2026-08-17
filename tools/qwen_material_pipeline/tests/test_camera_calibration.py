@@ -26,6 +26,7 @@ from qwen_material_pipeline.evidence.camera_calibration import (
     _residual_components,
     _seal_full_resolution_winners,
     _seed_by_view_specs,
+    _score_fast_candidates,
     _silhouette_coverage_metrics,
     _spatial_balanced_reference_metrics,
 )
@@ -676,6 +677,60 @@ def test_camera_foreground_depends_only_on_stable_part_ids() -> None:
     assert np.array_equal(first, second)
     assert np.count_nonzero(first) == 16 * 12
     assert np.all(first[:8] == 0)
+
+
+def test_fast_candidates_use_the_authoritative_objective_and_metadata() -> None:
+    class FakeRasterizer:
+        audit = {"backend": "test_fast_part_id/v1"}
+        parts = [{"part_id": "P0001"}]
+
+        red, green, blue = _part_color("P0001")
+        part_colors_bgr = [np.asarray((blue, green, red), dtype=np.uint8)]
+
+        def render_part_ids(self, spec):
+            ids = np.zeros((64, 64, 3), dtype=np.uint8)
+            left = 12 if spec["view_id"].endswith("best") else 20
+            ids[12:52, left : left + 32] = self.part_colors_bgr[0]
+            return ids
+
+    reference_mask = np.zeros((64, 64), dtype=np.uint8)
+    reference_mask[12:52, 12:44] = 255
+    reference_image = np.zeros((64, 64, 3), dtype=np.uint8)
+    reference_image[12:52, 12:44] = 180
+    base = {
+        "analysis_direction": [0.0, -1.0, 0.0],
+        "analysis_up_axis": [0.0, 0.0, 1.0],
+        "focal_length_mm": 45.0,
+        "distance_multiplier": 2.15,
+        "target_offset_u": 0.0,
+        "target_offset_v": 0.0,
+        "projection_mode": "perspective",
+        "orthographic_span_multiplier": 2.0,
+        "calibration": {"reference_view_id": "front", "phase": "coarse"},
+    }
+
+    winner, candidates = _score_fast_candidates(
+        reference_id="front",
+        reference_mask=reference_mask,
+        reference_image=reference_image,
+        specs={
+            "schema_version": camera_calibration.VIEW_SPEC_SCHEMA_VERSION,
+            "views": [
+                {**base, "view_id": "candidate_shifted"},
+                {**base, "view_id": "candidate_best"},
+            ],
+        },
+        rasterizer=FakeRasterizer(),
+    )
+
+    assert winner["view_id"] == "candidate_best"
+    assert winner["render_backend"] == "test_fast_part_id/v1"
+    assert winner["analysis_up_axis"] == [0.0, 0.0, 1.0]
+    assert winner["distance_multiplier"] == 2.15
+    assert {row["view_id"] for row in candidates} == {
+        "candidate_best",
+        "candidate_shifted",
+    }
 
 
 def test_residual_components_report_largest_regions_first() -> None:

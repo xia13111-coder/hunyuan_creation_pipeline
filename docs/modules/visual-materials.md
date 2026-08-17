@@ -22,6 +22,23 @@ STEP/STP conversion
 The delivered CAD is never resized, rotated, or deformed to match a photograph.
 Camera transforms used during analysis do not modify the USD.
 
+### Accelerated camera search
+
+Camera hypothesis search loads the complete CAD once in Kaolin's CUDA
+rasterizer and generates stable Part-ID, silhouette, and occlusion buffers. It
+keeps the established whole-assembly camera parameters, search phases, and
+objective; it never moves an individual Mesh or uses material and lighting
+appearance. The five highest-ranked cameras per reference are still rendered
+at final resolution by Isaac Sim, and only that Isaac evidence selects the
+published camera.
+
+`calibrate-cameras --fast-search` accepts `auto` (the default, with fallback
+when the optional runtime is unavailable), `required` (fail if the fast backend
+is unavailable), and `disabled` (the legacy all-Isaac candidate search). The
+report binds asset hashes, triangle and candidate counts, timings, and every
+fast candidate to its full-resolution Isaac verification under
+`candidate_search`.
+
 `asset_pipeline/visual_materials/` coordinates the workflow.
 `tools/qwen_material_pipeline/` provides segmentation, evidence extraction,
 retrieval, model calls, and USD workers. Isaac Sim handles CAD/USD, MDL

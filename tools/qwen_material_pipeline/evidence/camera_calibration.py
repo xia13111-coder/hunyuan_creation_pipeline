@@ -40,6 +40,7 @@ MAX_FOCAL_LENGTH_MM = 2000.0
 CAMERA_OBJECTIVE_VERSION = "hierarchical_visible_part_alignment/v8"
 COMPLETE_ALIGNMENT_MINIMUM_IOU = 0.97
 COMPLETE_ALIGNMENT_MAXIMUM_BOUNDARY_P95_PX = 3.0
+FAST_SEARCH_MODES = ("auto", "disabled", "required")
 CAMERA_PHASES = (
     "coarse",
     "lens",
@@ -1014,6 +1015,117 @@ def _write_residual_audit(
     }
 
 
+def _score_candidate_ids(
+    *,
+    reference_mask: np.ndarray,
+    reference_image: np.ndarray,
+    ids: np.ndarray,
+    parts: Sequence[Mapping[str, Any]],
+    colors: Sequence[np.ndarray],
+    view: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Score one stable Part-ID image with the authoritative camera objective."""
+
+    calibration = view.get("camera_calibration")
+    if not isinstance(calibration, Mapping):
+        raise ValueError(f"Camera candidate {view.get('view_id')!r} has no calibration")
+    if ids.ndim != 3 or ids.shape[2] < 3:
+        raise ValueError(f"Camera candidate {view.get('view_id')!r} has invalid Part IDs")
+    foreground = _deterministic_part_id_foreground(ids, colors)
+    projection = _refine_projection(
+        reference_mask,
+        foreground,
+        DEFAULT_POLICY,
+    )
+    matrix = np.asarray(projection["bbox_affine"], dtype=np.float32)
+    registered = cv2.warpAffine(
+        foreground,
+        matrix,
+        (reference_mask.shape[1], reference_mask.shape[0]),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    boundary = _boundary_metrics(reference_mask, registered)
+    coverage = _silhouette_coverage_metrics(reference_mask, registered)
+    component_coverage = _component_balanced_reference_metrics(
+        reference_mask,
+        registered,
+    )
+    spatial_coverage = _spatial_balanced_reference_metrics(
+        reference_mask,
+        registered,
+    )
+    structure = _part_balanced_structure_metrics(
+        ids=ids,
+        parts=parts,
+        affine=matrix,
+        reference_image=reference_image,
+        reference_mask=reference_mask,
+    )
+    iou = float(projection["projection_iou"])
+    diagonal = math.hypot(reference_mask.shape[1], reference_mask.shape[0])
+    boundary_decay = max(3.0, 0.02 * diagonal)
+    boundary_score = math.exp(-float(boundary["boundary_p95_px"]) / boundary_decay)
+    # Hierarchical objective: the confirmed foreground first has to be
+    # covered, then the outer boundary and equal-weight size strata select
+    # the camera.  IoU remains bounded evidence but can no longer let one
+    # large enclosure hide small-part displacement.
+    score = (
+        0.12 * iou
+        + 0.12 * float(coverage["target_recall"])
+        + 0.08 * float(coverage["rendered_precision"])
+        + 0.13 * boundary_score
+        + 0.18 * float(structure["structure_score"])
+        + 0.10 * float(component_coverage["reference_component_macro_recall"])
+        + 0.05 * float(component_coverage["reference_component_min_recall"])
+        + 0.14 * float(spatial_coverage["reference_spatial_macro_recall"])
+        + 0.08 * float(spatial_coverage["reference_spatial_min_recall"])
+    )
+    complete_alignment_candidate = (
+        iou >= COMPLETE_ALIGNMENT_MINIMUM_IOU
+        and float(boundary["boundary_p95_px"])
+        <= COMPLETE_ALIGNMENT_MAXIMUM_BOUNDARY_P95_PX
+    )
+    return {
+        "view_id": view["view_id"],
+        "objective_version": CAMERA_OBJECTIVE_VERSION,
+        "score": round(score, 8),
+        "projection_iou": round(iou, 8),
+        **{key: round(float(value), 8) for key, value in coverage.items()},
+        **{
+            key: (round(float(value), 8) if isinstance(value, float) else value)
+            for key, value in component_coverage.items()
+        },
+        **{
+            key: (round(float(value), 8) if isinstance(value, float) else value)
+            for key, value in spatial_coverage.items()
+        },
+        **{key: round(value, 8) for key, value in boundary.items()},
+        "boundary_score": round(boundary_score, 8),
+        "complete_alignment_candidate": complete_alignment_candidate,
+        **{
+            key: (round(float(value), 8) if isinstance(value, float) else value)
+            for key, value in structure.items()
+        },
+        "analysis_direction": view.get("analysis_direction"),
+        "analysis_up_axis": (
+            view.get("analysis_camera_up_axis") or view.get("camera_up_axis")
+        ),
+        "focal_length_mm": view.get("focal_length_mm"),
+        "distance_multiplier": view.get("camera_distance_multiplier"),
+        "target_offset_u": view.get("camera_target_offset_u", 0.0),
+        "target_offset_v": view.get("camera_target_offset_v", 0.0),
+        "projection_mode": view.get("camera_projection_mode", "perspective"),
+        "orthographic_span_multiplier": view.get(
+            "camera_orthographic_span_multiplier", 2.0
+        ),
+        "calibration": dict(calibration),
+        "render_backend": view.get("render_backend", "isaac_rtx_part_id"),
+        "whole_asset_similarity": projection,
+    }
+
+
 def _score_candidates(
     *,
     reference_id: str,
@@ -1050,104 +1162,79 @@ def _score_candidates(
         ids = cv2.imread(str(ids_path), cv2.IMREAD_COLOR)
         if ids is None:
             raise ValueError(f"Unable to read calibration render {view.get('view_id')}")
-        foreground = _deterministic_part_id_foreground(ids, colors)
-        projection = _refine_projection(
-            reference_mask,
-            foreground,
-            DEFAULT_POLICY,
-        )
-        matrix = np.asarray(projection["bbox_affine"], dtype=np.float32)
-        registered = cv2.warpAffine(
-            foreground,
-            matrix,
-            (reference_mask.shape[1], reference_mask.shape[0]),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-        boundary = _boundary_metrics(reference_mask, registered)
-        coverage = _silhouette_coverage_metrics(reference_mask, registered)
-        component_coverage = _component_balanced_reference_metrics(
-            reference_mask,
-            registered,
-        )
-        spatial_coverage = _spatial_balanced_reference_metrics(
-            reference_mask,
-            registered,
-        )
-        structure = _part_balanced_structure_metrics(
-            ids=ids,
-            parts=parts,
-            affine=matrix,
-            reference_image=reference_image,
-            reference_mask=reference_mask,
-        )
-        iou = float(projection["projection_iou"])
-        diagonal = math.hypot(reference_mask.shape[1], reference_mask.shape[0])
-        boundary_decay = max(3.0, 0.02 * diagonal)
-        boundary_score = math.exp(-float(boundary["boundary_p95_px"]) / boundary_decay)
-        # Hierarchical objective: the confirmed foreground first has to be
-        # covered, then the outer boundary and equal-weight size strata select
-        # the camera.  IoU remains bounded evidence but can no longer let one
-        # large enclosure hide small-part displacement.
-        score = (
-            0.12 * iou
-            + 0.12 * float(coverage["target_recall"])
-            + 0.08 * float(coverage["rendered_precision"])
-            + 0.13 * boundary_score
-            + 0.18 * float(structure["structure_score"])
-            + 0.10 * float(component_coverage["reference_component_macro_recall"])
-            + 0.05 * float(component_coverage["reference_component_min_recall"])
-            + 0.14 * float(spatial_coverage["reference_spatial_macro_recall"])
-            + 0.08 * float(spatial_coverage["reference_spatial_min_recall"])
-        )
-        complete_alignment_candidate = (
-            iou >= COMPLETE_ALIGNMENT_MINIMUM_IOU
-            and float(boundary["boundary_p95_px"])
-            <= COMPLETE_ALIGNMENT_MAXIMUM_BOUNDARY_P95_PX
-        )
         records.append(
-            {
-                "view_id": view["view_id"],
-                "objective_version": CAMERA_OBJECTIVE_VERSION,
-                "score": round(score, 8),
-                "projection_iou": round(iou, 8),
-                **{key: round(float(value), 8) for key, value in coverage.items()},
-                **{
-                    key: (round(float(value), 8) if isinstance(value, float) else value)
-                    for key, value in component_coverage.items()
-                },
-                **{
-                    key: (round(float(value), 8) if isinstance(value, float) else value)
-                    for key, value in spatial_coverage.items()
-                },
-                **{key: round(value, 8) for key, value in boundary.items()},
-                "boundary_score": round(boundary_score, 8),
-                "complete_alignment_candidate": complete_alignment_candidate,
-                **{
-                    key: (round(float(value), 8) if isinstance(value, float) else value)
-                    for key, value in structure.items()
-                },
-                "analysis_direction": view.get("analysis_direction"),
-                "analysis_up_axis": (
-                    view.get("analysis_camera_up_axis") or view.get("camera_up_axis")
-                ),
-                "focal_length_mm": view.get("focal_length_mm"),
-                "distance_multiplier": view.get("camera_distance_multiplier"),
-                "target_offset_u": view.get("camera_target_offset_u", 0.0),
-                "target_offset_v": view.get("camera_target_offset_v", 0.0),
-                "projection_mode": view.get(
-                    "camera_projection_mode", "perspective"
-                ),
-                "orthographic_span_multiplier": view.get(
-                    "camera_orthographic_span_multiplier", 2.0
-                ),
-                "calibration": calibration,
-                "whole_asset_similarity": projection,
-            }
+            _score_candidate_ids(
+                reference_mask=reference_mask,
+                reference_image=reference_image,
+                ids=ids,
+                parts=parts,
+                colors=colors,
+                view=view,
+            )
         )
     if not records:
         raise ValueError(f"No calibration candidates found for {reference_id}")
+    records.sort(key=_alignment_candidate_sort_key)
+    return records[0], records
+
+
+def _score_fast_candidates(
+    *,
+    reference_id: str,
+    reference_mask: np.ndarray,
+    reference_image: np.ndarray,
+    specs: Mapping[str, Any],
+    rasterizer: Any,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Render and score a phase without starting Isaac.
+
+    The adapter intentionally emits the same camera metadata keys as the USD
+    renderer.  That keeps candidate ordering and the later full-resolution
+    Isaac verification on one scoring implementation.
+    """
+
+    views = specs.get("views")
+    if not isinstance(views, list) or not views:
+        raise ValueError("Fast camera search requires non-empty candidate specs")
+    records: list[dict[str, Any]] = []
+    for raw in views:
+        if not isinstance(raw, Mapping):
+            raise ValueError("Fast camera candidate spec must be an object")
+        calibration = raw.get("calibration")
+        if (
+            not isinstance(calibration, Mapping)
+            or calibration.get("reference_view_id") != reference_id
+        ):
+            raise ValueError(
+                f"Fast camera candidate belongs to another reference: "
+                f"{raw.get('view_id')!r}"
+            )
+        ids = rasterizer.render_part_ids(raw)
+        view = {
+            "view_id": raw.get("view_id"),
+            "analysis_direction": raw.get("analysis_direction"),
+            "analysis_camera_up_axis": raw.get("analysis_up_axis"),
+            "focal_length_mm": raw.get("focal_length_mm"),
+            "camera_distance_multiplier": raw.get("distance_multiplier"),
+            "camera_target_offset_u": raw.get("target_offset_u", 0.0),
+            "camera_target_offset_v": raw.get("target_offset_v", 0.0),
+            "camera_projection_mode": raw.get("projection_mode", "perspective"),
+            "camera_orthographic_span_multiplier": raw.get(
+                "orthographic_span_multiplier", 2.0
+            ),
+            "camera_calibration": dict(calibration),
+            "render_backend": rasterizer.audit["backend"],
+        }
+        records.append(
+            _score_candidate_ids(
+                reference_mask=reference_mask,
+                reference_image=reference_image,
+                ids=ids,
+                parts=rasterizer.parts,
+                colors=rasterizer.part_colors_bgr,
+                view=view,
+            )
+        )
     records.sort(key=_alignment_candidate_sort_key)
     return records[0], records
 
@@ -1314,6 +1401,7 @@ def _spec_from_score(
             **score["calibration"],
             "reference_view_id": reference_id,
             "phase": phase,
+            "source_candidate_view_id": score["view_id"],
         },
     }
 
@@ -1859,6 +1947,7 @@ def calibrate(
     analysis_front_axis: str,
     initial_view_specs: Path | None = None,
     search_phases: Sequence[str] | None = None,
+    fast_search_mode: str = "disabled",
 ) -> dict[str, Any]:
     registry = registry.expanduser().resolve(strict=True)
     reference_manifest = reference_manifest.expanduser().resolve(strict=True)
@@ -1879,6 +1968,11 @@ def calibrate(
     if invalid_phases:
         raise ValueError(
             "Unknown camera calibration search phases: " + ", ".join(invalid_phases)
+        )
+    if fast_search_mode not in FAST_SEARCH_MODES:
+        raise ValueError(
+            "Unknown fast camera search mode: "
+            f"{fast_search_mode!r}; expected one of {', '.join(FAST_SEARCH_MODES)}"
         )
     isaac_python = isaac_python.expanduser().resolve(strict=True)
     destination = output_dir.expanduser().resolve()
@@ -1921,6 +2015,40 @@ def calibrate(
             "Missing reference masks or camera seeds: " + ", ".join(missing)
         )
 
+    fast_rasterizer = None
+    fast_fallback_reason: str | None = None
+    if fast_search_mode != "disabled":
+        from qwen_material_pipeline.evidence.camera_fast_raster import (
+            FastCameraRasterUnavailable,
+            FastPartIdRasterizer,
+        )
+
+        try:
+            fast_rasterizer = FastPartIdRasterizer(
+                registry_path=registry,
+                resolution=search_resolution,
+                analysis_up_axis=analysis_up_axis,
+                analysis_front_axis=analysis_front_axis,
+            )
+        except FastCameraRasterUnavailable as exc:
+            if fast_search_mode == "required":
+                raise
+            fast_fallback_reason = str(exc)
+            print(
+                "[CAMERA] fast Part-ID raster unavailable; "
+                f"falling back to Isaac candidate search ({exc})",
+                flush=True,
+            )
+        else:
+            print(
+                "[CAMERA] fast Part-ID raster ready: "
+                f"{fast_rasterizer.audit['triangle_count']} triangles, "
+                f"{search_resolution}px, "
+                f"initialized in "
+                f"{fast_rasterizer.audit['initialization_seconds']:.3f}s",
+                flush=True,
+            )
+
     winners: dict[str, dict[str, Any]] = {}
     phases: dict[str, list[dict[str, Any]]] = {}
     finalists: dict[str, list[dict[str, Any]]] = {}
@@ -1949,6 +2077,9 @@ def calibrate(
             )
             if completed is not None:
                 winner, candidates = completed
+                phase_backend = str(
+                    winner.get("render_backend", "verified_legacy_checkpoint")
+                )
                 print(
                     f"[CAMERA] {reference_id}/{phase} reusing verified "
                     "completed candidate batch",
@@ -1956,28 +2087,40 @@ def calibrate(
                 )
             else:
                 specs_path = _write_object(view_specs_path, specs)
-                rendered = _run_render(
-                    isaac_python=isaac_python,
-                    registry=registry,
-                    output_dir=destination / reference_id / f"{phase}_renders",
-                    view_specs=specs_path,
-                    resolution=search_resolution,
-                    rt_subframes=rt_subframes,
-                    analysis_up_axis=analysis_up_axis,
-                    analysis_front_axis=analysis_front_axis,
-                )
-                winner, candidates = _score_candidates(
-                    reference_id=reference_id,
-                    reference_mask=references[reference_id][0],
-                    reference_image=reference_images[reference_id],
-                    registry_path=rendered,
-                )
+                if fast_rasterizer is not None:
+                    winner, candidates = _score_fast_candidates(
+                        reference_id=reference_id,
+                        reference_mask=references[reference_id][0],
+                        reference_image=reference_images[reference_id],
+                        specs=specs,
+                        rasterizer=fast_rasterizer,
+                    )
+                    phase_backend = str(fast_rasterizer.audit["backend"])
+                else:
+                    rendered = _run_render(
+                        isaac_python=isaac_python,
+                        registry=registry,
+                        output_dir=destination / reference_id / f"{phase}_renders",
+                        view_specs=specs_path,
+                        resolution=search_resolution,
+                        rt_subframes=rt_subframes,
+                        analysis_up_axis=analysis_up_axis,
+                        analysis_front_axis=analysis_front_axis,
+                    )
+                    winner, candidates = _score_candidates(
+                        reference_id=reference_id,
+                        reference_mask=references[reference_id][0],
+                        reference_image=reference_images[reference_id],
+                        registry_path=rendered,
+                    )
+                    phase_backend = "isaac_rtx_part_id"
                 _write_object(
                     scores_path,
                     {
                         "schema_version": SCHEMA_VERSION,
                         "reference_view_id": reference_id,
                         "phase": phase,
+                        "search_backend": phase_backend,
                         "winner": winner,
                         "candidates": candidates,
                     },
@@ -1987,6 +2130,7 @@ def calibrate(
                     "phase": phase,
                     "winner": winner,
                     "candidate_count": len(candidates),
+                    "search_backend": phase_backend,
                 }
             )
             phase_candidate_pool.extend(candidates[:FINALIST_COUNT])
@@ -2015,6 +2159,12 @@ def calibrate(
         winners[reference_id] = phase_records[-1]["winner"]
         phases[reference_id] = phase_records
 
+    if fast_rasterizer is not None:
+        # Isaac owns the authoritative full-resolution verification.  Drop
+        # every search tensor and empty Torch's cache before that independent
+        # process allocates RTX/Replicator resources on the same GPU.
+        fast_rasterizer.release()
+
     finalist_specs = {
         "schema_version": VIEW_SPEC_SCHEMA_VERSION,
         "views": [
@@ -2041,6 +2191,7 @@ def calibrate(
         analysis_up_axis=analysis_up_axis,
         analysis_front_axis=analysis_front_axis,
     )
+    finalist_verification: dict[str, dict[str, Any]] = {}
     for reference_id in requested:
         winner, candidates = _score_candidates(
             reference_id=reference_id,
@@ -2048,12 +2199,86 @@ def calibrate(
             reference_image=reference_images[reference_id],
             registry_path=finalist_rendered,
         )
+        fast_by_id = {
+            str(item["view_id"]): item for item in finalists[reference_id]
+        }
+        verification_candidates: list[dict[str, Any]] = []
+        for exact in candidates:
+            calibration = exact.get("calibration")
+            source_id = (
+                calibration.get("source_candidate_view_id")
+                if isinstance(calibration, Mapping)
+                else None
+            )
+            predicted = fast_by_id.get(str(source_id))
+            if predicted is None:
+                raise ValueError(
+                    "Full-resolution Isaac finalist is not bound to its "
+                    f"candidate-search source: {exact.get('view_id')!r}"
+                )
+            verification_candidates.append(
+                {
+                    "isaac_view_id": exact["view_id"],
+                    "source_candidate_view_id": source_id,
+                    "candidate_search_rank": finalists[reference_id].index(predicted)
+                    + 1,
+                    "candidate_search_backend": predicted.get("render_backend"),
+                    "candidate_search_iou": predicted["projection_iou"],
+                    "isaac_iou": exact["projection_iou"],
+                    "iou_delta": round(
+                        float(exact["projection_iou"])
+                        - float(predicted["projection_iou"]),
+                        8,
+                    ),
+                    "candidate_search_boundary_p95_px": predicted[
+                        "boundary_p95_px"
+                    ],
+                    "isaac_boundary_p95_px": exact["boundary_p95_px"],
+                    "boundary_p95_delta_px": round(
+                        float(exact["boundary_p95_px"])
+                        - float(predicted["boundary_p95_px"]),
+                        8,
+                    ),
+                }
+            )
+        exact_winner_source = winner["calibration"].get(
+            "source_candidate_view_id"
+        )
+        exact_winner_record = next(
+            (
+                row
+                for row in verification_candidates
+                if row["source_candidate_view_id"] == exact_winner_source
+            ),
+            None,
+        )
+        if exact_winner_record is None:
+            raise ValueError(
+                f"Unable to bind Isaac winner for {reference_id} to search evidence"
+            )
+        finalist_verification[reference_id] = {
+            "candidate_count": len(verification_candidates),
+            "authoritative_backend": "isaac_rtx_part_id",
+            "isaac_winner_view_id": winner["view_id"],
+            "isaac_winner_source_candidate_view_id": exact_winner_source,
+            "isaac_winner_candidate_search_rank": exact_winner_record[
+                "candidate_search_rank"
+            ],
+            "candidate_search_top1_preserved": (
+                exact_winner_record["candidate_search_rank"] == 1
+            ),
+            "candidates": verification_candidates,
+        }
         winners[reference_id] = winner
         phases[reference_id].append(
             {
                 "phase": "full_resolution_rerank",
                 "winner": winner,
                 "candidate_count": len(candidates),
+                "search_backend": "isaac_rtx_part_id",
+                "candidate_search_verification": finalist_verification[
+                    reference_id
+                ],
             }
         )
         _write_object(
@@ -2132,6 +2357,22 @@ def calibrate(
             str(initial_view_specs) if initial_view_specs is not None else None
         ),
         "search_phases": list(active_phases),
+        "candidate_search": {
+            "requested_mode": fast_search_mode,
+            "selected_backend": (
+                fast_rasterizer.audit["backend"]
+                if fast_rasterizer is not None
+                else "isaac_rtx_part_id"
+            ),
+            "fallback_reason": fast_fallback_reason,
+            "fast_raster_audit": (
+                dict(fast_rasterizer.audit)
+                if fast_rasterizer is not None
+                else None
+            ),
+            "authoritative_full_resolution_backend": "isaac_rtx_part_id",
+            "full_resolution_verification": finalist_verification,
+        },
         "seed_search": seed_audit,
         "whole_asset_only": True,
         "per_part_geometric_warp_applied": False,
@@ -2234,6 +2475,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rt-subframes", type=int, default=2)
     parser.add_argument("--analysis-up-axis", default="z")
     parser.add_argument("--analysis-front-axis", default="-y")
+    parser.add_argument(
+        "--fast-search",
+        choices=FAST_SEARCH_MODES,
+        default="auto",
+        help=(
+            "use one-load CUDA Part-ID rasterization for candidate search; "
+            "Top-K cameras are always verified by Isaac at full resolution"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -2261,6 +2511,7 @@ def main() -> int:
             if args.search_phases
             else None
         ),
+        fast_search_mode=args.fast_search,
     )
     print(
         json.dumps(

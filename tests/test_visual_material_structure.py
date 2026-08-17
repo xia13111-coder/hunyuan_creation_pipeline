@@ -129,6 +129,7 @@ def test_render_and_camera_builders_handle_optional_arguments() -> None:
         "/run/camera/search/final_view_specs.json"
     )
     assert camera[camera.index("--search-phases") + 1] == ("orthographic,micro,pico")
+    assert camera[camera.index("--fast-search") + 1] == "auto"
     assert camera[-1] == "--analysis-front-axis=-y"
 
 

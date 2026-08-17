@@ -21,6 +21,18 @@ STEP/STP 转换
 最终 CAD 不会为了匹配照片而缩放、旋转或变形。分析阶段估计的相机和二维修正不会写入
 USD。
 
+### 相机搜索加速
+
+相机候选搜索默认使用 Kaolin CUDA 光栅器一次加载完整 CAD，只生成稳定的 Part-ID、轮廓和
+遮挡关系。它保留原有的整件刚体相机参数、搜索阶段和评分函数，不移动任何单独 Mesh，也不
+使用材质或灯光信息。每个视角排名最高的 5 台相机仍会交给 Isaac Sim 以最终分辨率重新渲染，
+最终相机只由这份 Isaac 结果决定。
+
+`calibrate-cameras --fast-search` 支持三种模式：`auto` 默认启用并在可选运行时不可用时回退，
+`required` 要求快速后端可用，否则停止，`disabled` 完整使用旧 Isaac 候选搜索。报告中的
+`candidate_search.fast_raster_audit` 记录资产哈希、三角形数量、候选数量和耗时；
+`candidate_search.full_resolution_verification` 绑定快速候选与 Isaac 最终复核结果。
+
 `asset_pipeline/visual_materials/` 负责编排；`tools/qwen_material_pipeline/` 提供分割、
 图像信息提取、检索、模型调用和 USD 工具；Isaac Sim 负责 CAD/USD、MDL 渲染、物理和最终
 验证。详见[架构](../architecture.zh.md)。
