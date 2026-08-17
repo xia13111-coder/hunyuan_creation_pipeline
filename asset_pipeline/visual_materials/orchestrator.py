@@ -171,6 +171,10 @@ from qwen_material_pipeline.materials.publish_quality_gate import (
     build_publish_quality_gate,
     require_publish_quality_gate_passed,
 )
+from qwen_material_pipeline.materials.policy_exact_cover import (
+    PolicyExactCoverError,
+    build_policy_exact_cover,
+)
 from qwen_material_pipeline.materials.selection_lock import (
     build_material_selection_lock,
     validate_material_selection_lock,
@@ -2068,6 +2072,94 @@ def _run_policy_part_id_stage(
             "or CAD/USD geometry change is allowed. "
             "Selected-view coverage: "
             f"{evidence_document['summary'].get('selected_reference_view_coverage', {})}.",
+        )
+        # The initial exact-cover plan is built before local Part-ID visibility
+        # is known. Rebuild it deterministically from the same trusted inputs
+        # after final evidence exists so a hidden CAD part can never inherit a
+        # palette group or repeated-identity material chosen for visible
+        # siblings. This contract applies to every Part-ID workflow, not to a
+        # particular asset, view, material group, or selection mode.
+        registry_document = read_object(
+            rendered_registry,
+            "rendered registry for final Part-ID policy convergence",
+        )
+        staged_result_document = read_object(
+            staged_result,
+            "staged result for final Part-ID policy convergence",
+        )
+        confidence_gate_document = read_object(
+            confidence_gate,
+            "confidence gate for final Part-ID policy convergence",
+        )
+        base_plan_document = read_object(
+            staged_material_plan,
+            "autonomous plan for final Part-ID policy convergence",
+        )
+        group_materials_document = read_object(
+            group_materials,
+            "group materials for final Part-ID policy convergence",
+        )
+        mvinverse_pbr_document = read_object(
+            mvinverse_pbr_evidence,
+            "MVInverse evidence for final Part-ID policy convergence",
+        )
+        palette_fusion_document = read_object(
+            analysis_dir / "palette_fusion.json",
+            "palette fusion for final Part-ID policy convergence",
+        )
+        whitelist_document = read_object(
+            effective_whitelist,
+            "material whitelist for final Part-ID policy convergence",
+        )
+        try:
+            policy_plan_document, policy_audit_document = build_policy_exact_cover(
+                registry=registry_document,
+                staged_result=staged_result_document,
+                confidence_gate=confidence_gate_document,
+                whitelist=whitelist_document,
+                policy=policy_input_document,
+                base_plan=base_plan_document,
+                group_materials=group_materials_document,
+                mvinverse_pbr_evidence=mvinverse_pbr_document,
+                palette_fusion=palette_fusion_document,
+                part_id_evidence=evidence_document,
+                acknowledge_policy_fallback=True,
+                immutable_mdl_after_selection=(
+                    config.immutable_mdl_after_selection
+                ),
+            )
+        except PolicyExactCoverError as exc:
+            raise RuntimeError(
+                "Part-ID workflow could not converge hidden-part policy "
+                f"fallbacks to final visibility: {exc}"
+            ) from exc
+        policy_fallback_count = _validate_policy_exact_cover_bundle(
+            plan=policy_plan_document,
+            audit=policy_audit_document,
+            registry=registry_document,
+            staged_result=staged_result_document,
+            confidence_gate=confidence_gate_document,
+            base_plan=base_plan_document,
+            group_materials=group_materials_document,
+            mvinverse_pbr_evidence=mvinverse_pbr_document,
+            whitelist=whitelist_document,
+            palette_fusion=palette_fusion_document,
+            part_id_evidence=evidence_document,
+            expected_source_visual_strategy="neutralize_unverified",
+            expected_policy_overrides=policy_input_document,
+            expected_immutable_mdl_after_selection=(
+                config.immutable_mdl_after_selection
+            ),
+        )
+        write_object(policy_plan, policy_plan_document)
+        write_object(policy_audit, policy_audit_document)
+        convergence_summary = policy_audit_document["summary"]
+        log_message(
+            log_cb,
+            "Policy baseline converged to final Part-ID visibility: "
+            f"{convergence_summary['part_id_evidence_unobserved_count']} "
+            "unobserved parts use independent policy fallbacks; palette groups "
+            "and identity propagation remain restricted to observed parts.",
         )
         retrieval_request_document = build_part_id_retrieval_request(
             evidence=evidence_document,
