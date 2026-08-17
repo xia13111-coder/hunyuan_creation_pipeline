@@ -8,7 +8,8 @@
 ## 适用范围
 
 默认配置为 `configs/pipeline/manual_part_id_materials.json`。流程按 CAD Part-ID 从
-NVIDIA `Materials/Base` 中选择视觉效果最接近的材质，选定后保持原始参数。
+NVIDIA `Materials/Base` 中选择视觉效果最接近的材质。精确目录匹配保持原始预设；仅确认
+材质类别的“对应材质”可以在 MDL 身份固定后进入独立的真实 CAD 校色流程。
 
 本包负责参考图分析、相机配准、Part-ID 映射、材质检索、USD 绑定和验证。CAD 转换及
 总流程由 `asset_pipeline` 负责。
@@ -56,6 +57,7 @@ SAM3、MVInverse、DINOv2、NVIDIA 材质和 Base 材质观察库是独立本机
 | `base-bank` | 构建或验证 Base 材质观察库 |
 | `part-id-qwen` | 按 Part-ID 排序候选 |
 | `exact-mdl-tournament` | 渲染比较 MDL 候选 |
+| `run-corresponding-material-color-workflow` | 固定 MDL 后实渲选择颜色并做绝对 QA |
 | `compare` | 比较参考图和渲染图 |
 | `final-visual-gate` | 验证收集后的 USD |
 | `usd` | USD 零件索引、渲染、绑定与验证 |
@@ -85,6 +87,7 @@ visual_material/final_visual_acceptance/
 - [用户命令](../../docs/manual-part-id-materials.zh.md)
 - [行为与排错](../../docs/modules/visual-materials.zh.md)
 - [架构](./docs/architecture.zh.md)
+- [材质身份优先、真实 CAD 校色流程](./docs/material_identity_color_workflow.zh.md)
 - [MVInverse](./docs/mvinverse.zh.md)
 
 ```bash

@@ -136,6 +136,10 @@ COMMANDS: dict[str, CommandSpec] = {
         "qwen_material_pipeline.materials.corresponding_material_color_selection",
         "select per-scope colour intensity from registered actual-CAD renders",
     ),
+    "run-corresponding-material-color-workflow": CommandSpec(
+        "qwen_material_pipeline.workflows.corresponding_material_color_workflow",
+        "run the saved identity-first actual-CAD colour calibration workflow",
+    ),
 }
 
 

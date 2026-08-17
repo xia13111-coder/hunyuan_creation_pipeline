@@ -4,7 +4,8 @@
 `manual-material-pipeline`；本包不负责 CAD 转换或物理处理。
 
 另见 [MVInverse](./mvinverse.zh.md) 和
-[Base 材质观察库](./base_material_observation_bank.zh.md)。
+[Base 材质观察库](./base_material_observation_bank.zh.md)，以及
+[材质身份优先、真实 CAD 校色流程](./material_identity_color_workflow.zh.md)。
 
 ## 1. 系统边界
 

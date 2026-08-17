@@ -123,7 +123,6 @@ def _load_candidate(directory: Path, source_plan_sha256: str) -> Candidate:
         "plan": root / "part_id_material_plan.color.json",
         "audit": root / "corresponding_material_color_audit.json",
         "apply_report": root / "apply_report.json",
-        "asset": root / "dtn100_colored.usda",
         "rendered_registry": root / "renders" / "part_registry.rendered.json",
     }
     for label, path in expected.items():
@@ -135,6 +134,14 @@ def _load_candidate(directory: Path, source_plan_sha256: str) -> Candidate:
     audit = _read_object(expected["audit"])
     apply_report = _read_object(expected["apply_report"])
     registry = _read_object(expected["rendered_registry"])
+    asset = Path(
+        _text(apply_report.get("output_usd"), "apply_report.output_usd")
+    ).expanduser().resolve(strict=True)
+    if asset.parent != root or not asset.is_file() or asset.is_symlink():
+        raise CorrespondingMaterialColorSelectionError(
+            f"candidate {root.name} apply report points outside its candidate directory"
+        )
+    expected["asset"] = asset
     try:
         _verify_document_integrity(audit, f"candidate {root.name} audit")
     except CorrespondingMaterialColorError as exc:
@@ -167,10 +174,6 @@ def _load_candidate(directory: Path, source_plan_sha256: str) -> Candidate:
     if apply_report.get("plan_sha256") != canonical_sha256(plan):
         raise CorrespondingMaterialColorSelectionError(
             f"candidate {root.name} apply report does not bind its plan"
-        )
-    if Path(_text(apply_report.get("output_usd"), "apply_report.output_usd")).resolve() != expected["asset"]:
-        raise CorrespondingMaterialColorSelectionError(
-            f"candidate {root.name} apply report points at another asset"
         )
     if apply_report.get("output_sha256") != file_hashes["asset"]:
         raise CorrespondingMaterialColorSelectionError(

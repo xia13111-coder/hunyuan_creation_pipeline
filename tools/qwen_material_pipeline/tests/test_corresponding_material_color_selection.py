@@ -119,7 +119,7 @@ def test_candidate_loader_binds_plan_apply_asset_and_render_registry(
     root = tmp_path / "gain_1"
     plan_path = root / "part_id_material_plan.color.json"
     audit_path = root / "corresponding_material_color_audit.json"
-    asset_path = root / "dtn100_colored.usda"
+    asset_path = root / "generic_material_look.usda"
     apply_path = root / "apply_report.json"
     registry_path = root / "renders" / "part_registry.rendered.json"
     _write_json(plan_path, dict(candidate.plan))
@@ -152,6 +152,7 @@ def test_candidate_loader_binds_plan_apply_asset_and_render_registry(
     )
     loaded = selection._load_candidate(root, canonical_sha256(source))
     assert loaded.gain == 1.0
+    assert loaded.paths["asset"] == str(asset_path)
     assert loaded.hashes["asset"] == _file_sha(asset_path)
 
     tampered = json.loads(registry_path.read_text())
