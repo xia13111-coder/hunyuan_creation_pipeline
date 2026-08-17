@@ -1,10 +1,10 @@
 """Select per-scope colour intensity from registered actual-CAD renders.
 
-Every candidate keeps the selected MDL identities fixed and changes only one
-audited absolute-linear intensity gain.  Selection is local to a sealed photo
-material scope: a component shares one winning gain, while an independent part
-may choose its own.  The authority is registered render evidence, never the
-candidate's name or the nominal target RGB alone.
+Every candidate keeps the selected MDL identities fixed and changes only an
+audited absolute-linear intensity gain per sealed scope.  Selection is local:
+a component shares one winning gain, while an independent part may choose its
+own.  The authority is registered render evidence, never the candidate's name
+or the nominal target RGB alone.
 """
 
 from __future__ import annotations
@@ -32,9 +32,7 @@ from ..usd.material_common import canonical_sha256
 
 
 SCHEMA_VERSION = "qwen-corresponding-material-color-render-selection/v1"
-AUDIT_SCHEMA_VERSION = (
-    "qwen-corresponding-material-color-render-selection-audit/v1"
-)
+AUDIT_SCHEMA_VERSION = "qwen-corresponding-material-color-render-selection-audit/v1"
 
 
 class CorrespondingMaterialColorSelectionError(ValueError):
@@ -44,7 +42,7 @@ class CorrespondingMaterialColorSelectionError(ValueError):
 @dataclass(frozen=True)
 class Candidate:
     candidate_id: str
-    gain: float
+    gains_by_scope: Mapping[str, float]
     plan: Mapping[str, Any]
     audit: Mapping[str, Any]
     rendered_registry: Mapping[str, Any]
@@ -93,7 +91,9 @@ def _read_object(path: Path) -> dict[str, Any]:
 
 def _assignments(plan: Mapping[str, Any], label: str) -> dict[str, Mapping[str, Any]]:
     output: dict[str, Mapping[str, Any]] = {}
-    for index, raw in enumerate(_array(plan.get("assignments"), f"{label}.assignments")):
+    for index, raw in enumerate(
+        _array(plan.get("assignments"), f"{label}.assignments")
+    ):
         row = _mapping(raw, f"{label}.assignments[{index}]")
         part_id = _text(row.get("part_id"), f"{label}.assignments[{index}].part_id")
         if part_id in output:
@@ -117,7 +117,9 @@ def _scopes(audit: Mapping[str, Any], label: str) -> dict[str, Mapping[str, Any]
     return output
 
 
-def _load_candidate(directory: Path, source_plan_sha256: str) -> Candidate:
+def load_rendered_color_candidate(
+    directory: Path, source_plan_sha256: str
+) -> Candidate:
     root = directory.expanduser().resolve(strict=True)
     expected = {
         "plan": root / "part_id_material_plan.color.json",
@@ -134,9 +136,11 @@ def _load_candidate(directory: Path, source_plan_sha256: str) -> Candidate:
     audit = _read_object(expected["audit"])
     apply_report = _read_object(expected["apply_report"])
     registry = _read_object(expected["rendered_registry"])
-    asset = Path(
-        _text(apply_report.get("output_usd"), "apply_report.output_usd")
-    ).expanduser().resolve(strict=True)
+    asset = (
+        Path(_text(apply_report.get("output_usd"), "apply_report.output_usd"))
+        .expanduser()
+        .resolve(strict=True)
+    )
     if asset.parent != root or not asset.is_file() or asset.is_symlink():
         raise CorrespondingMaterialColorSelectionError(
             f"candidate {root.name} apply report points outside its candidate directory"
@@ -158,18 +162,47 @@ def _load_candidate(directory: Path, source_plan_sha256: str) -> Candidate:
         raise CorrespondingMaterialColorSelectionError(
             f"candidate {root.name} plan/audit mismatch"
         )
-    gain = _mapping(audit.get("policy"), f"candidate {root.name}.policy").get(
-        "linear_intensity_gain"
+    scopes = _scopes(audit, f"candidate {root.name}")
+    policy = _mapping(audit.get("policy"), f"candidate {root.name}.policy")
+    declared_scope_gains = policy.get("linear_intensity_gains_by_scope")
+    if declared_scope_gains is None:
+        global_gain = policy.get("linear_intensity_gain")
+        declared_scope_gains = {scope_id: global_gain for scope_id in scopes}
+    declared_scope_gains = _mapping(
+        declared_scope_gains,
+        f"candidate {root.name}.policy.linear_intensity_gains_by_scope",
     )
-    if (
-        isinstance(gain, bool)
-        or not isinstance(gain, (int, float))
-        or not math.isfinite(float(gain))
-        or not 0.1 <= float(gain) <= 8.0
-    ):
+    if set(declared_scope_gains) != set(scopes):
         raise CorrespondingMaterialColorSelectionError(
-            f"candidate {root.name} has invalid gain"
+            f"candidate {root.name} gains do not cover its colour scopes"
         )
+    gains_by_scope: dict[str, float] = {}
+    for scope_id, raw_gain in declared_scope_gains.items():
+        if (
+            isinstance(raw_gain, bool)
+            or not isinstance(raw_gain, (int, float))
+            or not math.isfinite(float(raw_gain))
+            or not 0.1 <= float(raw_gain) <= 8.0
+        ):
+            raise CorrespondingMaterialColorSelectionError(
+                f"candidate {root.name} has invalid gain for {scope_id}"
+            )
+        gain = float(raw_gain)
+        scope_audit = _mapping(
+            scopes[str(scope_id)].get("color_parameter_audit"),
+            f"candidate {root.name}.{scope_id}.color_parameter_audit",
+        )
+        raw_scope_gain = scope_audit.get("linear_intensity_gain")
+        if (
+            isinstance(raw_scope_gain, bool)
+            or not isinstance(raw_scope_gain, (int, float))
+            or not math.isfinite(float(raw_scope_gain))
+            or float(raw_scope_gain) != gain
+        ):
+            raise CorrespondingMaterialColorSelectionError(
+                f"candidate {root.name} scope gain mismatch for {scope_id}"
+            )
+        gains_by_scope[str(scope_id)] = gain
     file_hashes = {label: _sha256_file(path) for label, path in expected.items()}
     if apply_report.get("plan_sha256") != canonical_sha256(plan):
         raise CorrespondingMaterialColorSelectionError(
@@ -179,7 +212,10 @@ def _load_candidate(directory: Path, source_plan_sha256: str) -> Candidate:
         raise CorrespondingMaterialColorSelectionError(
             f"candidate {root.name} applied asset hash mismatch"
         )
-    if Path(_text(registry.get("asset_usd"), "registry.asset_usd")).resolve() != expected["asset"]:
+    if (
+        Path(_text(registry.get("asset_usd"), "registry.asset_usd")).resolve()
+        != expected["asset"]
+    ):
         raise CorrespondingMaterialColorSelectionError(
             f"candidate {root.name} render registry points at another asset"
         )
@@ -189,7 +225,7 @@ def _load_candidate(directory: Path, source_plan_sha256: str) -> Candidate:
         )
     return Candidate(
         candidate_id=root.name,
-        gain=float(gain),
+        gains_by_scope=gains_by_scope,
         plan=plan,
         audit=audit,
         rendered_registry=registry,
@@ -198,25 +234,29 @@ def _load_candidate(directory: Path, source_plan_sha256: str) -> Candidate:
     )
 
 
+def _load_candidate(directory: Path, source_plan_sha256: str) -> Candidate:
+    """Backward-compatible private alias for existing callers and tests."""
+
+    return load_rendered_color_candidate(directory, source_plan_sha256)
+
+
 def select_render_calibrated_color_plan(
     *,
     source_plan: Mapping[str, Any],
     candidates: Sequence[Candidate],
     part_id_evidence: Mapping[str, Any],
     spatial_mapping_report: Mapping[str, Any],
+    minimum_candidate_count: int = 2,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Merge the best registered gain independently for every colour scope."""
 
-    if len(candidates) < 2:
+    if minimum_candidate_count < 1 or len(candidates) < minimum_candidate_count:
         raise CorrespondingMaterialColorSelectionError(
-            "render selection needs at least two candidates"
+            f"render selection needs at least {minimum_candidate_count} candidates"
         )
     candidate_ids = [candidate.candidate_id for candidate in candidates]
-    gains = [candidate.gain for candidate in candidates]
-    if len(candidate_ids) != len(set(candidate_ids)) or len(gains) != len(set(gains)):
-        raise CorrespondingMaterialColorSelectionError(
-            "candidate IDs and gains must be unique"
-        )
+    if len(candidate_ids) != len(set(candidate_ids)):
+        raise CorrespondingMaterialColorSelectionError("candidate IDs must be unique")
     source_assignments = _assignments(source_plan, "source_plan")
     reference_scopes = _scopes(candidates[0].audit, candidates[0].candidate_id)
     reference_scope_contract = {
@@ -263,7 +303,9 @@ def select_render_calibrated_color_plan(
     parameterized_ids: set[str] = set()
     for scope_id in sorted(reference_scopes):
         scope = reference_scopes[scope_id]
-        members = sorted(_text(value, f"{scope_id}.member") for value in scope["member_part_ids"])
+        members = sorted(
+            _text(value, f"{scope_id}.member") for value in scope["member_part_ids"]
+        )
         scores: list[dict[str, Any]] = []
         for candidate in candidates:
             if len(members) == 1:
@@ -284,11 +326,9 @@ def select_render_calibrated_color_plan(
             scores.append(
                 {
                     "candidate_id": candidate.candidate_id,
-                    "linear_intensity_gain": candidate.gain,
+                    "linear_intensity_gain": candidate.gains_by_scope[scope_id],
                     "score": score,
-                    "rendered_registry_sha256": candidate.hashes[
-                        "rendered_registry"
-                    ],
+                    "rendered_registry_sha256": candidate.hashes["rendered_registry"],
                     "applied_asset_sha256": candidate.hashes["asset"],
                 }
             )
@@ -313,7 +353,10 @@ def select_render_calibrated_color_plan(
                 )
             output_assignments[part_id]["parameters"] = copy.deepcopy(dict(parameters))
             provenance = dict(
-                _mapping(output_assignments[part_id].get("provenance"), f"{part_id}.provenance")
+                _mapping(
+                    output_assignments[part_id].get("provenance"),
+                    f"{part_id}.provenance",
+                )
             )
             provenance["corresponding_material_color_render_selection"] = {
                 "schema_version": SCHEMA_VERSION,
@@ -331,12 +374,8 @@ def select_render_calibrated_color_plan(
                 "material_id": scope["material_id"],
                 "target_srgb": scope["target_srgb"],
                 "selected_candidate_id": winner_id,
-                "selected_linear_intensity_gain": winner[
-                    "linear_intensity_gain"
-                ],
-                "selected_appearance_score": winner["score"][
-                    "appearance_score"
-                ],
+                "selected_linear_intensity_gain": winner["linear_intensity_gain"],
+                "selected_appearance_score": winner["score"]["appearance_score"],
                 "candidates": scores,
             }
         )
@@ -415,9 +454,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-plan", type=Path, required=True)
     parser.add_argument("--part-id-evidence", type=Path, required=True)
     parser.add_argument("--spatial-mapping-report", type=Path, required=True)
-    parser.add_argument(
-        "--candidate-dir", action="append", type=Path, required=True
-    )
+    parser.add_argument("--candidate-dir", action="append", type=Path, required=True)
+    parser.add_argument("--minimum-candidate-count", type=int, default=2)
     parser.add_argument("--output-plan", type=Path, required=True)
     parser.add_argument("--audit", type=Path, required=True)
     return parser
@@ -428,13 +466,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     source_plan = _read_object(args.source_plan)
     source_plan_sha256 = canonical_sha256(source_plan)
     candidates = [
-        _load_candidate(path, source_plan_sha256) for path in args.candidate_dir
+        load_rendered_color_candidate(path, source_plan_sha256)
+        for path in args.candidate_dir
     ]
     output, audit = select_render_calibrated_color_plan(
         source_plan=source_plan,
         candidates=candidates,
         part_id_evidence=_read_object(args.part_id_evidence),
         spatial_mapping_report=_read_object(args.spatial_mapping_report),
+        minimum_candidate_count=args.minimum_candidate_count,
     )
     _write_object(args.output_plan, output)
     _write_object(args.audit, audit)

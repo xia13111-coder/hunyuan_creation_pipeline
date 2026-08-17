@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from qwen_material_pipeline.materials import corresponding_material_color_selection as selection
+from qwen_material_pipeline.materials import (
+    corresponding_material_color_selection as selection,
+)
 from qwen_material_pipeline.materials.corresponding_material_color import (
     AUDIT_SCHEMA_VERSION as COLOR_AUDIT_SCHEMA_VERSION,
 )
@@ -44,17 +46,19 @@ def _candidate(source: dict, candidate_id: str, gain: float) -> selection.Candid
             "member_part_ids": ["P2"],
             "material_id": PAINT,
             "target_srgb": [0.2, 0.3, 0.4],
+            "color_parameter_audit": {"linear_intensity_gain": gain},
         },
         {
             "scope_id": "COMPONENT:C1",
             "member_part_ids": ["P3", "P4"],
             "material_id": METAL,
             "target_srgb": [0.1, 0.5, 0.2],
+            "color_parameter_audit": {"linear_intensity_gain": gain},
         },
     ]
     return selection.Candidate(
         candidate_id=candidate_id,
-        gain=gain,
+        gains_by_scope={scope["scope_id"]: gain for scope in scopes},
         plan=plan,
         audit={"scopes": scopes},
         rendered_registry={"gain": gain},
@@ -92,9 +96,11 @@ def test_selects_actual_render_gain_per_scope_and_preserves_mdl_ids(
     }
     assert "parameters" not in after["P1"]
     assert after["P2"]["parameters"] == {"diffuse_tint": [0.2, 0.2, 0.2]}
-    assert after["P3"]["parameters"] == after["P4"]["parameters"] == {
-        "diffuse_tint": [0.1, 0.1, 0.1]
-    }
+    assert (
+        after["P3"]["parameters"]
+        == after["P4"]["parameters"]
+        == {"diffuse_tint": [0.1, 0.1, 0.1]}
+    )
     assert audit["summary"]["selected_gain_scope_counts"] == {
         "1.0": 1,
         "2.0": 1,
@@ -151,9 +157,39 @@ def test_candidate_loader_binds_plan_apply_asset_and_render_registry(
         {"asset_usd": str(asset_path), "asset_sha256": _file_sha(asset_path)},
     )
     loaded = selection._load_candidate(root, canonical_sha256(source))
-    assert loaded.gain == 1.0
+    assert loaded.gains_by_scope == {
+        "PART:P2": 1.0,
+        "COMPONENT:C1": 1.0,
+    }
     assert loaded.paths["asset"] == str(asset_path)
     assert loaded.hashes["asset"] == _file_sha(asset_path)
+
+    tampered_audit = json.loads(audit_path.read_text())
+    tampered_audit["scopes"][0]["color_parameter_audit"]["linear_intensity_gain"] = (
+        "1.0"
+    )
+    tampered_unsigned = {
+        key: value for key, value in tampered_audit.items() if key != "integrity"
+    }
+    _write_json(
+        audit_path,
+        {
+            **tampered_unsigned,
+            "integrity": {"document_sha256": canonical_sha256(tampered_unsigned)},
+        },
+    )
+    with pytest.raises(
+        selection.CorrespondingMaterialColorSelectionError,
+        match="scope gain mismatch",
+    ):
+        selection._load_candidate(root, canonical_sha256(source))
+    _write_json(
+        audit_path,
+        {
+            **audit_unsigned,
+            "integrity": {"document_sha256": canonical_sha256(audit_unsigned)},
+        },
+    )
 
     tampered = json.loads(registry_path.read_text())
     tampered["asset_sha256"] = "0" * 64

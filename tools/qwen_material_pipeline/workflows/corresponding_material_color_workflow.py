@@ -5,11 +5,11 @@ The workflow deliberately keeps two decisions separate:
 1. the input Part-ID plan fixes every selected NVIDIA Base MDL identity; and
 2. only corresponding-material assignments receive photo-derived colour.
 
-Several bounded colour gains are rendered on the real CAD asset.  Each sealed
-photo material scope then selects its best gain from registered renders.  The
-winning plan is applied and rendered again before an independent four-view
-reference comparison.  No image post-processing or per-asset Part-ID rule is
-used here.
+The default controller starts from the photo-derived colour, measures every
+scope in a real CAD render, and proposes one continuous bounded gain per scope.
+All proposals are evaluated together in the next render.  Each scope finally
+selects its best measured history before an independent all-view comparison.
+No image post-processing or per-asset Part-ID rule is used here.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from ..evidence import reference_compare
+from ..materials import adaptive_corresponding_material_color as adaptive_color
 from ..materials import corresponding_material_color_selection as color_selection
 from ..materials.corresponding_material_color import (
     build_corresponding_material_color_plan,
@@ -35,8 +36,7 @@ from ..materials.corresponding_material_color import (
 from ..usd.material_common import canonical_sha256
 
 
-SCHEMA_VERSION = "qwen-corresponding-material-color-workflow/v1"
-DEFAULT_GAINS = (0.7, 1.0, 1.4, 2.0, 2.8, 4.0, 6.0, 8.0)
+SCHEMA_VERSION = "qwen-corresponding-material-color-workflow/v2"
 
 
 class CorrespondingMaterialColorWorkflowError(RuntimeError):
@@ -214,9 +214,7 @@ def _apply_command(
     ]
 
 
-def _registry_command(
-    *, isaac_python: Path, asset: Path, output: Path
-) -> list[str]:
+def _registry_command(*, isaac_python: Path, asset: Path, output: Path) -> list[str]:
     return [
         str(isaac_python),
         "-m",
@@ -362,7 +360,8 @@ def run_corresponding_material_color_workflow(
     reference_manifest_path: Path,
     isaac_python_path: Path,
     output_dir: Path,
-    gains: Sequence[float] = DEFAULT_GAINS,
+    gains: Sequence[float] | None = None,
+    max_adaptive_iterations: int = 5,
     resolution: int = 512,
     rt_subframes: int = 4,
     timeout_seconds: int = 1800,
@@ -370,17 +369,21 @@ def run_corresponding_material_color_workflow(
 ) -> dict[str, Any]:
     """Execute the complete saved workflow in one fresh output directory."""
 
-    if resolution < 64 or rt_subframes < 1 or timeout_seconds < 1:
+    if (
+        resolution < 64
+        or rt_subframes < 1
+        or timeout_seconds < 1
+        or max_adaptive_iterations < 1
+    ):
         raise CorrespondingMaterialColorWorkflowError(
-            "resolution, rt_subframes and timeout_seconds must be positive"
+            "resolution, iteration count, rt_subframes and timeout must be positive"
         )
-    calibrated_gains = _normalized_gains(gains)
+    calibrated_gains = None if gains is None else _normalized_gains(gains)
+    optimization_mode = "adaptive_per_scope" if gains is None else "fixed_grid"
     inputs = {
         "source_plan": _regular_file(source_plan_path, "source plan"),
         "qwen_choices": _regular_file(qwen_choices_path, "Qwen choices"),
-        "part_id_evidence": _regular_file(
-            part_id_evidence_path, "Part-ID evidence"
-        ),
+        "part_id_evidence": _regular_file(part_id_evidence_path, "Part-ID evidence"),
         "spatial_mapping_report": _regular_file(
             spatial_mapping_report_path, "spatial mapping report"
         ),
@@ -414,7 +417,17 @@ def run_corresponding_material_color_workflow(
             "material_identity_mutation_allowed": False,
             "same_component_shares_material_and_colour": True,
             "actual_cad_render_selection": True,
-            "linear_intensity_gains": list(calibrated_gains),
+            "optimization_mode": optimization_mode,
+            "explicit_linear_intensity_gains": (
+                None if calibrated_gains is None else list(calibrated_gains)
+            ),
+            "maximum_adaptive_iterations": max_adaptive_iterations,
+            "adaptive_policy": {
+                "initial_gain": adaptive_color.INITIAL_GAIN,
+                "minimum_gain": adaptive_color.MINIMUM_GAIN,
+                "maximum_gain": adaptive_color.MAXIMUM_GAIN,
+                "final_authority": "best_registered_actual_cad_scope_score",
+            },
             "resolution": resolution,
             "rt_subframes": rt_subframes,
             "lighting_profile": "material-neutral",
@@ -426,19 +439,19 @@ def run_corresponding_material_color_workflow(
         source_plan = _read_object(inputs["source_plan"])
         qwen_choices = _read_object(inputs["qwen_choices"])
         part_id_evidence = _read_object(inputs["part_id_evidence"])
+        spatial_mapping_report = _read_object(inputs["spatial_mapping_report"])
         candidate_dirs: list[Path] = []
         candidate_records: list[dict[str, Any]] = []
+        controller_rounds: list[dict[str, Any]] = []
         candidates_root = destination / "candidates"
         candidates_root.mkdir()
-        for gain in calibrated_gains:
-            candidate_id = _candidate_id(gain)
+
+        def render_candidate(
+            candidate_id: str,
+            plan: Mapping[str, Any],
+            audit: Mapping[str, Any],
+        ) -> tuple[Path, dict[str, Path]]:
             candidate_dir = candidates_root / candidate_id
-            plan, audit = build_corresponding_material_color_plan(
-                source_plan=source_plan,
-                qwen_choices=qwen_choices,
-                part_id_evidence=part_id_evidence,
-                linear_intensity_gain=gain,
-            )
             candidate_dir.mkdir()
             plan_path = candidate_dir / "part_id_material_plan.color.json"
             audit_path = candidate_dir / "corresponding_material_color_audit.json"
@@ -460,19 +473,131 @@ def run_corresponding_material_color_workflow(
                 command_runner=command_runner,
             )
             candidate_dirs.append(candidate_dir)
-            candidate_records.append(
-                {
-                    "candidate_id": candidate_id,
-                    "linear_intensity_gain": gain,
-                    "directory": str(candidate_dir),
-                    "plan_sha256": canonical_sha256(plan),
-                    "asset_sha256": _sha256_file(rendered["asset"]),
-                    "rendered_registry_sha256": _sha256_file(
-                        candidate_dir / "renders" / "part_registry.rendered.json"
-                    ),
-                }
-            )
             print(f"Colour candidate complete: {candidate_id}", flush=True)
+            return candidate_dir, rendered
+
+        selector_minimum_candidate_count = 2
+        if calibrated_gains is not None:
+            for gain in calibrated_gains:
+                candidate_id = _candidate_id(gain)
+                plan, audit = build_corresponding_material_color_plan(
+                    source_plan=source_plan,
+                    qwen_choices=qwen_choices,
+                    part_id_evidence=part_id_evidence,
+                    linear_intensity_gain=gain,
+                )
+                candidate_dir, rendered = render_candidate(candidate_id, plan, audit)
+                candidate_records.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "linear_intensity_gain": gain,
+                        "directory": str(candidate_dir),
+                        "plan_sha256": canonical_sha256(plan),
+                        "asset_sha256": _sha256_file(rendered["asset"]),
+                        "rendered_registry_sha256": _sha256_file(
+                            rendered["rendered_registry"]
+                        ),
+                    }
+                )
+        else:
+            selector_minimum_candidate_count = 1
+            histories: dict[str, list[Mapping[str, Any]]] = {}
+            next_scope_gains: Mapping[str, float] | None = None
+            source_plan_sha256 = canonical_sha256(source_plan)
+            for iteration_index in range(max_adaptive_iterations):
+                candidate_id = f"iteration_{iteration_index:02d}"
+                if next_scope_gains is None:
+                    plan, audit = build_corresponding_material_color_plan(
+                        source_plan=source_plan,
+                        qwen_choices=qwen_choices,
+                        part_id_evidence=part_id_evidence,
+                        linear_intensity_gain=adaptive_color.INITIAL_GAIN,
+                    )
+                else:
+                    plan, audit = build_corresponding_material_color_plan(
+                        source_plan=source_plan,
+                        qwen_choices=qwen_choices,
+                        part_id_evidence=part_id_evidence,
+                        linear_intensity_gains_by_scope=next_scope_gains,
+                    )
+                candidate_dir, rendered = render_candidate(candidate_id, plan, audit)
+                candidate = color_selection.load_rendered_color_candidate(
+                    candidate_dir, source_plan_sha256
+                )
+                scope_scores = adaptive_color.score_adaptive_candidate_scopes(
+                    candidate=candidate,
+                    part_id_evidence=part_id_evidence,
+                    spatial_mapping_report=spatial_mapping_report,
+                )
+                if histories and set(histories) != set(scope_scores):
+                    raise CorrespondingMaterialColorWorkflowError(
+                        "adaptive iteration changed the sealed colour scopes"
+                    )
+                for scope_id, score in scope_scores.items():
+                    histories.setdefault(scope_id, []).append(score)
+                proposed_gains, controller_audit = (
+                    adaptive_color.propose_next_scope_gains(histories=histories)
+                )
+                controller_audit = {
+                    **controller_audit,
+                    "iteration_index": iteration_index,
+                    "candidate_id": candidate_id,
+                }
+                controller_rounds.append(controller_audit)
+                iteration_audit_path = candidate_dir / "adaptive_iteration_audit.json"
+                iteration_audit_unsigned = {
+                    "schema_version": adaptive_color.SCHEMA_VERSION,
+                    "candidate_id": candidate_id,
+                    "scope_scores": scope_scores,
+                    "controller": controller_audit,
+                }
+                _write_object(
+                    iteration_audit_path,
+                    {
+                        **iteration_audit_unsigned,
+                        "integrity": {
+                            "document_sha256": canonical_sha256(
+                                iteration_audit_unsigned
+                            )
+                        },
+                    },
+                )
+                candidate_records.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "scope_gains": dict(candidate.gains_by_scope),
+                        "directory": str(candidate_dir),
+                        "plan_sha256": canonical_sha256(plan),
+                        "asset_sha256": _sha256_file(rendered["asset"]),
+                        "rendered_registry_sha256": _sha256_file(
+                            rendered["rendered_registry"]
+                        ),
+                        "scope_scores": scope_scores,
+                        "controller": controller_audit,
+                        "adaptive_iteration_audit": {
+                            "path": str(iteration_audit_path),
+                            "sha256": _sha256_file(iteration_audit_path),
+                        },
+                    }
+                )
+                if controller_audit["all_scopes_converged"]:
+                    break
+                next_scope_gains = proposed_gains
+
+        adaptive_completion = None
+        if calibrated_gains is None:
+            final_controller = controller_rounds[-1]
+            adaptive_completion = {
+                "executed_iteration_count": len(controller_rounds),
+                "maximum_iteration_count": max_adaptive_iterations,
+                "all_scopes_converged": final_controller["all_scopes_converged"],
+                "remaining_active_scope_count": final_controller["active_scope_count"],
+                "termination_reason": (
+                    "all_scopes_converged"
+                    if final_controller["all_scopes_converged"]
+                    else "maximum_iterations_reached_best_history_selected"
+                ),
+            }
 
         final_dir = destination / "final_selected"
         final_dir.mkdir()
@@ -489,7 +614,14 @@ def run_corresponding_material_color_workflow(
         for candidate_dir in candidate_dirs:
             selector_arguments.extend(["--candidate-dir", str(candidate_dir)])
         selector_arguments.extend(
-            ["--output-plan", str(final_plan), "--audit", str(final_audit)]
+            [
+                "--minimum-candidate-count",
+                str(selector_minimum_candidate_count),
+                "--output-plan",
+                str(final_plan),
+                "--audit",
+                str(final_audit),
+            ]
         )
         if color_selection.main(selector_arguments) != 0:
             raise CorrespondingMaterialColorWorkflowError(
@@ -541,6 +673,8 @@ def run_corresponding_material_color_workflow(
                 "workflow_state": "COMPLETE",
                 "quality_status": aggregate.get("status"),
                 "candidates": candidate_records,
+                "adaptive_controller_rounds": controller_rounds,
+                "adaptive_completion": adaptive_completion,
                 "outputs": {
                     "selected_plan": {
                         "path": str(final_plan),
@@ -593,8 +727,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--gain",
         type=float,
         action="append",
-        help="candidate linear intensity gain; repeat at least twice",
+        help=(
+            "explicit fixed-grid compatibility gain; repeat at least twice; "
+            "omit to use automatic per-scope calibration"
+        ),
     )
+    parser.add_argument("--max-adaptive-iterations", type=int, default=5)
     parser.add_argument("--resolution", type=int, default=512)
     parser.add_argument("--rt-subframes", type=int, default=4)
     parser.add_argument("--timeout-seconds", type=int, default=1800)
@@ -622,7 +760,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             reference_manifest_path=args.reference_manifest,
             isaac_python_path=args.isaac_python,
             output_dir=args.output_dir,
-            gains=DEFAULT_GAINS if args.gain is None else args.gain,
+            gains=args.gain,
+            max_adaptive_iterations=args.max_adaptive_iterations,
             resolution=args.resolution,
             rt_subframes=args.rt_subframes,
             timeout_seconds=args.timeout_seconds,

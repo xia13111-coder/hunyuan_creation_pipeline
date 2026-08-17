@@ -66,7 +66,9 @@ def _unit_color(value: Any, label: str) -> list[float]:
             f"{label} must contain exactly three sRGB channels"
         )
     color = [float(channel) for channel in value]
-    if any(not math.isfinite(channel) or not 0.0 <= channel <= 1.0 for channel in color):
+    if any(
+        not math.isfinite(channel) or not 0.0 <= channel <= 1.0 for channel in color
+    ):
         raise CorrespondingMaterialColorError(
             f"{label} channels must be finite values in [0,1]"
         )
@@ -110,13 +112,9 @@ def _render_calibrated_color_parameters(
         "base_color_srgb": validated_srgb,
         "base_color_linear": target_linear,
         "authored_color_linear": authored,
-        "color_parameter_semantics": (
-            "render_calibrated_absolute_linear_color_gain"
-        ),
+        "color_parameter_semantics": ("render_calibrated_absolute_linear_color_gain"),
         "linear_intensity_gain": gain,
-        "clipped_channel_count": sum(
-            value * gain > 1.0 for value in target_linear
-        ),
+        "clipped_channel_count": sum(value * gain > 1.0 for value in target_linear),
     }
 
 
@@ -154,7 +152,10 @@ def _selected_observation(part: Mapping[str, Any], part_id: str) -> Mapping[str,
         for row in _array(part.get("observations"), f"evidence {part_id}.observations")
         if isinstance(row, Mapping) and row.get("view_id") == view_id
     ]
-    if len(matches) != 1 or matches[0].get("selected_for_material_inference") is not True:
+    if (
+        len(matches) != 1
+        or matches[0].get("selected_for_material_inference") is not True
+    ):
         raise CorrespondingMaterialColorError(
             f"evidence {part_id} must have one selected material observation"
         )
@@ -206,8 +207,8 @@ def _color_evidence(part: Mapping[str, Any], part_id: str) -> dict[str, Any]:
         )
     # Square-root support prevents one very large panel from erasing the
     # independent observations of smaller members of the same coating group.
-    weight = math.sqrt(float(sample_count)) * float(inlier_fraction) * float(
-        evidence_weight
+    weight = (
+        math.sqrt(float(sample_count)) * float(inlier_fraction) * float(evidence_weight)
     )
     return {
         "part_id": part_id,
@@ -242,15 +243,20 @@ def build_corresponding_material_color_plan(
     qwen_choices: Mapping[str, Any],
     part_id_evidence: Mapping[str, Any],
     linear_intensity_gain: float = 1.0,
+    linear_intensity_gains_by_scope: Mapping[str, float] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return a plan/audit pair for the bounded second-stage colour pass."""
 
-    calibrated_gain = _positive_gain(linear_intensity_gain)
+    default_gain = _positive_gain(linear_intensity_gain)
 
     if source_plan.get("assignment_unit") != "part_id":
-        raise CorrespondingMaterialColorError("source plan must use Part-ID assignments")
+        raise CorrespondingMaterialColorError(
+            "source plan must use Part-ID assignments"
+        )
     if qwen_choices.get("assignment_unit") != "part_id":
-        raise CorrespondingMaterialColorError("Qwen choices must use Part-ID assignments")
+        raise CorrespondingMaterialColorError(
+            "Qwen choices must use Part-ID assignments"
+        )
     if part_id_evidence.get("assignment_unit") != "part_id":
         raise CorrespondingMaterialColorError("evidence must use Part-ID assignments")
     _verify_document_integrity(qwen_choices, "qwen_choices")
@@ -392,11 +398,40 @@ def build_corresponding_material_color_plan(
             )
         scope_members[scope_id] = members
 
+    calibrated_gains_by_scope: dict[str, float]
+    if linear_intensity_gains_by_scope is None:
+        calibrated_gains_by_scope = {
+            scope_id: default_gain for scope_id in scope_members
+        }
+        gain_mode = "global"
+    else:
+        if any(
+            not isinstance(scope_id, str) or not scope_id
+            for scope_id in linear_intensity_gains_by_scope
+        ):
+            raise CorrespondingMaterialColorError(
+                "per-scope gain keys must be non-empty scope IDs"
+            )
+        declared_scope_ids = set(linear_intensity_gains_by_scope)
+        if declared_scope_ids != set(scope_members):
+            raise CorrespondingMaterialColorError(
+                "per-scope gains must exactly cover the sealed colour scopes"
+            )
+        calibrated_gains_by_scope = {
+            scope_id: _positive_gain(linear_intensity_gains_by_scope[scope_id])
+            for scope_id in sorted(scope_members)
+        }
+        gain_mode = "per_scope"
+
     output = copy.deepcopy(dict(source_plan))
-    output_assignments = _unique_by_part(output.get("assignments"), "output.assignments")
+    output_assignments = _unique_by_part(
+        output.get("assignments"), "output.assignments"
+    )
     scope_audits: list[dict[str, Any]] = []
     for scope_id, member_ids in sorted(scope_members.items()):
-        materials = {str(output_assignments[part_id]["material_id"]) for part_id in member_ids}
+        materials = {
+            str(output_assignments[part_id]["material_id"]) for part_id in member_ids
+        }
         if len(materials) != 1:
             raise CorrespondingMaterialColorError(
                 f"colour scope {scope_id} does not share one selected MDL"
@@ -412,7 +447,7 @@ def build_corresponding_material_color_plan(
         parameters, color_audit = _render_calibrated_color_parameters(
             profile=profile,
             target_srgb=target_srgb,
-            linear_intensity_gain=calibrated_gain,
+            linear_intensity_gain=calibrated_gains_by_scope[scope_id],
         )
         normalized = normalize_material_parameters(material_id, parameters)
         if set(normalized) != set(parameters) or set(parameters) - set(
@@ -439,7 +474,9 @@ def build_corresponding_material_color_plan(
         for part_id in member_ids:
             assignment = output_assignments[part_id]
             assignment["parameters"] = copy.deepcopy(parameters)
-            provenance = dict(_mapping(assignment.get("provenance"), f"{part_id}.provenance"))
+            provenance = dict(
+                _mapping(assignment.get("provenance"), f"{part_id}.provenance")
+            )
             provenance["corresponding_material_color"] = {
                 "schema_version": SCHEMA_VERSION,
                 "scope_id": scope_id,
@@ -460,10 +497,18 @@ def build_corresponding_material_color_plan(
         assignment.get("material_id") != assignments[part_id].get("material_id")
         for part_id, assignment in output_assignments.items()
     ):
-        raise CorrespondingMaterialColorError("the colour stage changed an MDL identity")
+        raise CorrespondingMaterialColorError(
+            "the colour stage changed an MDL identity"
+        )
 
     source_plan_sha256 = canonical_sha256(source_plan)
     plan_provenance = dict(_mapping(output.get("provenance"), "plan.provenance"))
+    gain_contract: dict[str, Any] = {
+        "gain_mode": gain_mode,
+        "linear_intensity_gains_by_scope": calibrated_gains_by_scope,
+    }
+    if gain_mode == "global":
+        gain_contract["linear_intensity_gain"] = default_gain
     plan_provenance["corresponding_material_color"] = {
         "schema_version": SCHEMA_VERSION,
         "source_plan_sha256": source_plan_sha256,
@@ -472,7 +517,7 @@ def build_corresponding_material_color_plan(
         "exact_library_matches_preserved": len(exact_ids),
         "corresponding_materials_parameterized": len(corresponding_ids),
         "colour_scope_count": len(scope_audits),
-        "linear_intensity_gain": calibrated_gain,
+        **gain_contract,
         "material_identity_changes": 0,
     }
     output["provenance"] = plan_provenance
@@ -491,7 +536,7 @@ def build_corresponding_material_color_plan(
             "reviewed_colour_interfaces_only": True,
             "same_photo_material_component_shares_colour": True,
             "absolute_photo_luminance_preserved_before_render_calibration": True,
-            "linear_intensity_gain": calibrated_gain,
+            **gain_contract,
         },
         "summary": {
             "selection_count": len(selections),

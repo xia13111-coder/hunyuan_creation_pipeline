@@ -11,9 +11,10 @@ CAD Part-ID 与参考照片对应
   -> 精确材质 / 对应材质分类
   -> 同照片材质组件收敛
   -> 固定 MDL 身份
-  -> 仅对“对应材质”生成颜色候选
-  -> 真实 CAD 多档重渲染
-  -> 每个组件或独立零件自动选颜色档
+  -> 仅对“对应材质”生成初始颜色
+  -> 真实 CAD 重渲染并测量每个作用域的响应
+  -> 每个组件或独立零件自动连续优化颜色增益
+  -> 从全部已测历史中逐作用域选择最高分结果
   -> 最终四视图绝对 QA
 ```
 
@@ -59,25 +60,28 @@ CAD Part-ID 与参考照片对应
 
 ## 4. 真实 CAD 颜色选择
 
-`materials/corresponding_material_color.py` 只为“对应材质”生成颜色参数，默认候选强度为：
-
-```text
-0.70, 1.00, 1.40, 2.00, 2.80, 4.00, 6.00, 8.00
-```
-
-每档候选都必须经过：
+`materials/corresponding_material_color.py` 只为“对应材质”生成颜色参数；精确库材质保持原生
+预设不动。默认控制器从 `1.0` 开始，不再使用人工设定的 `DEFAULT_GAINS` 网格。每轮都必须经过：
 
 1. 将完整 Part-ID 计划应用到真实 CAD USD；
 2. 重新建立 Part-ID registry；
 3. 用封存相机和 `material-neutral` 灯光渲染全部参考视图；
 4. 在每个独立零件/组件的可信照片像素上计算实际外观分数。
 
-`materials/corresponding_material_color_selection.py` 按作用域选择实渲最高分档位。选择时重新
-校验计划、apply report、USD 和 rendered registry 的路径与哈希，并证明所有 MDL 身份保持不变。
+`materials/adaptive_corresponding_material_color.py` 把可信参考掩码中的 Lab 亮度转换为相对亮度，
+用“参考亮度 / 实渲亮度”产生每个作用域各自的连续增益。第二轮起优先使用有界 log-secant
+响应估计；证据不足时使用阻尼亮度比。单步最大变化为两倍，总范围为 `[0.1, 8.0]`，达到亮度
+误差、增益步长或外观提升收敛条件时自动停止。所有作用域在同一完整 CAD 中共同重渲染，
+不存在按 Part-ID 单独修图。
+
+`materials/corresponding_material_color_selection.py` 随后按作用域从全部已实渲历史中选择外观
+分数最高的结果。这样即使某一轮自动提议变差，也不会覆盖此前更好的颜色。选择时还会重新
+校验计划、每作用域增益、apply report、USD 和 rendered registry 的路径与哈希，并证明所有
+MDL 身份保持不变。
 
 ## 5. 统一运行入口
 
-以下命令把候选生成、8 档真实 CAD 渲染、自动选档、最终重渲染和绝对 QA 固化为一次运行：
+以下命令把自动提议、真实 CAD 渲染、历史择优、最终重渲染和绝对 QA 固化为一次运行：
 
 ```bash
 PYTHONPATH=tools python -m qwen_material_pipeline \
@@ -97,12 +101,14 @@ PYTHONPATH=tools python -m qwen_material_pipeline \
   --require-pass
 ```
 
-默认使用上面的 8 档；可重复传入 `--gain` 覆盖。输出目录必须不存在，避免旧候选或旧渲染被
+默认最多运行 5 轮，可用 `--max-adaptive-iterations` 修改上限。只有为了旧结果复现时，才重复
+传入至少两个 `--gain` 切换到固定网格兼容模式。输出目录必须不存在，避免旧候选或旧渲染被
 误用。命令会生成：
 
 ```text
 workflow_manifest.json
-candidates/gain_*/
+candidates/iteration_*/          # 自动模式
+# 或 candidates/gain_*/         # 显式固定网格兼容模式
   part_id_material_plan.color.json
   corresponding_material_color_audit.json
   material_look.usda
@@ -129,4 +135,3 @@ QA 报告。失败时保留 `workflow_state=FAILED` 及日志；不能在同一�
 - 调色不修改几何、拓扑、姿态、物理属性、Part-ID 或 MDL 身份；
 - 客户图片、模型权重、绝对运行目录和最终大体积渲染不提交到 Git；
 - 代码、配置、测试和这份合同进入 Git，具体运行由清单和内容哈希复现。
-
