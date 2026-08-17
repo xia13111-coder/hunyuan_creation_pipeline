@@ -59,18 +59,24 @@ def _fixture(tmp_path: Path) -> dict[str, Path | dict]:
     source_plan = _write(inputs / "source_plan.json", source_plan_document)
     qwen = _write(
         inputs / "qwen.json",
-        {
+        _sealed(
+            {
+                "assignment_unit": "part_id",
             "selections": [
                 {
                     "part_id": "P1",
+                    "material_id": "mdl:Paint.mdl#Paint",
                     "match_type": "CORRESPONDING_MATERIAL",
                 },
                 {
                     "part_id": "P2",
+                    "material_id": "mdl:Copper.mdl#Copper",
                     "match_type": "EXACT_LIBRARY_MATCH",
                 },
-            ]
-        },
+            ],
+                "component_identity_consensus": {"components": []},
+            }
+        ),
     )
     evidence = _write(inputs / "evidence.json", {})
     spatial = _write(inputs / "spatial.json", {})

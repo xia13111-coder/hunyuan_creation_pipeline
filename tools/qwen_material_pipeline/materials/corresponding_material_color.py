@@ -38,6 +38,147 @@ class CorrespondingMaterialColorError(ValueError):
     """Raised when the bounded colour-stage contract is violated."""
 
 
+def _source_rejected_qwen_selection(
+    *,
+    part_id: str,
+    selection: Mapping[str, Any],
+    assignment: Mapping[str, Any],
+) -> bool:
+    """Validate and identify a Qwen proposal rejected by the source plan.
+
+    The Part-ID projection stage deliberately retains the policy baseline when
+    an observed proposal is below its applyable confidence floor. That row is
+    still present in the sealed Qwen document for auditability, but it is not a
+    selected material identity and therefore must never enter the colour pass.
+    """
+
+    provenance = assignment.get("provenance")
+    if not isinstance(provenance, Mapping) or provenance.get(
+        "observed_part_id_qwen_selection_rejected"
+    ) is not True:
+        return False
+    rejected_material = provenance.get("rejected_qwen_material_id")
+    rejected_confidence = provenance.get("rejected_qwen_confidence")
+    confidence_floor = provenance.get("applyable_review_confidence_floor")
+    selection_confidence = selection.get("confidence")
+    if (
+        assignment.get("status") != "policy_fallback"
+        or provenance.get("observed_part_id_qwen_rejection_reason")
+        != "qwen_confidence_below_applyable_review_floor"
+        or rejected_material != selection.get("material_id")
+        or isinstance(rejected_confidence, bool)
+        or not isinstance(rejected_confidence, (int, float))
+        or isinstance(confidence_floor, bool)
+        or not isinstance(confidence_floor, (int, float))
+        or isinstance(selection_confidence, bool)
+        or not isinstance(selection_confidence, (int, float))
+        or not math.isfinite(float(rejected_confidence))
+        or not math.isfinite(float(confidence_floor))
+        or not math.isfinite(float(selection_confidence))
+        or float(rejected_confidence) != float(selection_confidence)
+        or float(rejected_confidence) >= float(confidence_floor)
+    ):
+        raise CorrespondingMaterialColorError(
+            f"source-rejected Qwen selection provenance is invalid for {part_id}"
+        )
+    return True
+
+
+def source_accepted_color_selection_tiers(
+    *,
+    source_plan: Mapping[str, Any],
+    qwen_choices: Mapping[str, Any],
+) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Return colour tiers whose material identities survived final selection."""
+
+    if source_plan.get("assignment_unit") != "part_id":
+        raise CorrespondingMaterialColorError(
+            "source plan must use Part-ID assignments"
+        )
+    if qwen_choices.get("assignment_unit") != "part_id":
+        raise CorrespondingMaterialColorError(
+            "Qwen choices must use Part-ID assignments"
+        )
+    _verify_document_integrity(qwen_choices, "qwen_choices")
+    assignments = _unique_by_part(source_plan.get("assignments"), "assignments")
+    selections = _unique_by_part(qwen_choices.get("selections"), "selections")
+    if not selections:
+        raise CorrespondingMaterialColorError("Qwen choices contain no selections")
+
+    tiers: dict[str, str] = {}
+    rejected_ids: set[str] = set()
+    for part_id, selection in selections.items():
+        assignment = assignments.get(part_id)
+        if assignment is None:
+            raise CorrespondingMaterialColorError(
+                f"selection {part_id} is missing from the source plan"
+            )
+        if assignment.get("parameters") not in (None, {}):
+            raise CorrespondingMaterialColorError(
+                f"source assignment {part_id} already contains parameters"
+            )
+        if _source_rejected_qwen_selection(
+            part_id=part_id,
+            selection=selection,
+            assignment=assignment,
+        ):
+            rejected_ids.add(part_id)
+            continue
+        if selection.get("material_id") != assignment.get("material_id"):
+            raise CorrespondingMaterialColorError(
+                f"selection/source material mismatch for {part_id}"
+            )
+        match_type = selection.get("match_type")
+        if match_type not in {EXACT_LIBRARY_MATCH, CORRESPONDING_MATERIAL}:
+            raise CorrespondingMaterialColorError(
+                f"selection {part_id} has unsupported match_type {match_type!r}"
+            )
+        tiers[part_id] = str(match_type)
+
+    consensus = _mapping(
+        qwen_choices.get("component_identity_consensus"),
+        "component_identity_consensus",
+    )
+    components = _array(
+        consensus.get("components"), "component_identity_consensus.components"
+    )
+    for index, raw in enumerate(components):
+        component = _mapping(raw, f"component[{index}]")
+        component_id = _text(component.get("component_id"), f"component[{index}].id")
+        member_ids = [
+            _text(value, f"component {component_id}.member_part_ids")
+            for value in _array(
+                component.get("member_part_ids"),
+                f"component {component_id}.member_part_ids",
+            )
+        ]
+        if not member_ids or len(member_ids) != len(set(member_ids)):
+            raise CorrespondingMaterialColorError(
+                f"component {component_id} has invalid members"
+            )
+        rejected_members = sorted(set(member_ids) & rejected_ids)
+        if rejected_members:
+            raise CorrespondingMaterialColorError(
+                f"component {component_id} contains source-rejected selections: "
+                f"{rejected_members}"
+            )
+        missing = sorted(set(member_ids) - set(tiers))
+        if missing:
+            raise CorrespondingMaterialColorError(
+                f"component {component_id} has members outside the sealed plans or "
+                "accepted selections: "
+                f"{missing}"
+            )
+        if (
+            component.get("match_type") == EXACT_LIBRARY_MATCH
+            and component.get("consensus_mode")
+            == "REPEATED_ROLE_JOINT_CONSENSUS"
+        ):
+            for part_id in member_ids:
+                tiers[part_id] = CORRESPONDING_MATERIAL
+    return tiers, tuple(sorted(rejected_ids))
+
+
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise CorrespondingMaterialColorError(f"{label} must be an object")
@@ -268,27 +409,12 @@ def build_corresponding_material_color_plan(
     if not selections:
         raise CorrespondingMaterialColorError("Qwen choices contain no selections")
 
-    declared_match_types: dict[str, str] = {}
-    for part_id, selection in selections.items():
-        if part_id not in assignments:
-            raise CorrespondingMaterialColorError(
-                f"selection {part_id} is missing from the source plan"
-            )
-        assignment = assignments[part_id]
-        if selection.get("material_id") != assignment.get("material_id"):
-            raise CorrespondingMaterialColorError(
-                f"selection/source material mismatch for {part_id}"
-            )
-        if assignment.get("parameters") not in (None, {}):
-            raise CorrespondingMaterialColorError(
-                f"source assignment {part_id} already contains parameters"
-            )
-        match_type = selection.get("match_type")
-        if match_type not in {EXACT_LIBRARY_MATCH, CORRESPONDING_MATERIAL}:
-            raise CorrespondingMaterialColorError(
-                f"selection {part_id} has unsupported match_type {match_type!r}"
-            )
-        declared_match_types[part_id] = str(match_type)
+    effective_match_types, source_rejected_ids = (
+        source_accepted_color_selection_tiers(
+            source_plan=source_plan,
+            qwen_choices=qwen_choices,
+        )
+    )
 
     consensus = _mapping(
         qwen_choices.get("component_identity_consensus"),
@@ -312,7 +438,7 @@ def build_corresponding_material_color_plan(
             raise CorrespondingMaterialColorError(
                 f"component {component_id} has invalid members"
             )
-        missing_selection_ids = sorted(set(member_ids) - set(selections))
+        missing_selection_ids = sorted(set(member_ids) - set(effective_match_types))
         missing_assignment_ids = sorted(set(member_ids) - set(assignments))
         if missing_selection_ids or missing_assignment_ids:
             raise CorrespondingMaterialColorError(
@@ -349,16 +475,6 @@ def build_corresponding_material_color_plan(
     # that explicit case retain the selected MDL and make the whole component
     # eligible for the bounded colour pass.  A protected exact preset, by
     # contrast, remains immutable for every member of its material component.
-    effective_match_types = dict(declared_match_types)
-    for component in component_rows:
-        component = _mapping(component, "component")
-        if component.get("match_type") != EXACT_LIBRARY_MATCH:
-            continue
-        if component.get("consensus_mode") != "REPEATED_ROLE_JOINT_CONSENSUS":
-            continue
-        for part_id in component.get("member_part_ids", []):
-            effective_match_types[str(part_id)] = CORRESPONDING_MATERIAL
-
     exact_ids = {
         part_id
         for part_id, match_type in effective_match_types.items()
@@ -516,6 +632,7 @@ def build_corresponding_material_color_plan(
         "part_id_evidence_sha256": canonical_sha256(part_id_evidence),
         "exact_library_matches_preserved": len(exact_ids),
         "corresponding_materials_parameterized": len(corresponding_ids),
+        "source_rejected_selections_excluded": len(source_rejected_ids),
         "colour_scope_count": len(scope_audits),
         **gain_contract,
         "material_identity_changes": 0,
@@ -535,11 +652,14 @@ def build_corresponding_material_color_plan(
             "selected_mdl_identity_immutable": True,
             "reviewed_colour_interfaces_only": True,
             "same_photo_material_component_shares_colour": True,
+            "source_rejected_qwen_selections_excluded": True,
             "absolute_photo_luminance_preserved_before_render_calibration": True,
             **gain_contract,
         },
         "summary": {
-            "selection_count": len(selections),
+            "selection_count": len(effective_match_types),
+            "input_selection_count": len(selections),
+            "source_rejected_selection_count": len(source_rejected_ids),
             "exact_library_match_count": len(exact_ids),
             "corresponding_material_count": len(corresponding_ids),
             "parameterized_part_count": len(corresponding_ids),
@@ -552,6 +672,7 @@ def build_corresponding_material_color_plan(
             ),
             "material_identity_change_count": 0,
         },
+        "source_rejected_part_ids": list(source_rejected_ids),
         "scopes": scope_audits,
     }
     audit = {

@@ -2935,7 +2935,11 @@ def _run_visual_qa_stage(
             read_object(
                 part_id_paths.qwen_result,
                 "material-identity Qwen choices for colour calibration",
-            )
+            ),
+            read_object(
+                effective_material_plan,
+                "identity-fixed material plan for colour calibration",
+            ),
         )
         if not corresponding_part_ids:
             log_message(

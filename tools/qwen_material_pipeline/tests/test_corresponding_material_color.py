@@ -159,6 +159,8 @@ def test_colors_only_corresponding_and_preserves_material_ids() -> None:
     assert audit["status"] == "PASS"
     assert audit["summary"] == {
         "selection_count": 4,
+        "input_selection_count": 4,
+        "source_rejected_selection_count": 0,
         "exact_library_match_count": 1,
         "corresponding_material_count": 3,
         "parameterized_part_count": 3,
@@ -167,6 +169,70 @@ def test_colors_only_corresponding_and_preserves_material_ids() -> None:
         "independent_scope_count": 1,
         "material_identity_change_count": 0,
     }
+
+
+def test_excludes_only_a_fully_bound_source_rejected_qwen_selection() -> None:
+    source, choices, evidence = _documents()
+    rejected = next(row for row in choices["selections"] if row["part_id"] == "P2")
+    rejected["confidence"] = 0.2
+    source_assignment = next(
+        row for row in source["assignments"] if row["part_id"] == "P2"
+    )
+    source_assignment["material_id"] = EXACT
+    source_assignment["status"] = "policy_fallback"
+    source_assignment["provenance"] = {
+        "observed_part_id_qwen_selection_rejected": True,
+        "observed_part_id_qwen_rejection_reason": (
+            "qwen_confidence_below_applyable_review_floor"
+        ),
+        "rejected_qwen_material_id": PAINT,
+        "rejected_qwen_confidence": 0.2,
+        "applyable_review_confidence_floor": 0.6,
+    }
+    choices = _seal({key: value for key, value in choices.items() if key != "integrity"})
+
+    output, audit = build_corresponding_material_color_plan(
+        source_plan=source,
+        qwen_choices=choices,
+        part_id_evidence=evidence,
+    )
+
+    assert "parameters" not in _by_id(output)["P2"]
+    assert audit["summary"]["selection_count"] == 3
+    assert audit["summary"]["input_selection_count"] == 4
+    assert audit["summary"]["source_rejected_selection_count"] == 1
+    assert audit["summary"]["corresponding_material_count"] == 2
+
+
+def test_rejects_forged_source_rejection_provenance() -> None:
+    source, choices, evidence = _documents()
+    rejected = next(row for row in choices["selections"] if row["part_id"] == "P2")
+    rejected["confidence"] = 0.2
+    source_assignment = next(
+        row for row in source["assignments"] if row["part_id"] == "P2"
+    )
+    source_assignment["material_id"] = EXACT
+    source_assignment["status"] = "policy_fallback"
+    source_assignment["provenance"] = {
+        "observed_part_id_qwen_selection_rejected": True,
+        "observed_part_id_qwen_rejection_reason": (
+            "qwen_confidence_below_applyable_review_floor"
+        ),
+        "rejected_qwen_material_id": PAINT,
+        "rejected_qwen_confidence": 0.7,
+        "applyable_review_confidence_floor": 0.6,
+    }
+    choices = _seal({key: value for key, value in choices.items() if key != "integrity"})
+
+    with pytest.raises(
+        CorrespondingMaterialColorError,
+        match="source-rejected Qwen selection provenance is invalid",
+    ):
+        build_corresponding_material_color_plan(
+            source_plan=source,
+            qwen_choices=choices,
+            part_id_evidence=evidence,
+        )
 
 
 def test_group_uses_one_deterministic_photo_medoid() -> None:

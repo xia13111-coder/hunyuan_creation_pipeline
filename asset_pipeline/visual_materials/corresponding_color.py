@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from qwen_material_pipeline.materials.corresponding_material_color import (
+    CorrespondingMaterialColorError,
+    source_accepted_color_selection_tiers,
+)
+
 from .config import canonical_sha256, read_object
 from .references import sha256_file
 
@@ -65,58 +70,29 @@ def _bound_file(
         raise RuntimeError(f"colour workflow {label} hash changed")
 
 
-def _selection_tiers(qwen_choices: Mapping[str, Any]) -> dict[str, str]:
-    raw = qwen_choices.get("selections")
-    if not isinstance(raw, list) or not raw:
-        raise RuntimeError(
-            "corresponding-material colour calibration requires material-identity "
-            "selections"
+def _selection_tiers(
+    qwen_choices: Mapping[str, Any], source_plan: Mapping[str, Any]
+) -> dict[str, str]:
+    try:
+        tiers, _ = source_accepted_color_selection_tiers(
+            source_plan=source_plan,
+            qwen_choices=qwen_choices,
         )
-    output: dict[str, str] = {}
-    for index, item in enumerate(raw):
-        part_id = item.get("part_id") if isinstance(item, Mapping) else None
-        match_type = item.get("match_type") if isinstance(item, Mapping) else None
-        if not isinstance(part_id, str) or not part_id or part_id in output:
-            raise RuntimeError(
-                f"material-identity selection has invalid Part-ID at index {index}"
-            )
-        if match_type not in {"EXACT_LIBRARY_MATCH", "CORRESPONDING_MATERIAL"}:
-            raise RuntimeError(
-                f"material-identity selection for {part_id} lacks a valid tier"
-            )
-        output[part_id] = str(match_type)
-    consensus = qwen_choices.get("component_identity_consensus")
-    components = consensus.get("components") if isinstance(consensus, Mapping) else []
-    if not isinstance(components, list):
-        raise RuntimeError("material component identity consensus is invalid")
-    for component in components:
-        if not isinstance(component, Mapping):
-            raise RuntimeError("material component identity consensus row is invalid")
-        if (
-            component.get("match_type") == "EXACT_LIBRARY_MATCH"
-            and component.get("consensus_mode") == "REPEATED_ROLE_JOINT_CONSENSUS"
-        ):
-            members = component.get("member_part_ids")
-            if not isinstance(members, list) or not members:
-                raise RuntimeError("repeated-role material component has no members")
-            for part_id in members:
-                if not isinstance(part_id, str) or part_id not in output:
-                    raise RuntimeError(
-                        "repeated-role material component is outside selections"
-                    )
-                output[part_id] = "CORRESPONDING_MATERIAL"
-    return output
+    except CorrespondingMaterialColorError as exc:
+        raise RuntimeError(str(exc)) from exc
+    return tiers
 
 
 def corresponding_material_part_ids(
     qwen_choices: Mapping[str, Any],
+    source_plan: Mapping[str, Any],
 ) -> tuple[str, ...]:
     """Return the sealed Part IDs eligible for the second-stage colour pass."""
 
     return tuple(
         sorted(
             part_id
-            for part_id, tier in _selection_tiers(qwen_choices).items()
+            for part_id, tier in _selection_tiers(qwen_choices, source_plan).items()
             if tier == "CORRESPONDING_MATERIAL"
         )
     )
@@ -209,7 +185,8 @@ def validate_corresponding_color_result(
     if set(source_assignments) != set(selected_assignments):
         raise RuntimeError("colour calibration changed the Part-ID exact cover")
     tiers = _selection_tiers(
-        read_object(qwen_choices_path, "material-identity Qwen choices")
+        read_object(qwen_choices_path, "material-identity Qwen choices"),
+        source_plan,
     )
     if not set(tiers) <= set(source_assignments):
         raise RuntimeError("material selections are outside the identity plan")
