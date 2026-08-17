@@ -685,11 +685,22 @@ def _camera_frame(
     camera_position: Sequence[float],
     world_direction: Sequence[float],
     camera_up_axis: Sequence[float],
+    camera_look_at_target: Sequence[float] | None = None,
 ) -> tuple[Vector3, Vector3, Vector3, Vector3]:
     position = _finite_vector(camera_position, label="camera_position")
-    outward = _normalize(_finite_vector(world_direction, label="world_direction"))
     requested_up = _normalize(_finite_vector(camera_up_axis, label="camera_up_axis"))
-    forward = tuple(-value for value in outward)
+    if camera_look_at_target is None:
+        outward = _normalize(
+            _finite_vector(world_direction, label="world_direction")
+        )
+        forward = tuple(-value for value in outward)
+    else:
+        target = _finite_vector(
+            camera_look_at_target, label="camera_look_at_target"
+        )
+        forward = _normalize(
+            tuple(target[index] - position[index] for index in range(3))
+        )
     right = _normalize(_cross(forward, requested_up))
     up = _normalize(_cross(right, forward))
     return position, right, up, forward
@@ -705,17 +716,44 @@ def _rasterize_region_labels(
     height: int,
     focal_length_mm: float,
     horizontal_aperture_mm: float,
+    projection_mode: str = "perspective",
+    orthographic_span_multiplier: float = 2.0,
+    asset_diagonal: float | None = None,
+    camera_look_at_target: Sequence[float] | None = None,
 ) -> Any:
     import numpy as np
 
     if width < 16 or height < 16:
         raise ValueError("Projection dimensions must be at least 16 pixels")
+    if projection_mode not in {"perspective", "orthographic"}:
+        raise ValueError(f"Unsupported camera projection mode: {projection_mode}")
     if focal_length_mm <= 0.0 or horizontal_aperture_mm <= 0.0:
         raise ValueError("Camera focal length and aperture must be positive")
+    if projection_mode == "orthographic" and (
+        isinstance(asset_diagonal, bool)
+        or not isinstance(asset_diagonal, (int, float))
+        or not math.isfinite(float(asset_diagonal))
+        or float(asset_diagonal) <= 0.0
+        or isinstance(orthographic_span_multiplier, bool)
+        or not isinstance(orthographic_span_multiplier, (int, float))
+        or not math.isfinite(float(orthographic_span_multiplier))
+        or float(orthographic_span_multiplier) <= 0.0
+    ):
+        raise ValueError(
+            "Orthographic projection requires a positive asset diagonal and span"
+        )
     position, right, up, forward = _camera_frame(
-        camera_position, world_direction, camera_up_axis
+        camera_position,
+        world_direction,
+        camera_up_axis,
+        camera_look_at_target,
     )
-    focal_pixels = focal_length_mm / horizontal_aperture_mm * width
+    pixels_per_camera_unit = (
+        focal_length_mm / horizontal_aperture_mm * width
+        if projection_mode == "perspective"
+        else width
+        / (float(asset_diagonal) * float(orthographic_span_multiplier))
+    )
     depth_buffer = np.full((height, width), np.inf, dtype=np.float64)
     labels = np.zeros((height, width), dtype=np.int32)
 
@@ -729,8 +767,12 @@ def _rasterize_region_labels(
         camera_x = delta @ np.asarray(right)
         camera_y = delta @ np.asarray(up)
         camera_z = delta @ np.asarray(forward)
-        screen_x = width * 0.5 + camera_x / camera_z * focal_pixels
-        screen_y = height * 0.5 - camera_y / camera_z * focal_pixels
+        if projection_mode == "perspective":
+            screen_x = width * 0.5 + camera_x / camera_z * pixels_per_camera_unit
+            screen_y = height * 0.5 - camera_y / camera_z * pixels_per_camera_unit
+        else:
+            screen_x = width * 0.5 + camera_x * pixels_per_camera_unit
+            screen_y = height * 0.5 - camera_y * pixels_per_camera_unit
 
         for face_index, vertices in enumerate(mesh.face_vertices):
             label = int(mesh.face_labels[face_index])
@@ -767,13 +809,22 @@ def _rasterize_region_labels(
                 ) / denominator
                 weight2 = 1.0 - weight0 - weight1
                 inside = (weight0 >= -1e-9) & (weight1 >= -1e-9) & (weight2 >= -1e-9)
-                inverse_depth = (
-                    weight0 / z_values[0]
-                    + weight1 / z_values[1]
-                    + weight2 / z_values[2]
-                )
-                valid = inside & (inverse_depth > 0.0)
-                candidate_depth = np.where(valid, 1.0 / inverse_depth, np.inf)
+                if projection_mode == "perspective":
+                    inverse_depth = (
+                        weight0 / z_values[0]
+                        + weight1 / z_values[1]
+                        + weight2 / z_values[2]
+                    )
+                    valid = inside & (inverse_depth > 0.0)
+                    candidate_depth = np.where(valid, 1.0 / inverse_depth, np.inf)
+                else:
+                    linear_depth = (
+                        weight0 * z_values[0]
+                        + weight1 * z_values[1]
+                        + weight2 * z_values[2]
+                    )
+                    valid = inside & (linear_depth > 0.0)
+                    candidate_depth = np.where(valid, linear_depth, np.inf)
                 depth_slice = depth_buffer[min_y : max_y + 1, min_x : max_x + 1]
                 update = candidate_depth < depth_slice
                 if not np.any(update):
@@ -1208,6 +1259,20 @@ def _load_projection_views(
     }
 
 
+def _projection_asset_diagonal(meshes: Sequence[ProjectionMesh]) -> float:
+    points = [point for mesh in meshes for point in mesh.points_world]
+    if not points:
+        raise ValueError("Projection meshes contain no world-space points")
+    minimum = [min(point[index] for point in points) for index in range(3)]
+    maximum = [max(point[index] for point in points) for index in range(3)]
+    diagonal = math.sqrt(
+        sum((maximum[index] - minimum[index]) ** 2 for index in range(3))
+    )
+    if not math.isfinite(diagonal) or diagonal <= 0.0:
+        raise ValueError("Projection asset bounds have a non-positive diagonal")
+    return diagonal
+
+
 def build_face_region_evidence(
     *,
     registry_path: str | Path,
@@ -1277,6 +1342,7 @@ def build_face_region_evidence(
                 requested_views=view_names,
                 projection_max_size=projection_max_size,
             )
+            asset_diagonal = _projection_asset_diagonal(meshes)
             region_keys = [
                 f"{metadata['label_metadata'][label]['part_id']}:{metadata['label_metadata'][label]['region_id']}"
                 for label in sorted(metadata["label_metadata"])
@@ -1309,6 +1375,21 @@ def build_face_region_evidence(
                         "focal_length_mm"
                     )
                 view_focal_length = float(raw_view_focal_length)
+                projection_mode = str(
+                    view.get("camera_projection_mode", "perspective")
+                )
+                raw_span = view.get("camera_orthographic_span_multiplier", 2.0)
+                if (
+                    isinstance(raw_span, bool)
+                    or not isinstance(raw_span, (int, float))
+                    or not math.isfinite(float(raw_span))
+                    or float(raw_span) <= 0.0
+                ):
+                    raise ValueError(
+                        f"Projection view {view['view_id']!r} has an invalid "
+                        "camera_orthographic_span_multiplier"
+                    )
+                orthographic_span_multiplier = float(raw_span)
                 labels = _rasterize_region_labels(
                     meshes,
                     camera_position=view["camera_position"],
@@ -1318,6 +1399,10 @@ def build_face_region_evidence(
                     height=height,
                     focal_length_mm=view_focal_length,
                     horizontal_aperture_mm=horizontal_aperture_mm,
+                    projection_mode=projection_mode,
+                    orthographic_span_multiplier=orthographic_span_multiplier,
+                    asset_diagonal=asset_diagonal,
+                    camera_look_at_target=view.get("camera_look_at_target"),
                 )
                 projection_record = _write_projection_images(
                     labels=labels,
@@ -1340,6 +1425,10 @@ def build_face_region_evidence(
                     {
                         **projection_record,
                         "focal_length_mm": view_focal_length,
+                        "projection_mode": projection_mode,
+                        "orthographic_span_multiplier": (
+                            orthographic_span_multiplier
+                        ),
                     }
                 )
                 report_progress(
@@ -1364,15 +1453,19 @@ def build_face_region_evidence(
             )
             manifest["projection_contract"] = {
                 **projection_source,
-                "method": "CPU pinhole triangulation with global z-buffer",
+                "method": (
+                    "CPU USD perspective-or-orthographic triangulation "
+                    "with global z-buffer"
+                ),
                 "focal_length_source": (
                     "render_set.views[*].focal_length_mm_with_cli_fallback"
                 ),
                 "focal_length_mm": focal_length_mm,
                 "horizontal_aperture_mm": horizontal_aperture_mm,
+                "asset_diagonal": asset_diagonal,
                 "views": projection_records,
                 "limitations": [
-                    "Uses the recorded camera frame and nominal pinhole aperture; it is not an RTX G-buffer.",
+                    "Uses the recorded camera frame and USD projection mode; it is not an RTX G-buffer.",
                     "Polygons are deterministically fan-triangulated and lens distortion is not modeled.",
                     "Region IDs locate candidate surfaces; they are not material classifications.",
                 ],

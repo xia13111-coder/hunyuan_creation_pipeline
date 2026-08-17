@@ -158,6 +158,56 @@ def test_projection_z_buffer_keeps_nearest_region() -> None:
     assert 1 not in set(labels.ravel())
 
 
+def test_orthographic_projection_uses_recorded_span_instead_of_focal_length() -> None:
+    mesh = ProjectionMesh(
+        part_id="P0001",
+        points_world=[(-0.5, -0.5, 2), (0.5, -0.5, 2), (0.0, 0.5, 2)],
+        face_vertices=[(0, 1, 2)],
+        face_labels=[1],
+    )
+
+    first = _rasterize_region_labels(
+        [mesh],
+        camera_position=(0, 0, 0),
+        world_direction=(0, 0, -1),
+        camera_up_axis=(0, 1, 0),
+        width=64,
+        height=64,
+        focal_length_mm=20.0,
+        horizontal_aperture_mm=20.955,
+        projection_mode="orthographic",
+        orthographic_span_multiplier=2.0,
+        asset_diagonal=2.0,
+    )
+    second = _rasterize_region_labels(
+        [mesh],
+        camera_position=(0, 0, -3),
+        world_direction=(0, 0, -1),
+        camera_up_axis=(0, 1, 0),
+        width=64,
+        height=64,
+        focal_length_mm=900.0,
+        horizontal_aperture_mm=20.955,
+        projection_mode="orthographic",
+        orthographic_span_multiplier=2.0,
+        asset_diagonal=2.0,
+    )
+
+    assert first.tolist() == second.tolist()
+    assert int((first > 0).sum()) > 0
+
+
+def test_projection_camera_frame_prefers_recorded_look_at_target() -> None:
+    _, _, _, forward = face_region_evidence._camera_frame(
+        (0, 0, 0),
+        (1, 0, 0),
+        (0, 1, 0),
+        (0, 0, 2),
+    )
+
+    assert forward == (0.0, 0.0, 1.0)
+
+
 def test_region_colors_are_deterministic_and_unique() -> None:
     first = _region_colors(["P0001:R0001", "P0001:R0002", "P0002:R0001"])
     second = _region_colors(["P0001:R0001", "P0001:R0002", "P0002:R0001"])
@@ -218,7 +268,7 @@ def _stub_face_region_inputs(
     }
     mesh = ProjectionMesh(
         part_id="P0001",
-        points_world=[(0.0, 0.0, 0.0)] * 3,
+        points_world=[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
         face_vertices=[(0, 1, 2)],
         face_labels=[1],
     )
@@ -355,6 +405,63 @@ def test_projection_uses_each_registered_view_focal_length(
         view["focal_length_mm"]
         for view in report["projection_contract"]["views"]
     ] == [45.0, 60.0]
+
+
+def test_projection_forwards_recorded_camera_projection_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry, rendered_registry, _ = _stub_face_region_inputs(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        view_ids=["front"],
+    )
+    original_loader = face_region_evidence._load_projection_views
+    views, source = original_loader(
+        rendered_registry_path=rendered_registry,
+        asset_path=tmp_path / "asset.usda",
+        requested_views=None,
+        projection_max_size=512,
+    )
+    views[0].update(
+        {
+            "camera_projection_mode": "orthographic",
+            "camera_orthographic_span_multiplier": 1.75,
+            "camera_look_at_target": [0.25, 0.0, 0.0],
+        }
+    )
+    monkeypatch.setattr(
+        face_region_evidence,
+        "_load_projection_views",
+        lambda **_: (views, source),
+    )
+    captured: dict[str, object] = {}
+
+    def capture_contract(*_args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        face_region_evidence,
+        "_rasterize_region_labels",
+        capture_contract,
+    )
+
+    face_region_evidence.build_face_region_evidence(
+        registry_path=registry,
+        output_dir=tmp_path / "evidence",
+        rendered_registry_path=rendered_registry,
+    )
+    report = json.loads(
+        (tmp_path / "evidence" / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert captured["projection_mode"] == "orthographic"
+    assert captured["orthographic_span_multiplier"] == 1.75
+    assert captured["camera_look_at_target"] == [0.25, 0.0, 0.0]
+    assert captured["asset_diagonal"] == pytest.approx(math.sqrt(2.0))
+    assert report["projection_contract"]["views"][0]["projection_mode"] == (
+        "orthographic"
+    )
 
 
 def test_projection_progress_does_not_advance_a_failed_view(
