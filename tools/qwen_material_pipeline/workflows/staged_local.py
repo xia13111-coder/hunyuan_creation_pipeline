@@ -109,14 +109,15 @@ from qwen_material_pipeline.retrieval.visual_materials import (
     _verified_siglip2_model_identity,
 )
 from qwen_material_pipeline.segmentation.sam3_regions import (
-    CROSS_GROUP_ARBITRATION_SCHEMA_VERSION,
     CROSS_GROUP_NEAR_DUPLICATE_IOU,
+    result_policy as sam3_result_policy,
 )
 from qwen_material_pipeline.segmentation.human_foreground import (
     ANNOTATION_SCHEMA_VERSION as SAM3_HUMAN_ANNOTATION_SCHEMA_VERSION,
     CONFIRMED_MASK_BOUNDED_MINIMUM_PRECISION,
     CONFIRMED_MASK_BOUNDED_MINIMUM_RECALL,
     CONFIRMED_MASK_STRICT_MINIMUM_IOU,
+    CONFIRMED_MASK_SYMMETRIC_MINIMUM_IOU,
     LEGACY_ANNOTATION_SCHEMA_VERSION as SAM3_LEGACY_HUMAN_ANNOTATION_SCHEMA_VERSION,
     load_annotations as load_sam3_foreground_annotations,
     materialize_annotation_bundle as materialize_sam3_foreground_bundle,
@@ -4540,10 +4541,22 @@ def _validate_sam3_manifest(
     repository = repository.expanduser().resolve(strict=True)
     checkpoint = checkpoint.expanduser().resolve(strict=True)
     request_schema = request_document.get("schema_version")
-    expected_instance_interactivity = request_schema in {
+    expected_human_interactivity = any(
+        bool(region.get("click_sets")) for region in raw_request_regions
+    )
+    if expected_human_interactivity and request_schema not in {
         SAM3_POINT_REQUEST_SCHEMA_VERSION,
         SAM3_ORDERED_POINT_REQUEST_SCHEMA_VERSION,
-    }
+    }:
+        raise ValueError("SAM3 interactive regions use an unsupported request schema")
+    expected_automatic_shape_interactivity = any(
+        isinstance(region.get("cad_projection_seed"), dict)
+        or isinstance(region.get("cad_amodal_template"), dict)
+        for region in raw_request_regions
+    )
+    expected_instance_interactivity = (
+        expected_human_interactivity or expected_automatic_shape_interactivity
+    )
     expected_ordered_interactivity = (
         request_schema == SAM3_ORDERED_POINT_REQUEST_SCHEMA_VERSION
     )
@@ -4558,25 +4571,17 @@ def _validate_sam3_manifest(
         is not expected_instance_interactivity
     ):
         raise ValueError("SAM3 result backend does not match the current frozen model")
-    expected_policy = {
-        "minimum_model_score": minimum_model_score,
-        "minimum_prompt_overlap": minimum_prompt_overlap,
-        "maximum_image_fraction": maximum_image_fraction,
-        "minimum_mask_pixels": minimum_mask_pixels,
-        "rejected_mask_policy": "fail_closed_no_mask_evidence",
-        "cross_group_arbitration_schema": (CROSS_GROUP_ARBITRATION_SCHEMA_VERSION),
-        "cross_group_near_duplicate_iou": CROSS_GROUP_NEAR_DUPLICATE_IOU,
-        "cross_group_minimum_intersection_pixels": minimum_mask_pixels,
-        "cross_group_foreground_policy": "exclude_whole_asset_foreground",
-    }
-    if expected_instance_interactivity:
-        expected_policy[
-            "human_point_model_score_policy"
-        ] = "advisory_when_human_confirmed"
-    if expected_ordered_interactivity:
-        expected_policy[
-            "human_point_replay_policy"
-        ] = "first_multimask_then_previous_logits_single_mask"
+    expected_policy = sam3_result_policy(
+        minimum_model_score=minimum_model_score,
+        minimum_prompt_overlap=minimum_prompt_overlap,
+        maximum_image_fraction=maximum_image_fraction,
+        minimum_mask_pixels=minimum_mask_pixels,
+        human_interactive_requested=expected_human_interactivity,
+        automatic_shape_interactive_requested=(
+            expected_automatic_shape_interactivity
+        ),
+        ordered_interaction_requested=expected_ordered_interactivity,
+    )
     if manifest.get("policy") != expected_policy:
         raise ValueError("SAM3 result policy does not match the current request")
     records = manifest.get("records")
@@ -4618,7 +4623,7 @@ def _validate_sam3_manifest(
         if expected_region is None:
             raise ValueError("SAM3 result contains a region not present in the request")
         expected_confirmed_array = None
-        if expected_instance_interactivity:
+        if expected_human_interactivity:
             expected_click_sets = expected_region.get("click_sets")
             expected_mask = expected_region.get("confirmed_mask")
             expected_prompt_mode = (
@@ -4777,6 +4782,19 @@ def _validate_sam3_manifest(
                 and float(replay_audit["reproduction_recall"])
                 >= CONFIRMED_MASK_BOUNDED_MINIMUM_RECALL
             )
+            symmetric_reproduction_valid = (
+                isinstance(replay_audit, dict)
+                and replay_audit.get("acceptance_mode")
+                == "symmetric_boundary_drift"
+                and replay_audit.get("symmetric_minimum_reproduction_iou")
+                == CONFIRMED_MASK_SYMMETRIC_MINIMUM_IOU
+                and isinstance(
+                    replay_audit.get("reproduction_iou"), (int, float)
+                )
+                and not isinstance(replay_audit.get("reproduction_iou"), bool)
+                and float(replay_audit["reproduction_iou"])
+                >= CONFIRMED_MASK_SYMMETRIC_MINIMUM_IOU
+            )
             if (
                 not isinstance(replay_audit, dict)
                 or replay_audit.get("sha256") != confirmed_sha256
@@ -4784,7 +4802,9 @@ def _validate_sam3_manifest(
                 or replay_audit.get("minimum_reproduction_iou")
                 != CONFIRMED_MASK_STRICT_MINIMUM_IOU
                 or not (
-                    strict_reproduction_valid or bounded_reproduction_valid
+                    strict_reproduction_valid
+                    or symmetric_reproduction_valid
+                    or bounded_reproduction_valid
                 )
                 or replay_audit.get("accepted") is not True
                 or replay_audit.get("authoritative_output") != "human_confirmed_mask"

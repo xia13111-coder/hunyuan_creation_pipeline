@@ -32,6 +32,7 @@ from qwen_material_pipeline.segmentation.sam3_regions import (
     _segment_shape_guided_points,
     _shape_seed_click_set,
     _validated_box,
+    result_policy,
 )
 from qwen_material_pipeline.segmentation.human_foreground import sha256_file
 
@@ -1027,6 +1028,40 @@ def test_view_shared_alignment_cannot_follow_one_part_candidate() -> None:
     assert audit["translation_xy_pixels"] == [0.0, 0.0]
     assert audit["part_specific_translation_allowed"] is False
     assert audit["cad_union_foreground_recall"] == 1.0
+
+
+def test_view_shared_alignment_is_not_applicable_to_foreground_without_cad_seeds(
+) -> None:
+    foreground = np.ones((40, 48), dtype=bool)
+
+    audit = _estimate_view_shared_translation({}, foreground)
+
+    assert audit == {
+        "translation_xy_pixels": [0.0, 0.0],
+        "maximum_translation_xy_pixels": [0, 0],
+        "estimation_mode": "not_applicable_no_cad_seeds",
+        "part_specific_translation_allowed": False,
+        "cad_union_pixels": 0,
+    }
+
+
+def test_result_policy_binds_automatic_cad_shape_refinement() -> None:
+    policy = result_policy(
+        minimum_model_score=0.45,
+        minimum_prompt_overlap=0.25,
+        maximum_image_fraction=0.8,
+        minimum_mask_pixels=32,
+        human_interactive_requested=False,
+        automatic_shape_interactive_requested=True,
+        ordered_interaction_requested=False,
+    )
+
+    assert policy["per_mesh_pose_change_allowed"] is False
+    assert policy["maximum_view_shared_translation_pixels"] == 12
+    assert policy["automatic_shape_point_refinement"] == (
+        "always_run_same_view_cad_shape_positive_negative_points"
+    )
+    assert "human_point_replay_policy" not in policy
 
 
 def test_amodal_shape_restores_only_renderer_known_occlusion() -> None:

@@ -315,26 +315,15 @@ def _interactive_manifest_fixture(
                 }
             ],
         )
-    policy = {
-        "minimum_model_score": 0.45,
-        "minimum_prompt_overlap": 0.25,
-        "maximum_image_fraction": 0.90,
-        "minimum_mask_pixels": 1,
-        "rejected_mask_policy": "fail_closed_no_mask_evidence",
-        "cross_group_arbitration_schema": (
-            run_staged_local.CROSS_GROUP_ARBITRATION_SCHEMA_VERSION
-        ),
-        "cross_group_near_duplicate_iou": (
-            run_staged_local.CROSS_GROUP_NEAR_DUPLICATE_IOU
-        ),
-        "cross_group_minimum_intersection_pixels": 1,
-        "cross_group_foreground_policy": "exclude_whole_asset_foreground",
-        "human_point_model_score_policy": "advisory_when_human_confirmed",
-    }
-    if ordered:
-        policy[
-            "human_point_replay_policy"
-        ] = "first_multimask_then_previous_logits_single_mask"
+    policy = run_staged_local.sam3_result_policy(
+        minimum_model_score=0.45,
+        minimum_prompt_overlap=0.25,
+        maximum_image_fraction=0.90,
+        minimum_mask_pixels=1,
+        human_interactive_requested=True,
+        automatic_shape_interactive_requested=False,
+        ordered_interaction_requested=ordered,
+    )
     unsigned = {
         "schema_version": run_staged_local.SAM3_RESULT_SCHEMA_VERSION,
         "request": {
@@ -462,6 +451,41 @@ def test_ordered_v3_manifest_accepts_bounded_human_confirmed_replay(
     )
 
     audit["reproduction_precision"] = 0.98
+    with pytest.raises(
+        ValueError, match="confirmed-mask reproduction audit is invalid"
+    ):
+        _validate_interactive_fixture(
+            manifest,
+            manifest_path=manifest_path,
+            request_path=request_path,
+            repository=repository,
+            checkpoint=checkpoint,
+        )
+
+
+def test_ordered_v3_manifest_accepts_tight_symmetric_boundary_drift(
+    tmp_path: Path,
+) -> None:
+    fixture = _interactive_manifest_fixture(tmp_path, ordered=True)
+    manifest, manifest_path, request_path, repository, checkpoint = fixture
+    audit = manifest["records"][0]["confirmed_mask_audit"]
+    audit.update(
+        reproduction_iou=0.9878,
+        symmetric_minimum_reproduction_iou=(
+            run_staged_local.CONFIRMED_MASK_SYMMETRIC_MINIMUM_IOU
+        ),
+        acceptance_mode="symmetric_boundary_drift",
+    )
+
+    _validate_interactive_fixture(
+        manifest,
+        manifest_path=manifest_path,
+        request_path=request_path,
+        repository=repository,
+        checkpoint=checkpoint,
+    )
+
+    audit["reproduction_iou"] = 0.9849
     with pytest.raises(
         ValueError, match="confirmed-mask reproduction audit is invalid"
     ):

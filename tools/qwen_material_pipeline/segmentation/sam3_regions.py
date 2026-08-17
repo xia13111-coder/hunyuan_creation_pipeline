@@ -35,6 +35,7 @@ from qwen_material_pipeline.segmentation.human_foreground import (
     CONFIRMED_MASK_BOUNDED_MINIMUM_PRECISION,
     CONFIRMED_MASK_BOUNDED_MINIMUM_RECALL,
     CONFIRMED_MASK_STRICT_MINIMUM_IOU,
+    CONFIRMED_MASK_SYMMETRIC_MINIMUM_IOU,
     grid_to_pixel,
     replay_ordered_click_set,
     select_point_candidate,
@@ -1127,7 +1128,17 @@ def _estimate_view_shared_translation(
     import numpy as np
 
     if not cad_seeds:
-        raise Sam3RegionError("view-shared alignment requires CAD seeds")
+        # Whole-workpiece foreground replay and generic box-prompt requests do
+        # not have per-Part-ID CAD projections.  View-shared alignment is a
+        # Part-ID refinement contract, so it is explicitly inapplicable here
+        # rather than an error or an inferred per-mesh motion.
+        return {
+            "translation_xy_pixels": [0.0, 0.0],
+            "maximum_translation_xy_pixels": [0, 0],
+            "estimation_mode": "not_applicable_no_cad_seeds",
+            "part_specific_translation_allowed": False,
+            "cad_union_pixels": 0,
+        }
     shapes = {np.asarray(mask, dtype=bool).shape for mask in cad_seeds.values()}
     if len(shapes) != 1:
         raise Sam3RegionError("view CAD seeds have inconsistent dimensions")
@@ -2002,6 +2013,79 @@ def _arbitrate_view_group_masks(
     return records
 
 
+def result_policy(
+    *,
+    minimum_model_score: float,
+    minimum_prompt_overlap: float,
+    maximum_image_fraction: float,
+    minimum_mask_pixels: int,
+    human_interactive_requested: bool,
+    automatic_shape_interactive_requested: bool,
+    ordered_interaction_requested: bool,
+) -> dict[str, Any]:
+    """Build the single producer/validator SAM3 result policy contract."""
+
+    policy: dict[str, Any] = {
+        "minimum_model_score": minimum_model_score,
+        "minimum_prompt_overlap": minimum_prompt_overlap,
+        "maximum_image_fraction": maximum_image_fraction,
+        "minimum_mask_pixels": minimum_mask_pixels,
+        "minimum_cad_shape_seed_pixels": DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS,
+        "minimum_cad_shape_iou": DEFAULT_MINIMUM_CAD_SHAPE_IOU,
+        "minimum_cad_shape_area_agreement": (
+            DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
+        ),
+        "minimum_amodal_candidate_precision": (
+            DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION
+        ),
+        "minimum_amodal_completion_shape_iou": (
+            DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
+        ),
+        "maximum_candidate_to_amodal_area_ratio": (
+            DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO
+        ),
+        "minimum_visible_cad_seed_recall": DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL,
+        "dual_template_roles": {
+            "whole_assembly_part_id": "location_visibility_and_occlusion_prior",
+            "isolated_mesh_projection": "complete_shape_prior",
+        },
+        "cad_shape_candidate_policy": (
+            "same_view_rendered_part_template_view_shared_translation_direct_support"
+        ),
+        "per_mesh_pose_change_allowed": False,
+        "maximum_view_shared_translation_pixels": (
+            DEFAULT_MAXIMUM_VIEW_SHARED_TRANSLATION_PIXELS
+        ),
+        "maximum_other_part_overlap_fraction": (
+            DEFAULT_MAXIMUM_OTHER_PART_OVERLAP_FRACTION
+        ),
+        "maximum_final_sam_to_cad_area_ratio": (
+            DEFAULT_MAXIMUM_FINAL_SAM_TO_CAD_AREA_RATIO
+        ),
+        "maximum_neighbor_negative_target_pixels": (
+            DEFAULT_MAXIMUM_NEIGHBOR_NEGATIVE_TARGET_PIXELS
+        ),
+        "rejected_mask_policy": "fail_closed_no_mask_evidence",
+        "cross_group_arbitration_schema": CROSS_GROUP_ARBITRATION_SCHEMA_VERSION,
+        "cross_group_near_duplicate_iou": CROSS_GROUP_NEAR_DUPLICATE_IOU,
+        "cross_group_minimum_intersection_pixels": minimum_mask_pixels,
+        "cross_group_foreground_policy": "exclude_whole_asset_foreground",
+    }
+    if human_interactive_requested:
+        policy["human_point_model_score_policy"] = (
+            "advisory_when_human_confirmed"
+        )
+    if automatic_shape_interactive_requested:
+        policy["automatic_shape_point_refinement"] = (
+            "always_run_same_view_cad_shape_positive_negative_points"
+        )
+    if ordered_interaction_requested:
+        policy["human_point_replay_policy"] = (
+            "first_multimask_then_previous_logits_single_mask"
+        )
+    return policy
+
+
 def run(
     *,
     request_path: Path,
@@ -2369,11 +2453,18 @@ def run(
                 strict_reproduction = (
                     reproduction_iou >= CONFIRMED_MASK_STRICT_MINIMUM_IOU
                 )
+                symmetric_reproduction = (
+                    reproduction_iou >= CONFIRMED_MASK_SYMMETRIC_MINIMUM_IOU
+                )
                 bounded_reproduction = (
                     reproduction_precision >= CONFIRMED_MASK_BOUNDED_MINIMUM_PRECISION
                     and reproduction_recall >= CONFIRMED_MASK_BOUNDED_MINIMUM_RECALL
                 )
-                reproduction_accepted = strict_reproduction or bounded_reproduction
+                reproduction_accepted = (
+                    strict_reproduction
+                    or symmetric_reproduction
+                    or bounded_reproduction
+                )
                 confirmed_mask_audit = {
                     "path": str(confirmed_path),
                     "sha256": _sha256_file(confirmed_path),
@@ -2382,6 +2473,9 @@ def run(
                     "intersection_pixels": intersection,
                     "reproduction_iou": round(reproduction_iou, 8),
                     "minimum_reproduction_iou": (CONFIRMED_MASK_STRICT_MINIMUM_IOU),
+                    "symmetric_minimum_reproduction_iou": (
+                        CONFIRMED_MASK_SYMMETRIC_MINIMUM_IOU
+                    ),
                     "reproduction_precision": round(reproduction_precision, 8),
                     "reproduction_recall": round(reproduction_recall, 8),
                     "bounded_minimum_precision": (
@@ -2391,6 +2485,8 @@ def run(
                     "acceptance_mode": (
                         "strict_iou"
                         if strict_reproduction
+                        else "symmetric_boundary_drift"
+                        if symmetric_reproduction
                         else "bounded_human_confirmed"
                         if bounded_reproduction
                         else "rejected"
@@ -2527,60 +2623,17 @@ def run(
             records.append(record)
         image.close()
 
-    policy: dict[str, Any] = {
-        "minimum_model_score": minimum_model_score,
-        "minimum_prompt_overlap": minimum_prompt_overlap,
-        "maximum_image_fraction": maximum_image_fraction,
-        "minimum_mask_pixels": minimum_mask_pixels,
-        "minimum_cad_shape_seed_pixels": DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS,
-        "minimum_cad_shape_iou": DEFAULT_MINIMUM_CAD_SHAPE_IOU,
-        "minimum_cad_shape_area_agreement": (DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT),
-        "minimum_amodal_candidate_precision": (
-            DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION
+    policy = result_policy(
+        minimum_model_score=minimum_model_score,
+        minimum_prompt_overlap=minimum_prompt_overlap,
+        maximum_image_fraction=maximum_image_fraction,
+        minimum_mask_pixels=minimum_mask_pixels,
+        human_interactive_requested=human_interactive_requested,
+        automatic_shape_interactive_requested=(
+            automatic_shape_interactive_requested
         ),
-        "minimum_amodal_completion_shape_iou": (
-            DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
-        ),
-        "maximum_candidate_to_amodal_area_ratio": (
-            DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO
-        ),
-        "minimum_visible_cad_seed_recall": DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL,
-        "dual_template_roles": {
-            "whole_assembly_part_id": "location_visibility_and_occlusion_prior",
-            "isolated_mesh_projection": "complete_shape_prior",
-        },
-        "cad_shape_candidate_policy": (
-            "same_view_rendered_part_template_view_shared_translation_direct_support"
-        ),
-        "per_mesh_pose_change_allowed": False,
-        "maximum_view_shared_translation_pixels": (
-            DEFAULT_MAXIMUM_VIEW_SHARED_TRANSLATION_PIXELS
-        ),
-        "maximum_other_part_overlap_fraction": (
-            DEFAULT_MAXIMUM_OTHER_PART_OVERLAP_FRACTION
-        ),
-        "maximum_final_sam_to_cad_area_ratio": (
-            DEFAULT_MAXIMUM_FINAL_SAM_TO_CAD_AREA_RATIO
-        ),
-        "maximum_neighbor_negative_target_pixels": (
-            DEFAULT_MAXIMUM_NEIGHBOR_NEGATIVE_TARGET_PIXELS
-        ),
-        "rejected_mask_policy": "fail_closed_no_mask_evidence",
-        "cross_group_arbitration_schema": (CROSS_GROUP_ARBITRATION_SCHEMA_VERSION),
-        "cross_group_near_duplicate_iou": CROSS_GROUP_NEAR_DUPLICATE_IOU,
-        "cross_group_minimum_intersection_pixels": minimum_mask_pixels,
-        "cross_group_foreground_policy": "exclude_whole_asset_foreground",
-    }
-    if human_interactive_requested:
-        policy["human_point_model_score_policy"] = "advisory_when_human_confirmed"
-    if automatic_shape_interactive_requested:
-        policy[
-            "automatic_shape_point_refinement"
-        ] = "always_run_same_view_cad_shape_positive_negative_points"
-    if ordered_interaction_requested:
-        policy[
-            "human_point_replay_policy"
-        ] = "first_multimask_then_previous_logits_single_mask"
+        ordered_interaction_requested=ordered_interaction_requested,
+    )
     unsigned: dict[str, Any] = {
         "schema_version": RESULT_SCHEMA_VERSION,
         "request": {

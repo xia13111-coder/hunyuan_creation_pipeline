@@ -30,6 +30,11 @@ COORDINATE_GRID_SIZE = 1000
 REFERENCE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
 CONFIRMED_MASK_STRICT_MINIMUM_IOU = 0.995
+# A fresh CUDA process may move a small number of boundary pixels in either
+# direction while still reproducing the same confirmed workpiece.  This route
+# is deliberately symmetric and much tighter than the omission-tolerant gate
+# below: the total union disagreement must remain below 1.5%.
+CONFIRMED_MASK_SYMMETRIC_MINIMUM_IOU = 0.985
 # A confirmed mask remains authoritative when a fresh SAM3 process reproduces
 # almost no pixels outside it but omits a small part of the approved union.
 # This handles reproducible CUDA/session-state drift without allowing a replay
