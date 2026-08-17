@@ -234,6 +234,51 @@ def _complete_coverage_assignment_statuses(
     return statuses
 
 
+def _coating_consistency_audit_for_quality_gate(
+    *,
+    material_prediction_mode: str,
+    material_plan: Mapping[str, Any],
+    material_audit: Mapping[str, Any],
+) -> Mapping[str, Any] | None:
+    """Return the coating contract that Part-ID QA must enforce.
+
+    Catalog-family-first selection deliberately makes each observed Part ID an
+    independent material-identity decision.  In that mode the legacy
+    source-appearance coating merger is disabled by contract, so its sealed
+    ``NOT_RUN`` record is not a failed consistency check.  Treat it as not
+    applicable only when the plan, provenance, and audit all independently
+    attest that exact mode.  Every malformed, unexpected, or failed coating
+    record is returned to the quality gate and therefore fails closed.
+    """
+
+    raw_gate = material_audit.get("coating_consistency_gate")
+    if not isinstance(raw_gate, Mapping) or raw_gate.get("status") != "NOT_RUN":
+        return material_audit
+    provenance = material_plan.get("provenance")
+    summary = raw_gate.get("summary")
+    zero_summary = (
+        isinstance(summary, Mapping)
+        and summary.get("component_count") == 0
+        and summary.get("constrained_part_count") == 0
+        and summary.get("material_changed_part_count") == 0
+        and summary.get("material_changed_part_ids") == []
+        and summary.get("violation_count") == 0
+    )
+    intentionally_not_applicable = (
+        material_prediction_mode == "catalog_family_first"
+        and material_plan.get("coating_consistency_used") is False
+        and isinstance(provenance, Mapping)
+        and provenance.get("material_prediction_mode")
+        == "catalog_family_first"
+        and provenance.get("coating_consistency_enabled") is False
+        and provenance.get("coating_consistency_schema_version")
+        == raw_gate.get("schema_version")
+        and raw_gate.get("reason") == "disabled_by_caller"
+        and zero_summary
+    )
+    return None if intentionally_not_applicable else material_audit
+
+
 def _palette_group_disagreement_contract_applies(
     material_assignment_unit: str,
 ) -> bool:
@@ -4028,6 +4073,10 @@ def _run_visual_qa_stage(
 
     part_id_quality_gate_document: dict[str, Any] | None = None
     if config.material_assignment_unit == "part_id":
+        quality_material_audit = read_object(
+            part_id_material_audit,
+            "Part-ID coating consistency audit",
+        )
         part_id_quality_gate_document = _evaluate_part_id_quality_gate(
             quality,
             minimum_aggregate_appearance_score=(
@@ -4037,9 +4086,10 @@ def _run_visual_qa_stage(
                 config.final_visual_gate_minimum_final_view_appearance_score
             ),
             minimum_comparable_views=2,
-            coating_consistency_audit=read_object(
-                part_id_material_audit,
-                "Part-ID coating consistency audit",
+            coating_consistency_audit=_coating_consistency_audit_for_quality_gate(
+                material_prediction_mode=config.material_prediction_mode,
+                material_plan=plan,
+                material_audit=quality_material_audit,
             ),
         )
         part_id_quality_gate_document["bindings"] = {

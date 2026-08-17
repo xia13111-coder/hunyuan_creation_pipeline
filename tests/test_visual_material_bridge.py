@@ -17,6 +17,7 @@ from asset_pipeline.visual_materials.orchestrator import (
     _archive_stale_policy_exact_cover_checkpoint,
     _appearance_baseline_safety_reason,
     _complete_coverage_assignment_statuses,
+    _coating_consistency_audit_for_quality_gate,
     _evaluate_part_id_quality_gate,
     _multigroup_local_compare_command,
     _palette_group_disagreement_contract_applies,
@@ -651,6 +652,79 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         self.assertIn(
             "COATING_CONSISTENCY_GATE_NOT_PASSED",
             gate["reason_codes"],
+        )
+
+    def test_family_first_quality_omits_intentionally_disabled_legacy_coating_gate(
+        self,
+    ) -> None:
+        coating_schema = "qwen-part-id-coating-consistency/v1"
+        audit = {
+            "coating_consistency_gate": {
+                "schema_version": coating_schema,
+                "status": "NOT_RUN",
+                "reason": "disabled_by_caller",
+                "components": [],
+                "summary": {
+                    "component_count": 0,
+                    "constrained_part_count": 0,
+                    "material_changed_part_count": 0,
+                    "material_changed_part_ids": [],
+                    "violation_count": 0,
+                },
+            }
+        }
+        plan = {
+            "coating_consistency_used": False,
+            "provenance": {
+                "material_prediction_mode": "catalog_family_first",
+                "coating_consistency_enabled": False,
+                "coating_consistency_schema_version": coating_schema,
+            },
+        }
+
+        self.assertIsNone(
+            _coating_consistency_audit_for_quality_gate(
+                material_prediction_mode="catalog_family_first",
+                material_plan=plan,
+                material_audit=audit,
+            )
+        )
+
+    def test_family_first_quality_fails_closed_on_malformed_not_run_contract(
+        self,
+    ) -> None:
+        audit = {
+            "coating_consistency_gate": {
+                "schema_version": "qwen-part-id-coating-consistency/v1",
+                "status": "NOT_RUN",
+                "reason": "disabled_by_caller",
+                "summary": {
+                    "component_count": 1,
+                    "constrained_part_count": 0,
+                    "material_changed_part_count": 0,
+                    "material_changed_part_ids": [],
+                    "violation_count": 0,
+                },
+            }
+        }
+        plan = {
+            "coating_consistency_used": False,
+            "provenance": {
+                "material_prediction_mode": "catalog_family_first",
+                "coating_consistency_enabled": False,
+                "coating_consistency_schema_version": (
+                    "qwen-part-id-coating-consistency/v1"
+                ),
+            },
+        }
+
+        self.assertIs(
+            _coating_consistency_audit_for_quality_gate(
+                material_prediction_mode="catalog_family_first",
+                material_plan=plan,
+                material_audit=audit,
+            ),
+            audit,
         )
 
     def test_part_id_provisional_exact_cover_authorizes_review_for_render_qa(
