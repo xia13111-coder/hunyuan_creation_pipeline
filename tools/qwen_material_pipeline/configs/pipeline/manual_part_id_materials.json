@@ -20,9 +20,13 @@
     "assignment_unit": "part_id",
     "immutable_after_selection": true,
     "parameter_candidate_mode": "disabled",
-    "selection_objective": "visual_similarity",
+    "prediction_mode": "catalog_family_first",
+    "identity_local_context": true,
+    "corresponding_color_calibration": "adaptive_actual_cad",
+    "corresponding_color_max_iterations": 5,
+    "selection_objective": "semantic_compatible_visual",
     "exact_mdl_tournament_max_candidates": 12,
-    "exact_mdl_tournament_all_groups": true,
+    "exact_mdl_tournament_all_groups": false,
     "exact_mdl_tournament_minimum_score_improvement": 0.015,
     "exact_mdl_tournament_minimum_winner_margin": 0.005
   },
@@ -79,8 +83,8 @@
     "cache_dir": "${VISUAL_RETRIEVAL_CACHE}",
     "observation_bank": "${NVIDIA_BASE_OBSERVATION_BANK}",
     "device": "cuda",
-    "siglip_top_k": 64,
-    "final_top_k": 32,
+    "siglip_top_k": 160,
+    "final_top_k": 160,
     "batch_size": 24
   }
 }

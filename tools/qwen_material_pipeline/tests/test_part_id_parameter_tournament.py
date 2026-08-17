@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -37,9 +38,7 @@ def source_plan() -> dict:
                         "parameters_applied": False,
                     },
                     "mdl_parameter_candidates": {
-                        "schema_version": (
-                            "qwen-part-id-parameter-candidates/v1"
-                        ),
+                        "schema_version": ("qwen-part-id-parameter-candidates/v1"),
                         "part_id": "P0001",
                         "material_id": "mdl:Any.mdl#Any",
                         "selection_status": "PENDING_RENDER_COMPARISON",
@@ -58,9 +57,7 @@ def source_plan() -> dict:
                                 "candidate_id": "H1",
                                 "kind": "evidence_gated_color_only",
                                 "material_id": "mdl:Any.mdl#Any",
-                                "parameters": {
-                                    "diffuse_tint": [0.2, 1.0, 0.1]
-                                },
+                                "parameters": {"diffuse_tint": [0.2, 1.0, 0.1]},
                             },
                         ],
                     },
@@ -142,9 +139,7 @@ class PartIdParameterTournamentTests(unittest.TestCase):
 
             def registry(path: Path) -> dict:
                 return {
-                    "render_set": {
-                        "views": [{"view_id": "front", "rgb": str(path)}]
-                    }
+                    "render_set": {"views": [{"view_id": "front", "rgb": str(path)}]}
                 }
 
             h0 = score_part_id_render(
@@ -175,11 +170,67 @@ class PartIdParameterTournamentTests(unittest.TestCase):
                 {"diffuse_tint": [0.2, 1.0, 0.1]},
             )
             self.assertEqual(
-                output["assignments"][0]["provenance"][
-                    "mdl_parameter_candidates"
-                ]["selected_candidate_id"],
+                output["assignments"][0]["provenance"]["mdl_parameter_candidates"][
+                    "selected_candidate_id"
+                ],
                 "H1",
             )
+
+    def test_registered_score_relocates_renamed_reference_by_sealed_hash(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            reference = np.zeros((32, 32, 3), dtype=np.uint8)
+            reference[8:24, 8:24] = (45, 150, 35)
+            mask = np.zeros((32, 32), dtype=np.uint8)
+            mask[8:24, 8:24] = 255
+            renamed = root / "renamed.png"
+            missing = root / "original.png"
+            mask_path = root / "mask.png"
+            Image.fromarray(reference, mode="RGB").save(renamed)
+            Image.fromarray(mask, mode="L").save(mask_path)
+            digest = hashlib.sha256(renamed.read_bytes()).hexdigest()
+            evidence = {
+                "parts": [
+                    {
+                        "part_id": "P0001",
+                        "observations": [
+                            {
+                                "view_id": "front",
+                                "render_view_id": "front",
+                                "image": str(missing),
+                                "image_sha256": digest,
+                                "mask": str(mask_path),
+                                "mask_sha256": hashlib.sha256(
+                                    mask_path.read_bytes()
+                                ).hexdigest(),
+                                "selected_for_material_inference": True,
+                            }
+                        ],
+                    }
+                ]
+            }
+            spatial = {
+                "view_alignments": [
+                    {
+                        "reference_view_id": "front",
+                        "selected_render_view_id": "front",
+                        "trusted": True,
+                        "bbox_affine": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                        "ecc_warp": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                    }
+                ]
+            }
+            score = score_part_id_render(
+                part_id="P0001",
+                evidence=evidence,
+                spatial_mapping_report=spatial,
+                rendered_registry={
+                    "render_set": {"views": [{"view_id": "front", "rgb": str(renamed)}]}
+                },
+            )
+            self.assertEqual(score["comparison_pixel_count"], 256)
 
     def test_h0_remains_locked_without_clear_improvement(self) -> None:
         score = {"appearance_score": 0.75}
@@ -192,9 +243,9 @@ class PartIdParameterTournamentTests(unittest.TestCase):
         self.assertEqual(audit["h1_winner_count"], 0)
         self.assertNotIn("parameters", output["assignments"][0])
         self.assertEqual(
-            output["assignments"][0]["provenance"][
-                "mdl_parameter_candidates"
-            ]["selected_candidate_id"],
+            output["assignments"][0]["provenance"]["mdl_parameter_candidates"][
+                "selected_candidate_id"
+            ],
             "H0",
         )
 

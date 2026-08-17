@@ -9,8 +9,10 @@ command; this package supplies its material stages.
 ## Scope
 
 The default configuration is `configs/pipeline/manual_part_id_materials.json`.
-It selects the closest-looking NVIDIA `Materials/Base` entry per CAD Part-ID
-and keeps the selected material's original parameters.
+It predicts material identity before colour, selects an NVIDIA
+`Materials/Base` entry per CAD Part-ID, preserves exact presets, and runs
+identity-preserving actual-CAD colour calibration only for corresponding
+materials.
 
 This package handles reference-image evidence, camera registration, Part-ID
 mapping, material retrieval, USD binding, and validation. CAD conversion and the
@@ -49,7 +51,9 @@ normalized CAD + confirmed photos
 
 Each visible Part-ID is evaluated independently. Invisible parts receive a
 configured default material. Models rank candidates; validated code performs
-the USD binding. The selected MDL keeps its library defaults.
+the USD binding. Exact matches keep library defaults. Corresponding materials
+keep the selected MDL identity while the main pipeline renders and selects only
+reviewed colour parameters per part/component scope.
 
 ## Commands
 

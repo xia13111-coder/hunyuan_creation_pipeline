@@ -41,8 +41,74 @@ def _canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
-def _read_rgb(path: str | Path, label: str) -> np.ndarray:
-    resolved = Path(path).expanduser().resolve(strict=True)
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _resolve_sealed_file(
+    path: str | Path,
+    label: str,
+    expected_sha256: object = None,
+) -> Path:
+    """Resolve a sealed artifact after a filename-only repository rename.
+
+    Evidence documents intentionally retain their original paths.  When that
+    exact name has disappeared, accept a replacement only when exactly one
+    regular, non-symlink file in the same directory has the sealed byte hash.
+    This keeps old evidence reproducible without guessing from view names or
+    introducing asset-specific path aliases.
+    """
+
+    candidate = Path(path).expanduser()
+    digest = expected_sha256 if isinstance(expected_sha256, str) else None
+    if digest is not None and (
+        len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)
+    ):
+        raise PartIdParameterTournamentError(f"{label} has an invalid SHA-256")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        if digest is None:
+            raise PartIdParameterTournamentError(
+                f"unable to resolve {label}: {candidate}"
+            ) from exc
+        try:
+            parent = candidate.parent.resolve(strict=True)
+        except FileNotFoundError as parent_exc:
+            raise PartIdParameterTournamentError(
+                f"unable to resolve {label}: {candidate}"
+            ) from parent_exc
+        matches = []
+        for sibling in parent.iterdir():
+            if sibling.is_symlink() or not sibling.is_file():
+                continue
+            if _sha256_file(sibling) == digest:
+                matches.append(sibling.resolve(strict=True))
+        if len(matches) != 1:
+            raise PartIdParameterTournamentError(
+                f"unable to relocate {label} by sealed SHA-256: "
+                f"expected one sibling match, found {len(matches)}"
+            ) from exc
+        resolved = matches[0]
+    if candidate.is_symlink() or not resolved.is_file():
+        raise PartIdParameterTournamentError(
+            f"{label} must be a regular non-symlink file: {candidate}"
+        )
+    if digest is not None and _sha256_file(resolved) != digest:
+        raise PartIdParameterTournamentError(f"{label} failed its sealed SHA-256")
+    return resolved
+
+
+def _read_rgb(
+    path: str | Path,
+    label: str,
+    expected_sha256: object = None,
+) -> np.ndarray:
+    resolved = _resolve_sealed_file(path, label, expected_sha256)
     try:
         with Image.open(resolved) as opened:
             return np.asarray(
@@ -55,8 +121,12 @@ def _read_rgb(path: str | Path, label: str) -> np.ndarray:
         ) from exc
 
 
-def _read_mask(path: str | Path, label: str) -> np.ndarray:
-    resolved = Path(path).expanduser().resolve(strict=True)
+def _read_mask(
+    path: str | Path,
+    label: str,
+    expected_sha256: object = None,
+) -> np.ndarray:
+    resolved = _resolve_sealed_file(path, label, expected_sha256)
     try:
         with Image.open(resolved) as opened:
             array = np.asarray(
@@ -103,16 +173,12 @@ def pending_h1_part_ids(plan: Mapping[str, Any]) -> list[str]:
                 f"{part_id} has an unsupported parameter candidate schema"
             )
         candidates = candidate_set.get("candidates")
-        if not isinstance(candidates, Sequence) or isinstance(
-            candidates, (str, bytes)
-        ):
+        if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes)):
             raise PartIdParameterTournamentError(
                 f"{part_id} parameter candidates are invalid"
             )
         ids = [
-            row.get("candidate_id")
-            for row in candidates
-            if isinstance(row, Mapping)
+            row.get("candidate_id") for row in candidates if isinstance(row, Mapping)
         ]
         if ids == ["H0", "H1"]:
             pending.append(part_id)
@@ -142,9 +208,7 @@ def build_h1_candidate_plan(
         else None
     )
     candidates = (
-        candidate_set.get("candidates")
-        if isinstance(candidate_set, Mapping)
-        else None
+        candidate_set.get("candidates") if isinstance(candidate_set, Mapping) else None
     )
     h1 = next(
         (
@@ -319,19 +383,19 @@ def score_part_id_render(
     observation = _selected_observation(evidence, part_id)
     reference_view_id = observation.get("view_id")
     render_view_id = observation.get("render_view_id")
-    if not isinstance(reference_view_id, str) or not isinstance(
-        render_view_id, str
-    ):
+    if not isinstance(reference_view_id, str) or not isinstance(render_view_id, str):
         raise PartIdParameterTournamentError(
             f"Part ID {part_id} observation has invalid view IDs"
         )
     reference = _read_rgb(
         observation.get("image"),
         f"Part ID {part_id} reference",
+        observation.get("image_sha256"),
     )
     mask = _read_mask(
         observation.get("mask"),
         f"Part ID {part_id} reference mask",
+        observation.get("mask_sha256"),
     )
     if reference.shape[:2] != mask.shape:
         raise PartIdParameterTournamentError(
@@ -362,12 +426,10 @@ def score_part_id_render(
         )
     reference_samples = reference[selected]
     render_samples = registered[selected]
-    reference_medoid, reference_median_spread, reference_p90_spread = (
-        _lab_medoid(reference_samples)
+    reference_medoid, reference_median_spread, reference_p90_spread = _lab_medoid(
+        reference_samples
     )
-    render_medoid, render_median_spread, render_p90_spread = _lab_medoid(
-        render_samples
-    )
+    render_medoid, render_median_spread, render_p90_spread = _lab_medoid(render_samples)
     delta_e = float(np.linalg.norm(reference_medoid - render_medoid))
     color_score = math.exp(-delta_e / 30.0)
     reference_luma = float(np.median(reference_medoid[0]))
@@ -386,12 +448,8 @@ def score_part_id_render(
         "color_score": round(color_score, 8),
         "luma_score": round(luma_score, 8),
         "appearance_score": round(appearance_score, 8),
-        "reference_lab_medoid": [
-            round(float(value), 8) for value in reference_medoid
-        ],
-        "render_lab_medoid": [
-            round(float(value), 8) for value in render_medoid
-        ],
+        "reference_lab_medoid": [round(float(value), 8) for value in reference_medoid],
+        "render_lab_medoid": [round(float(value), 8) for value in render_medoid],
         "reference_median_delta_e": round(reference_median_spread, 8),
         "reference_p90_delta_e": round(reference_p90_spread, 8),
         "render_median_delta_e": round(render_median_spread, 8),
@@ -434,24 +492,16 @@ def select_parameter_tournament_winners(
                 f"Part ID {part_id} has invalid render scores"
             )
         improvement = h1_score - h0_score
-        winner = (
-            "H1"
-            if improvement >= float(minimum_score_improvement)
-            else "H0"
-        )
+        winner = "H1" if improvement >= float(minimum_score_improvement) else "H0"
         assignment = assignments[part_id]
         provenance = assignment.get("provenance")
         if not isinstance(provenance, dict):
             raise PartIdParameterTournamentError(
                 f"Part ID {part_id} has invalid provenance"
             )
-        candidate_set = copy.deepcopy(
-            dict(provenance["mdl_parameter_candidates"])
-        )
+        candidate_set = copy.deepcopy(dict(provenance["mdl_parameter_candidates"]))
         h1 = next(
-            row
-            for row in candidate_set["candidates"]
-            if row["candidate_id"] == "H1"
+            row for row in candidate_set["candidates"] if row["candidate_id"] == "H1"
         )
         candidate_set["selection_status"] = "LOCKED_AFTER_RENDER_COMPARISON"
         candidate_set["selected_candidate_id"] = winner
@@ -533,9 +583,7 @@ def rebind_part_id_material_audit(
     output = copy.deepcopy(dict(source_audit))
     rows = output.get("parts")
     if not isinstance(rows, list):
-        raise PartIdParameterTournamentError(
-            "Part-ID material audit has no parts"
-        )
+        raise PartIdParameterTournamentError("Part-ID material audit has no parts")
     assignments = _assignment_by_part(final_plan)
     audit_by_part = {
         row.get("part_id"): row
@@ -559,14 +607,10 @@ def rebind_part_id_material_audit(
             "mdl_color_parameterization",
         ):
             if field in provenance:
-                audit_by_part[part_id][field] = copy.deepcopy(
-                    provenance[field]
-                )
+                audit_by_part[part_id][field] = copy.deepcopy(provenance[field])
     summary = output.get("summary")
     if not isinstance(summary, dict):
-        raise PartIdParameterTournamentError(
-            "Part-ID material audit has no summary"
-        )
+        raise PartIdParameterTournamentError("Part-ID material audit has no summary")
     summary["color_parameterized_count"] = sum(
         isinstance(assignment.get("parameters"), Mapping)
         and bool(assignment.get("parameters"))
@@ -596,14 +640,10 @@ def rebind_part_id_material_audit(
         "schema_version": SCHEMA_VERSION,
         "audit_sha256": _canonical_sha256(tournament_audit),
         "h1_winner_count": tournament_audit.get("h1_winner_count"),
-        "h1_winner_part_ids": copy.deepcopy(
-            tournament_audit.get("h1_winner_part_ids")
-        ),
+        "h1_winner_part_ids": copy.deepcopy(tournament_audit.get("h1_winner_part_ids")),
     }
     output.pop("integrity", None)
-    output["integrity"] = {
-        "document_sha256": _canonical_sha256(output)
-    }
+    output["integrity"] = {"document_sha256": _canonical_sha256(output)}
     return output
 
 

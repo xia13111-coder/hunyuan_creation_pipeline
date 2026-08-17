@@ -20,16 +20,11 @@ MATERIAL_SELECTION_OBJECTIVES = frozenset(
     {"semantic_compatible_visual", "visual_similarity"}
 )
 MATERIAL_ASSIGNMENT_UNITS = frozenset({"palette_group", "part_id"})
-MATERIAL_PARAMETER_CANDIDATE_MODES = frozenset(
-    {"disabled", "evidence_gated_h0_h1"}
-)
+MATERIAL_PARAMETER_CANDIDATE_MODES = frozenset({"disabled", "evidence_gated_h0_h1"})
 MATERIAL_PREDICTION_MODES = frozenset({"disabled", "catalog_family_first"})
-QWEN_MODEL_FAMILIES = frozenset(
-    {"qwen3_5", "qwen3_vl", "openai_compatible"}
-)
-REMOTE_REASONING_EFFORTS = frozenset(
-    {"none", "low", "medium", "high", "xhigh", "max"}
-)
+CORRESPONDING_COLOR_CALIBRATION_MODES = frozenset({"disabled", "adaptive_actual_cad"})
+QWEN_MODEL_FAMILIES = frozenset({"qwen3_5", "qwen3_vl", "openai_compatible"})
+REMOTE_REASONING_EFFORTS = frozenset({"none", "low", "medium", "high", "xhigh", "max"})
 _ENVIRONMENT_VARIABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 LOCAL_INFERENCE_DEVICES = frozenset({"cpu", "cuda"})
 NVIDIA_MATERIALS_ROOT_SCOPE = "nvidia_materials"
@@ -110,6 +105,8 @@ class VisualMaterialConfig:
     material_parameter_candidate_mode: str = "disabled"
     material_prediction_mode: str = "disabled"
     material_identity_local_context: bool = False
+    corresponding_color_calibration_mode: str = "disabled"
+    corresponding_color_max_iterations: int = 5
     exact_mdl_tournament_max_candidates: int = 12
     exact_mdl_tournament_all_groups: bool = True
     exact_mdl_tournament_minimum_score_improvement: float = 0.015
@@ -337,8 +334,7 @@ def resolve_material_root(
         return candidate.resolve(strict=True)
 
     has_full_layout = all(
-        (resolved / collection).is_dir()
-        for collection in ("Base", "vMaterials_2")
+        (resolved / collection).is_dir() for collection in ("Base", "vMaterials_2")
     )
     candidate = (
         resolved.parent
@@ -443,6 +439,8 @@ def load_visual_material_config(
                 "parameter_candidate_mode",
                 "prediction_mode",
                 "identity_local_context",
+                "corresponding_color_calibration",
+                "corresponding_color_max_iterations",
                 "exact_mdl_tournament_max_candidates",
                 "exact_mdl_tournament_all_groups",
                 "exact_mdl_tournament_minimum_score_improvement",
@@ -577,6 +575,26 @@ def load_visual_material_config(
             "materials.identity_local_context requires "
             "materials.prediction_mode='catalog_family_first'"
         )
+    corresponding_color_calibration_mode = require_choice(
+        materials.get("corresponding_color_calibration", "disabled"),
+        "config.materials.corresponding_color_calibration",
+        CORRESPONDING_COLOR_CALIBRATION_MODES,
+    )
+    corresponding_color_max_iterations = require_positive_int(
+        materials.get("corresponding_color_max_iterations", 5),
+        "config.materials.corresponding_color_max_iterations",
+    )
+    if corresponding_color_calibration_mode == "adaptive_actual_cad":
+        if material_prediction_mode != "catalog_family_first":
+            raise ValueError(
+                "adaptive_actual_cad colour calibration requires "
+                "materials.prediction_mode='catalog_family_first'"
+            )
+        if quality_lighting_profile != "material-neutral":
+            raise ValueError(
+                "adaptive_actual_cad colour calibration requires "
+                "render.quality_lighting_profile='material-neutral'"
+            )
     siglip_top_k = require_at_least_two(
         retrieval.get("siglip_top_k"),
         "config.retrieval.siglip_top_k",
@@ -681,9 +699,7 @@ def load_visual_material_config(
         ).rstrip("/")
         parsed_openai_url = urlparse(openai_base_url)
         if parsed_openai_url.scheme != "https" or not parsed_openai_url.netloc:
-            raise ValueError(
-                "config.qwen.base_url must be an absolute HTTPS URL"
-            )
+            raise ValueError("config.qwen.base_url must be an absolute HTTPS URL")
         openai_model = require_string(qwen.get("model"), "config.qwen.model")
         openai_api_key_env = require_string(
             qwen.get("api_key_env"), "config.qwen.api_key_env"
@@ -718,8 +734,7 @@ def load_visual_material_config(
         if remote_fields:
             raise ValueError(
                 "config.qwen remote fields are only valid for "
-                "model_family='openai_compatible': "
-                + ", ".join(sorted(remote_fields))
+                "model_family='openai_compatible': " + ", ".join(sorted(remote_fields))
             )
         qwen_model_path = resolve_path(
             qwen.get("model_path"),
@@ -756,9 +771,7 @@ def load_visual_material_config(
         qwen_max_new_tokens=qwen_max_new_tokens,
         qwen_max_new_tokens_ceiling=qwen_max_new_tokens_ceiling,
         qwen_minimum_usable_palette_views=qwen_minimum_usable_palette_views,
-        qwen_minimum_usable_palette_view_ratio=(
-            qwen_minimum_usable_palette_view_ratio
-        ),
+        qwen_minimum_usable_palette_view_ratio=(qwen_minimum_usable_palette_view_ratio),
         qwen_parallel_requests=qwen_parallel_requests,
         qwen_mapping_verification_views=qwen_mapping_verification_views,
         catalog=resolve_path(
@@ -922,6 +935,8 @@ def load_visual_material_config(
         ),
         material_prediction_mode=material_prediction_mode,
         material_identity_local_context=material_identity_local_context,
+        corresponding_color_calibration_mode=(corresponding_color_calibration_mode),
+        corresponding_color_max_iterations=corresponding_color_max_iterations,
         exact_mdl_tournament_max_candidates=require_at_least_two(
             materials.get("exact_mdl_tournament_max_candidates", 12),
             "config.materials.exact_mdl_tournament_max_candidates",
@@ -1044,9 +1059,7 @@ def load_visual_material_config(
             require_unit_float(
                 final_visual_gate.get(
                     "minimum_owner_local_resolved_fraction",
-                    FINAL_VISUAL_GATE_DEFAULTS[
-                        "minimum_owner_local_resolved_fraction"
-                    ],
+                    FINAL_VISUAL_GATE_DEFAULTS["minimum_owner_local_resolved_fraction"],
                 ),
                 (
                     "config.render.final_visual_gate."
@@ -1057,20 +1070,16 @@ def load_visual_material_config(
         final_visual_gate_maximum_visible_fallback_fraction=require_unit_float(
             final_visual_gate.get(
                 "maximum_visible_fallback_fraction",
-                FINAL_VISUAL_GATE_DEFAULTS[
-                    "maximum_visible_fallback_fraction"
-                ],
+                FINAL_VISUAL_GATE_DEFAULTS["maximum_visible_fallback_fraction"],
             ),
-            (
-                "config.render.final_visual_gate."
-                "maximum_visible_fallback_fraction"
-            ),
+            ("config.render.final_visual_gate." "maximum_visible_fallback_fraction"),
         ),
     )
 
 
 __all__ = [
     "CONFIG_SCHEMA_VERSION",
+    "CORRESPONDING_COLOR_CALIBRATION_MODES",
     "DEFAULT_CONFIG_PATH",
     "FINAL_VISUAL_GATE_DEFAULTS",
     "LOCAL_INFERENCE_DEVICES",

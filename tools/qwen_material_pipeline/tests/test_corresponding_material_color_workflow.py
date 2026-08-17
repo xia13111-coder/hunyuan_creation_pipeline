@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import hashlib
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
@@ -54,10 +55,28 @@ def _workflow_inputs(tmp_path: Path, view_ids: Sequence[str]) -> dict[str, Path]
     }
     for path in output.values():
         _write_json(path, {})
+    reference_rows = []
+    evidence_observations = []
+    for view_id in view_ids:
+        image = root / f"{view_id}.jpg"
+        image.write_bytes(f"reference:{view_id}".encode("utf-8"))
+        digest = hashlib.sha256(image.read_bytes()).hexdigest()
+        reference_rows.append({"id": view_id, "image": str(image)})
+        evidence_observations.append(
+            {
+                "view_id": view_id,
+                "image": str(image),
+                "image_sha256": digest,
+            }
+        )
+    _write_json(
+        output["part_evidence"],
+        {"parts": [{"part_id": "P1", "observations": evidence_observations}]},
+    )
     output["reference_manifest"] = root / "reference_manifest.json"
     _write_json(
         output["reference_manifest"],
-        {"source_views": [{"id": view_id} for view_id in view_ids]},
+        {"source_views": reference_rows},
     )
     output["asset"] = root / "asset.usda"
     output["asset"].write_text("#usda 1.0\n", encoding="utf-8")
@@ -258,5 +277,5 @@ def test_saved_workflow_adapts_scope_gain_from_registered_render(
     for candidate in manifest["candidates"]:
         assert Path(candidate["adaptive_iteration_audit"]["path"]).is_file()
     assert built_gain_vectors[0] == {"PART:P1": 1.0}
-    assert built_gain_vectors[1]["PART:P1"] == pytest.approx(2.0**0.75)
+    assert built_gain_vectors[1]["PART:P1"] == pytest.approx(2.0 ** 0.75)
     assert len(commands) == 9

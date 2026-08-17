@@ -53,6 +53,11 @@ from .config import (
 from .commands import (
     policy_exact_cover_command,
 )
+from .corresponding_color import (
+    corresponding_material_part_ids,
+    rebind_part_id_audit_for_corresponding_color,
+    validate_corresponding_color_result,
+)
 from .context import VisualMaterialPipelineContext
 from .exact_mdl_cache import (
     _ExactMdlCandidateCacheError,
@@ -179,6 +184,10 @@ from qwen_material_pipeline.materials.selection_lock import (
     build_material_selection_lock,
     validate_material_selection_lock,
 )
+from qwen_material_pipeline.workflows.corresponding_material_color_workflow import (
+    CorrespondingMaterialColorWorkflowError,
+    run_corresponding_material_color_workflow,
+)
 from qwen_material_pipeline.materials.visual_group_annotation import (
     VisualGroupAnnotationError,
     annotate_visual_groups,
@@ -201,8 +210,6 @@ from qwen_material_pipeline.workflows.part_id_qwen import (
 from qwen_material_pipeline.scripts.build_part_id_sam3_request import (
     build_request as build_part_id_sam3_request,
 )
-
-
 
 
 def _complete_coverage_assignment_statuses(
@@ -419,6 +426,7 @@ def _partial_live_resume_provisional_paths(
     candidates.extend(destination.glob("*_look*.usda"))
     candidates.extend(destination.glob("*instance*plan*.json"))
     candidates.extend(destination.glob("visual_quality*"))
+    candidates.append(destination / "material_identity_color")
 
     terminal_paths = set(_partial_live_resume_terminal_paths(destination))
     existing = {
@@ -511,10 +519,6 @@ def _archive_partial_live_resume_downstream_artifacts(
     return archive_dir
 
 
-
-
-
-
 def _verified_partial_live_resume_available(
     destination: Path,
     references: Sequence[tuple[str, Path]],
@@ -538,20 +542,14 @@ def _verified_partial_live_resume_available(
         return False
 
     analysis_dir = destination / "analysis"
-    stored_foreground_annotations = (
-        analysis_dir / "sam3_foreground_annotations.json"
-    )
+    stored_foreground_annotations = analysis_dir / "sam3_foreground_annotations.json"
     reference_manifest_path = analysis_dir / "mvinverse_reference_manifest.json"
     ledger_path = analysis_dir / "mvinverse" / "mvinverse_inference_ledger.json"
     face_manifest_path = analysis_dir / "face_regions" / "manifest.json"
     qwen_ledger_path = analysis_dir / "qwen_inference_ledger.json"
-    sam3_foreground_manifest_path = (
-        analysis_dir / "sam3_foreground" / "manifest.json"
-    )
+    sam3_foreground_manifest_path = analysis_dir / "sam3_foreground" / "manifest.json"
     sam3_manifest_path = analysis_dir / "sam3_regions" / "manifest.json"
-    visual_retrieval_path = (
-        analysis_dir / "visual_retrieval" / "visual_retrieval.json"
-    )
+    visual_retrieval_path = analysis_dir / "visual_retrieval" / "visual_retrieval.json"
     if _partial_live_resume_terminal_paths(destination):
         return False
 
@@ -561,7 +559,10 @@ def _verified_partial_live_resume_available(
     # the same.  This keeps a transient Isaac startup failure from forcing a
     # fresh CAD/pose search.
     camera_search_report = (
-        destination / "camera_calibration" / "search_pass" / "camera_calibration_report.json"
+        destination
+        / "camera_calibration"
+        / "search_pass"
+        / "camera_calibration_report.json"
     )
     camera_final_report = (
         destination / "camera_calibration" / "camera_calibration_report.json"
@@ -627,11 +628,9 @@ def _verified_partial_live_resume_available(
     if foreground_annotations is None:
         if stored_foreground_annotations.exists():
             return False
-    elif (
-        not stored_foreground_annotations.is_file()
-        or sha256_file(stored_foreground_annotations)
-        != sha256_file(foreground_annotations)
-    ):
+    elif not stored_foreground_annotations.is_file() or sha256_file(
+        stored_foreground_annotations
+    ) != sha256_file(foreground_annotations):
         return False
 
     try:
@@ -662,10 +661,8 @@ def _verified_partial_live_resume_available(
                 "qwen-local-inference-ledger/v1",
                 "qwen-local-inference-ledger/v2",
             }
-            or qwen_ledger.get("requested_model_family")
-            != config.qwen_model_family
-            or qwen_ledger.get("requested_model_revision")
-            != config.qwen_model_revision
+            or qwen_ledger.get("requested_model_family") != config.qwen_model_family
+            or qwen_ledger.get("requested_model_revision") != config.qwen_model_revision
             or not isinstance(model_identity, dict)
             or not isinstance(qwen_ledger.get("integrity"), dict)
         ):
@@ -708,17 +705,12 @@ def _verified_partial_live_resume_available(
                 "max_new_tokens_ceiling": config.qwen_max_new_tokens_ceiling,
                 "truncation_growth_factor": 2,
                 "retry_condition": "token_limit_reached_without_eos",
-                "minimum_usable_views": (
-                    config.qwen_minimum_usable_palette_views
-                ),
+                "minimum_usable_views": (config.qwen_minimum_usable_palette_views),
                 "minimum_usable_view_ratio": (
                     config.qwen_minimum_usable_palette_view_ratio
                 ),
             }
-            if (
-                qwen_ledger.get("palette_generation_policy")
-                != expected_palette_policy
-            ):
+            if qwen_ledger.get("palette_generation_policy") != expected_palette_policy:
                 return False
     source_views = reference_manifest.get("source_views")
     if not isinstance(source_views, list) or len(source_views) != len(references):
@@ -763,9 +755,7 @@ def _verified_partial_live_resume_available(
         or len(ledger_views) != len(references)
     ):
         return False
-    for view, manifest_view in zip(
-        ledger_views, source_views, strict=True
-    ):
+    for view, manifest_view in zip(ledger_views, source_views, strict=True):
         model_image = Path(str(manifest_view["image"])).expanduser().resolve()
         if (
             not isinstance(view, dict)
@@ -832,12 +822,6 @@ def _verified_partial_live_resume_available(
         # outputs. Treat that mixture as stale instead of guessing provenance.
         return False
     return True
-
-
-
-
-
-
 
 
 def _bundled_project_apply_command(
@@ -984,12 +968,9 @@ def _run_bundled_project_assignment(
         or not isinstance(raw_parts, list)
         or not isinstance(assignments, list)
         or not isinstance(plan_provenance, dict)
-        or plan_provenance.get("template_sha256")
-        != project.document["template_sha256"]
-        or audit_document.get("plan_sha256")
-        != canonical_sha256(plan_document)
-        or unattended_document.get("audit_sha256")
-        != canonical_sha256(audit_document)
+        or plan_provenance.get("template_sha256") != project.document["template_sha256"]
+        or audit_document.get("plan_sha256") != canonical_sha256(plan_document)
+        or unattended_document.get("audit_sha256") != canonical_sha256(audit_document)
     ):
         raise RuntimeError(
             f"Bundled project {project.asset_id!r} did not pass its replay audit"
@@ -1015,10 +996,8 @@ def _run_bundled_project_assignment(
         )
 
     if (
-        sha256_file(project.template)
-        != project.document["template_sha256"]
-        or sha256_file(project.catalog)
-        != project.document["catalog_sha256"]
+        sha256_file(project.template) != project.document["template_sha256"]
+        or sha256_file(project.catalog) != project.document["catalog_sha256"]
     ):
         raise RuntimeError(
             f"Bundled project {project.asset_id!r} template/catalog changed "
@@ -1041,9 +1020,7 @@ def _run_bundled_project_assignment(
             "between matching and application"
         )
     write_object(dependency_verification_report, dependency_verification)
-    dependency_verification_report_sha256 = sha256_file(
-        dependency_verification_report
-    )
+    dependency_verification_report_sha256 = sha256_file(dependency_verification_report)
 
     evidence_document = {
         "schema_version": "qwen-bundled-project-evidence/v1",
@@ -1056,8 +1033,7 @@ def _run_bundled_project_assignment(
         "project_sha256": sha256_file(project.project_file),
         "source_cad_sha256": sha256_file(source_cad),
         "reference_sha256": {
-            reference_id: sha256_file(path)
-            for reference_id, path in parsed_references
+            reference_id: sha256_file(path) for reference_id, path in parsed_references
         },
         "template": str(project.template),
         "template_sha256": sha256_file(project.template),
@@ -1067,9 +1043,7 @@ def _run_bundled_project_assignment(
         "dependency_lock": str(project.dependency_lock),
         "dependency_lock_sha256": dependency_verification["lock_sha256"],
         "dependency_lock_verification": dependency_verification,
-        "dependency_lock_verification_status": dependency_verification[
-            "status"
-        ],
+        "dependency_lock_verification_status": dependency_verification["status"],
         "dependency_lock_verification_report": str(
             dependency_verification_report.resolve(strict=True)
         ),
@@ -1079,9 +1053,7 @@ def _run_bundled_project_assignment(
         "plan_sha256": canonical_sha256(plan_document),
         "audit_sha256": canonical_sha256(audit_document),
         "source_representation_id": project.source_representation_id,
-        "source_registry_topology_role": (
-            project.source_registry_topology_role
-        ),
+        "source_registry_topology_role": (project.source_registry_topology_role),
         "live_inference_repeated": False,
         "historical_parameter_policy": dependency_verification[
             "historical_parameter_policy"
@@ -1216,9 +1188,7 @@ def _run_bundled_project_assignment(
         "material_project_manifest": str(project.project_file),
         "material_project_manifest_sha256": sha256_file(project.project_file),
         "material_project_acceptance": copy.deepcopy(project.acceptance),
-        "material_project_acceptance_sha256": canonical_sha256(
-            project.acceptance
-        ),
+        "material_project_acceptance_sha256": canonical_sha256(project.acceptance),
         "material_project_acceptance_evidence": copy.deepcopy(
             project.acceptance_evidence
         ),
@@ -1228,9 +1198,7 @@ def _run_bundled_project_assignment(
         "dependency_lock_verified": True,
         "dependency_lock": str(project.dependency_lock),
         "dependency_lock_sha256": dependency_verification["lock_sha256"],
-        "dependency_lock_verification_status": dependency_verification[
-            "status"
-        ],
+        "dependency_lock_verification_status": dependency_verification["status"],
         "dependency_lock_verification_report": str(
             dependency_verification_report.resolve(strict=True)
         ),
@@ -1238,9 +1206,7 @@ def _run_bundled_project_assignment(
             dependency_verification_report_sha256
         ),
         "source_representation_id": project.source_representation_id,
-        "source_registry_topology_role": (
-            project.source_registry_topology_role
-        ),
+        "source_registry_topology_role": (project.source_registry_topology_role),
         "complete_coverage_required": True,
         "source_registry": str(source_registry.resolve(strict=True)),
         "registry": str(registry.resolve(strict=True)),
@@ -1275,12 +1241,6 @@ def _run_bundled_project_assignment(
             preview_rendered_registry.resolve(strict=True)
         ),
     }
-
-
-
-
-
-
 
 
 @dataclass(frozen=True)
@@ -1411,9 +1371,12 @@ def _validate_catalog_family_first_result(
             species = species.casefold()
             treatment = treatment.casefold()
             optical = optical.casefold()
-            selected_substrates, selected_treatment, selected_optical, selected_confidence = (
-                identity_semantics(material_id)
-            )
+            (
+                selected_substrates,
+                selected_treatment,
+                selected_optical,
+                selected_confidence,
+            ) = identity_semantics(material_id)
             selected_species = _catalog_material_species(
                 material_id,
                 selected_catalog_row,
@@ -1437,8 +1400,7 @@ def _validate_catalog_family_first_result(
                 or selected_confidence == "low"
                 or (
                     species != "unknown"
-                    and float(species_confidence)
-                    >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
+                    and float(species_confidence) >= MINIMUM_MATERIAL_SPECIES_CONFIDENCE
                     and selected_species != species
                 )
                 or (
@@ -1530,9 +1492,7 @@ def _validate_catalog_family_first_result(
         raw_scopes = repeated.get("final_component_scopes")
         raw_structures = repeated.get("structures")
         if not isinstance(raw_scopes, list) or not isinstance(raw_structures, list):
-            raise RuntimeError(
-                "Part-ID Qwen repeated-assembly audit is incomplete"
-            )
+            raise RuntimeError("Part-ID Qwen repeated-assembly audit is incomplete")
         final_scopes: dict[str, tuple[str, list[str]]] = {}
         for raw_scope in raw_scopes:
             component_id = (
@@ -1607,9 +1567,7 @@ def _validate_catalog_family_first_result(
                 )
             for raw_role in raw_roles:
                 status = (
-                    raw_role.get("status")
-                    if isinstance(raw_role, Mapping)
-                    else None
+                    raw_role.get("status") if isinstance(raw_role, Mapping) else None
                 )
                 member_ids = (
                     raw_role.get("observed_member_part_ids")
@@ -1814,9 +1772,7 @@ def _run_policy_part_id_stage(
             policy=policy_input,
             output_plan=policy_plan,
             audit=policy_audit,
-            immutable_mdl_after_selection=(
-                config.immutable_mdl_after_selection
-            ),
+            immutable_mdl_after_selection=(config.immutable_mdl_after_selection),
         )
         policy_checkpoint_resume = (
             completed_inference_resume
@@ -1976,9 +1932,7 @@ def _run_policy_part_id_stage(
         for stale_dir in (part_id_coarse_evidence_dir, part_id_evidence_dir):
             if stale_dir.exists() or stale_dir.is_symlink():
                 archived = unique_path(
-                    analysis_dir
-                    / "recovery_archive"
-                    / f"stale_{stale_dir.name}"
+                    analysis_dir / "recovery_archive" / f"stale_{stale_dir.name}"
                 )
                 archived.parent.mkdir(parents=True, exist_ok=True)
                 stale_dir.rename(archived)
@@ -2124,9 +2078,7 @@ def _run_policy_part_id_stage(
                 palette_fusion=palette_fusion_document,
                 part_id_evidence=evidence_document,
                 acknowledge_policy_fallback=True,
-                immutable_mdl_after_selection=(
-                    config.immutable_mdl_after_selection
-                ),
+                immutable_mdl_after_selection=(config.immutable_mdl_after_selection),
             )
         except PolicyExactCoverError as exc:
             raise RuntimeError(
@@ -2182,9 +2134,7 @@ def _run_policy_part_id_stage(
             )
         retrieval_command = [
             str(config.retrieval_python),
-            str(
-                ProjectLayout.from_root(root_dir()).material_retrieval_script
-            ),
+            str(ProjectLayout.from_root(root_dir()).material_retrieval_script),
             "--request",
             str(part_id_retrieval_request),
             "--siglip2-model",
@@ -2371,14 +2321,15 @@ def _run_policy_part_id_stage(
             raw_components = candidate_component_document.get("components")
             if isinstance(raw_components, list) and raw_components:
                 try:
-                    component_evidence_document, component_retrieval_request_document = (
-                        build_component_material_inputs(
-                            appearance_components=candidate_component_document,
-                            part_id_evidence=evidence_document,
-                            catalog=effective_catalog,
-                            material_root=config.material_root,
-                            output_dir=appearance_component_input_dir,
-                        )
+                    (
+                        component_evidence_document,
+                        component_retrieval_request_document,
+                    ) = build_component_material_inputs(
+                        appearance_components=candidate_component_document,
+                        part_id_evidence=evidence_document,
+                        catalog=effective_catalog,
+                        material_root=config.material_root,
+                        output_dir=appearance_component_input_dir,
                     )
                 except AppearanceComponentMaterialError as exc:
                     raise RuntimeError(
@@ -2405,11 +2356,7 @@ def _run_policy_part_id_stage(
                     )
                 component_retrieval_command = [
                     str(config.retrieval_python),
-                    str(
-                        ProjectLayout.from_root(
-                            root_dir()
-                        ).material_retrieval_script
-                    ),
+                    str(ProjectLayout.from_root(root_dir()).material_retrieval_script),
                     "--request",
                     str(appearance_component_retrieval_request),
                     "--siglip2-model",
@@ -2516,16 +2463,17 @@ def _run_policy_part_id_stage(
             and appearance_component_qwen_document is not None
         ):
             try:
-                direct_plan_document, direct_audit_document = (
-                    apply_fixed_component_mdl_choices(
-                        base_plan=direct_plan_document,
-                        base_audit=direct_audit_document,
-                        appearance_components=appearance_component_document,
-                        part_id_evidence=evidence_document,
-                        component_evidence=component_evidence_document,
-                        component_retrieval=appearance_component_retrieval_document,
-                        component_qwen_choices=appearance_component_qwen_document,
-                    )
+                (
+                    direct_plan_document,
+                    direct_audit_document,
+                ) = apply_fixed_component_mdl_choices(
+                    base_plan=direct_plan_document,
+                    base_audit=direct_audit_document,
+                    appearance_components=appearance_component_document,
+                    part_id_evidence=evidence_document,
+                    component_evidence=component_evidence_document,
+                    component_retrieval=appearance_component_retrieval_document,
+                    component_qwen_choices=appearance_component_qwen_document,
                 )
             except AppearanceComponentMaterialError as exc:
                 raise RuntimeError(
@@ -2806,6 +2754,7 @@ class VisualQaStageResult:
     spatial_report_path: Path
     parameter_tournament_document: dict[str, Any] | None
     component_actual_mdl_tournament_document: dict[str, Any] | None
+    corresponding_color_calibration_document: dict[str, Any] | None
     trusted_mapping: dict[str, str]
     raw_quality_status: Any
     quality_status: str
@@ -2867,8 +2816,7 @@ def _run_visual_qa_stage(
     plan = planning.plan
     assignments = planning.assignments
     completed_inference_resume = (
-        context.partial_live_resume
-        and workspace.inference.unattended_result.is_file()
+        context.partial_live_resume and workspace.inference.unattended_result.is_file()
     )
     analysis_dir = workspace.inference.root
     mvinverse_pbr_evidence = workspace.inference.mvinverse_pbr_evidence
@@ -2923,6 +2871,7 @@ def _run_visual_qa_stage(
     membership_tournament_instance_plan = legacy_paths.membership_instance_plan
     membership_tournament_audit = legacy_paths.membership_audit
     _command_runner = command_runner
+    corresponding_color_calibration_document: dict[str, Any] | None = None
 
     _run_stage(
         "quality_registry",
@@ -2979,6 +2928,141 @@ def _run_visual_qa_stage(
         retry_native_crash=True,
     )
     _require_file(quality_rendered_registry, "quality_render")
+
+    corresponding_part_ids: tuple[str, ...] = ()
+    if config.corresponding_color_calibration_mode == "adaptive_actual_cad":
+        corresponding_part_ids = corresponding_material_part_ids(
+            read_object(
+                part_id_paths.qwen_result,
+                "material-identity Qwen choices for colour calibration",
+            )
+        )
+        if not corresponding_part_ids:
+            log_message(
+                log_cb,
+                "All photo-observed material selections are exact library "
+                "presets; corresponding-material colour calibration is not "
+                "required.",
+            )
+        else:
+            log_message(
+                log_cb,
+                "Corresponding-material colour eligibility: "
+                f"{len(corresponding_part_ids)} Part IDs. Exact presets and "
+                "unobserved policy fallbacks remain unchanged.",
+            )
+    if (
+        config.corresponding_color_calibration_mode == "adaptive_actual_cad"
+        and corresponding_part_ids
+    ):
+        if instance_root_count:
+            raise RuntimeError(
+                "Adaptive corresponding-material colour calibration does not "
+                "yet support occurrence-instance authoring; refusing to change "
+                "the identity-fixed plan"
+            )
+        color_paths = workspace.corresponding_color
+        if color_paths.root.exists() or color_paths.root.is_symlink():
+            raise RuntimeError(
+                "Corresponding-material colour calibration requires a fresh "
+                f"stage directory: {color_paths.root}"
+            )
+        color_command_index = 0
+
+        def run_color_command(
+            command: Sequence[str],
+            _log_path: Path,
+            _environment: Mapping[str, str],
+            _timeout_seconds: int,
+        ) -> None:
+            nonlocal color_command_index
+            color_command_index += 1
+            _run_stage(
+                f"corresponding_material_color_{color_command_index:02d}",
+                [str(value) for value in command],
+                log_cb,
+                command_runner=_command_runner,
+                retry_native_crash=True,
+            )
+
+        log_message(
+            log_cb,
+            "Material identities are fixed. Starting automatic per-scope colour "
+            "calibration only for corresponding-material assignments; exact "
+            "library presets remain untouched.",
+        )
+        try:
+            run_corresponding_material_color_workflow(
+                source_plan_path=effective_material_plan,
+                qwen_choices_path=part_id_paths.qwen_result,
+                part_id_evidence_path=part_id_evidence_path,
+                spatial_mapping_report_path=(
+                    analysis_dir / "spatial_mapping_report.json"
+                ),
+                asset_usd_path=Path(apply_asset),
+                catalog_path=effective_catalog,
+                registry_path=rendered_registry,
+                material_root_path=config.material_root,
+                view_specs_path=quality_camera_view_specs,
+                reference_manifest_path=(analysis_dir / "reference_manifest.json"),
+                isaac_python_path=isaac,
+                output_dir=color_paths.root,
+                max_adaptive_iterations=(config.corresponding_color_max_iterations),
+                resolution=config.render_resolution,
+                rt_subframes=config.render_rt_subframes,
+                command_runner=run_color_command,
+            )
+        except CorrespondingMaterialColorWorkflowError as exc:
+            raise RuntimeError(
+                "Identity-preserving corresponding-material colour calibration "
+                f"failed closed: {exc}"
+            ) from exc
+        color_result = validate_corresponding_color_result(
+            manifest_path=color_paths.manifest,
+            source_plan_path=effective_material_plan,
+            qwen_choices_path=part_id_paths.qwen_result,
+            part_id_evidence_path=part_id_evidence_path,
+            spatial_mapping_report_path=(analysis_dir / "spatial_mapping_report.json"),
+            asset_usd_path=Path(apply_asset),
+            catalog_path=effective_catalog,
+            registry_path=rendered_registry,
+            material_root_path=config.material_root,
+            view_specs_path=quality_camera_view_specs,
+            reference_manifest_path=(analysis_dir / "reference_manifest.json"),
+            isaac_python_path=isaac,
+            selected_plan_path=color_paths.selected_plan,
+            selection_audit_path=color_paths.selection_audit,
+            look_usd_path=color_paths.look_usd,
+            apply_report_path=color_paths.apply_report,
+            registry_output_path=color_paths.registry,
+            rendered_registry_path=color_paths.rendered_registry,
+            quality_report_path=color_paths.quality_report,
+        )
+        corresponding_color_calibration_document = color_result.manifest
+        rebound_part_id_audit = rebind_part_id_audit_for_corresponding_color(
+            source_audit=read_object(
+                part_id_material_audit,
+                "identity-fixed Part-ID material audit",
+            ),
+            source_plan=plan,
+            final_plan=color_result.selected_plan,
+            selection_audit=color_result.selection_audit,
+        )
+        write_object(part_id_material_audit, rebound_part_id_audit)
+        effective_material_plan = color_paths.selected_plan
+        plan = color_result.selected_plan
+        assignments = plan["assignments"]
+        look_usd = color_paths.look_usd
+        apply_report = color_paths.apply_report
+        quality_rendered_registry = color_paths.rendered_registry
+        applied_count = color_result.applied_count
+        log_message(
+            log_cb,
+            "Automatic corresponding-material colour calibration completed: "
+            f"iterations={len(color_result.manifest.get('candidates', []))}; "
+            "MDL identity changes=0. The main all-view QA will now independently "
+            "re-evaluate the selected actual-CAD render.",
+        )
 
     spatial_report_path = analysis_dir / "spatial_mapping_report.json"
     parameter_tournament_document: dict[str, Any] | None = None
@@ -3159,15 +3243,16 @@ def _run_visual_qa_stage(
                 )
 
             try:
-                parameter_tournament_plan_document, parameter_tournament_document = (
-                    select_parameter_tournament_winners(
-                        source_plan=plan,
-                        baseline_scores=baseline_parameter_scores,
-                        h1_scores=h1_parameter_scores,
-                        minimum_score_improvement=(
-                            config.exact_mdl_tournament_minimum_score_improvement
-                        ),
-                    )
+                (
+                    parameter_tournament_plan_document,
+                    parameter_tournament_document,
+                ) = select_parameter_tournament_winners(
+                    source_plan=plan,
+                    baseline_scores=baseline_parameter_scores,
+                    h1_scores=h1_parameter_scores,
+                    minimum_score_improvement=(
+                        config.exact_mdl_tournament_minimum_score_improvement
+                    ),
                 )
                 rebound_part_id_audit = rebind_part_id_material_audit(
                     source_audit=read_object(
@@ -3214,9 +3299,9 @@ def _run_visual_qa_stage(
                         "registry_sha256": canonical_sha256(rendered_registry_document),
                     }
                 )
-                final_parameter_instance_document["provenance"] = (
-                    sealed_final_parameter_provenance
-                )
+                final_parameter_instance_document[
+                    "provenance"
+                ] = sealed_final_parameter_provenance
                 write_object(
                     final_parameter_apply_plan,
                     final_parameter_instance_document,
@@ -3354,7 +3439,9 @@ def _run_visual_qa_stage(
             component_qwen_document.get("visual_compatibility_gate", {}).get(
                 "parts", []
             )
-            if isinstance(component_qwen_document.get("visual_compatibility_gate"), Mapping)
+            if isinstance(
+                component_qwen_document.get("visual_compatibility_gate"), Mapping
+            )
             else []
         )
         if not isinstance(raw_selections, list) or not isinstance(
@@ -3673,9 +3760,7 @@ def _run_visual_qa_stage(
             "selection_authority": "registered_actual_cad_render",
             "mdl_parameter_mutation_allowed": False,
             "minimum_component_pixels": minimum_component_pixels,
-            "minimum_component_appearance_score": (
-                minimum_component_appearance_score
-            ),
+            "minimum_component_appearance_score": (minimum_component_appearance_score),
             "maximum_candidates_per_component": min(
                 4, config.exact_mdl_tournament_max_candidates
             ),
@@ -3718,7 +3803,8 @@ def _run_visual_qa_stage(
             final_component_apply_plan = effective_material_plan
             if instance_root_count:
                 final_component_apply_plan = (
-                    destination / "appearance_component_actual_mdl_tournament_instance_plan.json"
+                    destination
+                    / "appearance_component_actual_mdl_tournament_instance_plan.json"
                 )
                 final_component_instance_document = copy.deepcopy(plan)
                 final_component_provenance = final_component_instance_document.get(
@@ -3735,9 +3821,9 @@ def _run_visual_qa_stage(
                         "registry_sha256": canonical_sha256(rendered_registry_document),
                     }
                 )
-                final_component_instance_document["provenance"] = (
-                    sealed_final_component_provenance
-                )
+                final_component_instance_document[
+                    "provenance"
+                ] = sealed_final_component_provenance
                 write_object(
                     final_component_apply_plan,
                     final_component_instance_document,
@@ -3899,12 +3985,12 @@ def _run_visual_qa_stage(
         and workspace.source.camera_acceptance.is_file()
     ):
         try:
-            quality["part_id_quality_scope"] = (
-                _part_id_quality_scope_from_camera_alignment(
-                    read_object(
-                        workspace.source.camera_acceptance,
-                        "camera alignment acceptance",
-                    )
+            quality[
+                "part_id_quality_scope"
+            ] = _part_id_quality_scope_from_camera_alignment(
+                read_object(
+                    workspace.source.camera_acceptance,
+                    "camera alignment acceptance",
                 )
             )
         except ValueError as exc:
@@ -4118,9 +4204,9 @@ def _run_visual_qa_stage(
                         config.material_selection_objective
                         == MATERIAL_SELECTION_OBJECTIVE_VISUAL
                     ):
-                        expected_checkpoint_hashes["material_selection_objective"] = (
-                            config.material_selection_objective
-                        )
+                        expected_checkpoint_hashes[
+                            "material_selection_objective"
+                        ] = config.material_selection_objective
                     repair_checkpoint_valid = bool(
                         checkpoint_audit.get("schema_version")
                         == QUALITY_REPAIR_REPORT_SCHEMA_VERSION
@@ -4599,6 +4685,9 @@ def _run_visual_qa_stage(
         component_actual_mdl_tournament_document=(
             component_actual_mdl_tournament_document
         ),
+        corresponding_color_calibration_document=(
+            corresponding_color_calibration_document
+        ),
         trusted_mapping=trusted_mapping,
         raw_quality_status=raw_quality_status,
         quality_status=quality_status,
@@ -4606,9 +4695,7 @@ def _run_visual_qa_stage(
         effective_look_usd=effective_look_usd,
         effective_apply_report=effective_apply_report,
         effective_quality_report=effective_quality_report,
-        effective_quality_rendered_registry=(
-            effective_quality_rendered_registry
-        ),
+        effective_quality_rendered_registry=(effective_quality_rendered_registry),
         quality_repair_used=quality_repair_used,
         quality_repair_changed_count=quality_repair_changed_count,
         quality_round_count=quality_round_count,
@@ -4692,9 +4779,7 @@ def _run_material_selection_stage(
     effective_look_usd = visual_qa.effective_look_usd
     effective_apply_report = visual_qa.effective_apply_report
     effective_quality_report = visual_qa.effective_quality_report
-    effective_quality_rendered_registry = (
-        visual_qa.effective_quality_rendered_registry
-    )
+    effective_quality_rendered_registry = visual_qa.effective_quality_rendered_registry
     quality_render_view_arguments = visual_qa.quality_render_view_arguments
     spatial_report_path = visual_qa.spatial_report_path
     trusted_mapping = visual_qa.trusted_mapping
@@ -5071,18 +5156,19 @@ def _run_material_selection_stage(
                         f"incomplete; physics was not started: {exc}"
                     ) from exc
             try:
-                planned_candidates, round_planning = (
-                    build_exact_mdl_group_candidate_plans(
-                        source_plan=current_plan_document,
-                        group_id=group_id,
-                        target_part_ids=target_part_ids,
-                        target_entities=target_entities,
-                        candidate_document=candidate_document,
-                        allowed_material_ids=allowed_material_ids,
-                        maximum_candidates=(config.exact_mdl_tournament_max_candidates),
-                        selection_objective=(config.material_selection_objective),
-                        allowed_families=set(group_spec.get("allowed_families", [])),
-                    )
+                (
+                    planned_candidates,
+                    round_planning,
+                ) = build_exact_mdl_group_candidate_plans(
+                    source_plan=current_plan_document,
+                    group_id=group_id,
+                    target_part_ids=target_part_ids,
+                    target_entities=target_entities,
+                    candidate_document=candidate_document,
+                    allowed_material_ids=allowed_material_ids,
+                    maximum_candidates=(config.exact_mdl_tournament_max_candidates),
+                    selection_objective=(config.material_selection_objective),
+                    allowed_families=set(group_spec.get("allowed_families", [])),
                 )
             except MultigroupExactMdlTournamentError as exc:
                 raise RuntimeError(
@@ -5590,19 +5676,18 @@ def _run_material_selection_stage(
                 f"{tournament_candidate_total}"
             )
         try:
-            selected_plan_document, tournament_audit_document = (
-                finalize_multigroup_exact_mdl_plan(
-                    initial_plan=read_object(
-                        visual_group_annotated_plan,
-                        "annotated tournament baseline plan",
-                    ),
-                    current_plan=current_plan_document,
-                    significant_group_ids=[
-                        str(group["group_id"]) for group in group_queue
-                    ],
-                    round_audits=round_audits,
-                    selection_objective=(config.material_selection_objective),
-                )
+            (
+                selected_plan_document,
+                tournament_audit_document,
+            ) = finalize_multigroup_exact_mdl_plan(
+                initial_plan=read_object(
+                    visual_group_annotated_plan,
+                    "annotated tournament baseline plan",
+                ),
+                current_plan=current_plan_document,
+                significant_group_ids=[str(group["group_id"]) for group in group_queue],
+                round_audits=round_audits,
+                selection_objective=(config.material_selection_objective),
             )
         except MultigroupExactMdlTournamentError as exc:
             raise RuntimeError(
@@ -5820,16 +5905,17 @@ def _run_material_selection_stage(
             )
         }
         try:
-            planned_candidates, planning_document = (
-                build_bounded_exact_mdl_candidate_plans(
-                    source_plan=current_plan_document,
-                    material_candidates_by_group=material_candidates_by_group,
-                    material_choice_audit=material_choice_document,
-                    palette_fusion=palette_fusion_document,
-                    allowed_material_ids=set(material_families_by_id),
-                    maximum_candidates=(config.exact_mdl_tournament_max_candidates),
-                    selection_objective=config.material_selection_objective,
-                )
+            (
+                planned_candidates,
+                planning_document,
+            ) = build_bounded_exact_mdl_candidate_plans(
+                source_plan=current_plan_document,
+                material_candidates_by_group=material_candidates_by_group,
+                material_choice_audit=material_choice_document,
+                palette_fusion=palette_fusion_document,
+                allowed_material_ids=set(material_families_by_id),
+                maximum_candidates=(config.exact_mdl_tournament_max_candidates),
+                selection_objective=config.material_selection_objective,
             )
         except ExactMdlTournamentError as exc:
             raise RuntimeError(
@@ -6287,16 +6373,17 @@ def _run_material_selection_stage(
             palette_fusion=palette_fusion_document,
         )
         try:
-            selected_plan_document, tournament_audit_document = (
-                select_and_replay_exact_mdl_candidate(
-                    baseline_plan=baseline_candidate_plan,
-                    target_plan=current_plan_document,
-                    candidates=rendered_candidate_bundles,
-                    allowed_material_ids=set(material_families_by_id),
-                    material_families_by_id=material_families_by_id,
-                    allowed_families_by_part=family_contract,
-                    selection_objective=config.material_selection_objective,
-                )
+            (
+                selected_plan_document,
+                tournament_audit_document,
+            ) = select_and_replay_exact_mdl_candidate(
+                baseline_plan=baseline_candidate_plan,
+                target_plan=current_plan_document,
+                candidates=rendered_candidate_bundles,
+                allowed_material_ids=set(material_families_by_id),
+                material_families_by_id=material_families_by_id,
+                allowed_families_by_part=family_contract,
+                selection_objective=config.material_selection_objective,
             )
         except ExactMdlTournamentError as exc:
             exact_mdl_tournament_status = "NO_ELIGIBLE_CANDIDATE"
@@ -6627,9 +6714,9 @@ def _run_material_selection_stage(
                                 ),
                             }
                         )
-                        candidate_instance_document["provenance"] = (
-                            sealed_candidate_provenance
-                        )
+                        candidate_instance_document[
+                            "provenance"
+                        ] = sealed_candidate_provenance
                         write_object(
                             appearance_candidate_instance_plan,
                             candidate_instance_document,
@@ -6999,9 +7086,7 @@ def _run_material_selection_stage(
         effective_look_usd=effective_look_usd,
         effective_apply_report=effective_apply_report,
         effective_quality_report=effective_quality_report,
-        effective_quality_rendered_registry=(
-            effective_quality_rendered_registry
-        ),
+        effective_quality_rendered_registry=(effective_quality_rendered_registry),
         applied_count=applied_count,
         quality_status=quality_status,
         quality_gate_status=quality_gate_status,
@@ -7060,6 +7145,9 @@ def _run_finalize_assignment_stage(
     component_actual_mdl_tournament_document = (
         visual_qa.component_actual_mdl_tournament_document
     )
+    corresponding_color_calibration_document = (
+        visual_qa.corresponding_color_calibration_document
+    )
     raw_quality_status = visual_qa.raw_quality_status
     part_id_quality_gate_document = visual_qa.part_id_quality_gate_document
     quality_repair_used = visual_qa.quality_repair_used
@@ -7067,9 +7155,7 @@ def _run_finalize_assignment_stage(
     quality_repair_round_count = visual_qa.quality_repair_round_count
     membership_tournament_status = visual_qa.membership_tournament_status
     membership_tournament_cohort_count = visual_qa.membership_tournament_cohort_count
-    membership_selected_expanded_count = (
-        visual_qa.membership_selected_expanded_count
-    )
+    membership_selected_expanded_count = visual_qa.membership_selected_expanded_count
     membership_restored_m0_count = visual_qa.membership_restored_m0_count
     apply_subcommand = look.apply_subcommand
     apply_asset_flag = look.apply_asset_flag
@@ -7078,9 +7164,7 @@ def _run_finalize_assignment_stage(
     effective_look_usd = selection.effective_look_usd
     effective_apply_report = selection.effective_apply_report
     effective_quality_report = selection.effective_quality_report
-    effective_quality_rendered_registry = (
-        selection.effective_quality_rendered_registry
-    )
+    effective_quality_rendered_registry = selection.effective_quality_rendered_registry
     applied_count = selection.applied_count
     quality_status = selection.quality_status
     quality_gate_status = selection.quality_gate_status
@@ -7362,6 +7446,9 @@ def _run_finalize_assignment_stage(
                 plan=final_plan_document,
                 catalog_path=effective_catalog,
                 material_root=config.material_root,
+                allow_reviewed_color_parameters=(
+                    config.corresponding_color_calibration_mode == "adaptive_actual_cad"
+                ),
             )
         except ValueError as exc:
             raise RuntimeError(
@@ -7440,9 +7527,9 @@ def _run_finalize_assignment_stage(
         log_message(
             log_cb,
             "Render-guided MDL selection is complete and immutable. Library "
-            "exports, library-default parameters, face subsets, catalog content, "
-            "and source MDL modules are sealed; no later material mutation is "
-            "permitted.",
+            "exports, selected MDL identities, audited parameter values, face "
+            "subsets, catalog content, and source MDL modules are sealed; no "
+            "later material mutation is permitted.",
         )
     selection_lock_verified = False
     if selection_lock_document is not None:
@@ -7735,6 +7822,12 @@ def _run_finalize_assignment_stage(
         "material_parameter_candidate_mode": (config.material_parameter_candidate_mode),
         "material_prediction_mode": config.material_prediction_mode,
         "material_identity_local_context": config.material_identity_local_context,
+        "corresponding_color_calibration_mode": (
+            config.corresponding_color_calibration_mode
+        ),
+        "corresponding_color_max_iterations": (
+            config.corresponding_color_max_iterations
+        ),
         "part_id_parameter_tournament": (
             str(part_id_parameter_tournament_audit.resolve(strict=True))
             if part_id_parameter_tournament_audit.is_file()
@@ -7763,6 +7856,21 @@ def _run_finalize_assignment_stage(
         "appearance_component_actual_mdl_tournament_winner_count": (
             component_actual_mdl_tournament_document["winner_count"]
             if component_actual_mdl_tournament_document is not None
+            else 0
+        ),
+        "corresponding_material_color_calibration": (
+            str(workspace.corresponding_color.manifest.resolve(strict=True))
+            if corresponding_color_calibration_document is not None
+            else None
+        ),
+        "corresponding_material_color_calibration_status": (
+            corresponding_color_calibration_document.get("workflow_state")
+            if corresponding_color_calibration_document is not None
+            else "NOT_REQUIRED"
+        ),
+        "corresponding_material_color_calibration_candidate_count": (
+            len(corresponding_color_calibration_document.get("candidates", []))
+            if corresponding_color_calibration_document is not None
             else 0
         ),
         "material_selection_objective": config.material_selection_objective,

@@ -125,6 +125,39 @@ class QualityRoundArtifacts:
 
 
 @dataclass(frozen=True)
+class CorrespondingColorArtifacts:
+    """Identity-preserving, actual-CAD colour-calibration outputs."""
+
+    root: Path
+    manifest: Path
+    selected_plan: Path
+    selection_audit: Path
+    look_usd: Path
+    apply_report: Path
+    registry: Path
+    rendered_registry: Path
+    quality_report: Path
+
+    @classmethod
+    def create(cls, destination: Path) -> "CorrespondingColorArtifacts":
+        root = destination / "material_identity_color"
+        selected = root / "final_selected"
+        return cls(
+            root=root,
+            manifest=root / "workflow_manifest.json",
+            selected_plan=(selected / "part_id_material_plan.color.selected.json"),
+            selection_audit=(
+                selected / "corresponding_material_color_selection_audit.json"
+            ),
+            look_usd=selected / "material_look.usda",
+            apply_report=selected / "apply_report.json",
+            registry=selected / "part_registry.json",
+            rendered_registry=(selected / "renders" / "part_registry.rendered.json"),
+            quality_report=selected / "reference_render_comparison.json",
+        )
+
+
+@dataclass(frozen=True)
 class LookArtifacts:
     """Authored Look layers and their apply reports."""
 
@@ -368,6 +401,7 @@ class VisualMaterialWorkspace:
     look: LookArtifacts
     quality: QualityRoundArtifacts
     repaired_quality: QualityRoundArtifacts
+    corresponding_color: CorrespondingColorArtifacts
     part_id: PartIdArtifacts
     appearance: AppearanceArtifacts
     legacy: LegacyOptimizationArtifacts
@@ -390,6 +424,7 @@ class VisualMaterialWorkspace:
             repaired_quality=QualityRoundArtifacts.create(
                 destination / "visual_quality_repair"
             ),
+            corresponding_color=CorrespondingColorArtifacts.create(destination),
             part_id=PartIdArtifacts.create(destination, inference.root),
             appearance=AppearanceArtifacts.create(destination, inference.root),
             legacy=LegacyOptimizationArtifacts.create(
@@ -405,6 +440,7 @@ class VisualMaterialWorkspace:
 
 __all__ = [
     "AppearanceArtifacts",
+    "CorrespondingColorArtifacts",
     "InferenceArtifacts",
     "LegacyOptimizationArtifacts",
     "LookArtifacts",

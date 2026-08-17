@@ -18,10 +18,15 @@ from pathlib import Path
 from typing import Any
 
 from .catalog import MaterialCatalog
+from .tuning import parameter_policy_for_material
+from ..usd.material_common import normalize_material_parameters
 
 
 SCHEMA_VERSION = "qwen-selected-mdl-lock/v1"
 POLICY = "selected_mdl_identity_library_defaults_and_subsets_immutable/v1"
+REVIEWED_COLOR_POLICY = (
+    "selected_mdl_identity_reviewed_color_parameters_and_subsets_immutable/v1"
+)
 
 
 class MaterialSelectionLockError(ValueError):
@@ -54,15 +59,9 @@ def _sha256_file(path: Path) -> str:
 
 def _assignments(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     if plan.get("schema_version") != "1.0":
-        raise MaterialSelectionLockError(
-            "material plan schema_version must be '1.0'"
-        )
+        raise MaterialSelectionLockError("material plan schema_version must be '1.0'")
     raw = plan.get("assignments")
-    if (
-        not isinstance(raw, Sequence)
-        or isinstance(raw, (str, bytes))
-        or not raw
-    ):
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)) or not raw:
         raise MaterialSelectionLockError(
             "material plan must contain non-empty assignments"
         )
@@ -75,11 +74,7 @@ def _assignments(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
             )
         assignment = dict(item)
         part_id = assignment.get("part_id")
-        if (
-            not isinstance(part_id, str)
-            or not part_id
-            or part_id in part_ids
-        ):
+        if not isinstance(part_id, str) or not part_id or part_id in part_ids:
             raise MaterialSelectionLockError(
                 f"material assignment {index} has an invalid/duplicate part_id"
             )
@@ -106,9 +101,7 @@ def _material_ids(assignments: Sequence[Mapping[str, Any]]) -> list[str]:
                 raise MaterialSelectionLockError("face subset must be an object")
             subset_material_id = subset.get("material_id")
             if not isinstance(subset_material_id, str) or not subset_material_id:
-                raise MaterialSelectionLockError(
-                    "face subset material_id is invalid"
-                )
+                raise MaterialSelectionLockError("face subset material_id is invalid")
             result.add(subset_material_id)
     return sorted(result)
 
@@ -128,11 +121,41 @@ def _reject_parameter_overrides(
         for subset in assignment.get("face_subsets", []):
             subset_parameters = subset.get("parameters")
             if subset_parameters is not None and (
-                not isinstance(subset_parameters, Mapping)
-                or bool(subset_parameters)
+                not isinstance(subset_parameters, Mapping) or bool(subset_parameters)
             ):
                 raise MaterialSelectionLockError(
                     "selected face-subset MDL must use library-default "
+                    f"parameters: {part_id}/{subset.get('subset_name')}"
+                )
+
+
+def _validate_reviewed_color_parameters(
+    assignments: Sequence[Mapping[str, Any]],
+) -> None:
+    for assignment in assignments:
+        part_id = str(assignment["part_id"])
+        material_id = assignment.get("material_id")
+        parameters = assignment.get("parameters")
+        if parameters not in (None, {}):
+            if not isinstance(material_id, str) or not isinstance(parameters, Mapping):
+                raise MaterialSelectionLockError(
+                    f"reviewed colour parameters are invalid: {part_id}"
+                )
+            policy = parameter_policy_for_material(material_id)
+            if not policy or set(parameters) - set(policy):
+                raise MaterialSelectionLockError(
+                    f"selected MDL has unreviewed colour parameters: {part_id}"
+                )
+            try:
+                normalize_material_parameters(material_id, dict(parameters))
+            except ValueError as exc:
+                raise MaterialSelectionLockError(
+                    f"selected MDL colour parameters are invalid: {part_id}"
+                ) from exc
+        for subset in assignment.get("face_subsets", []):
+            if subset.get("parameters") not in (None, {}):
+                raise MaterialSelectionLockError(
+                    "reviewed colour calibration cannot author face-subset "
                     f"parameters: {part_id}/{subset.get('subset_name')}"
                 )
 
@@ -142,11 +165,15 @@ def build_material_selection_lock(
     plan: Mapping[str, Any],
     catalog_path: str | Path,
     material_root: str | Path,
+    allow_reviewed_color_parameters: bool = False,
 ) -> dict[str, Any]:
     """Build a deterministic lock for one completed MDL selection."""
 
     assignments = _assignments(plan)
-    _reject_parameter_overrides(assignments)
+    if allow_reviewed_color_parameters:
+        _validate_reviewed_color_parameters(assignments)
+    else:
+        _reject_parameter_overrides(assignments)
     catalog_file = Path(catalog_path).expanduser().resolve(strict=True)
     root = Path(material_root).expanduser().resolve(strict=True)
     catalog = MaterialCatalog.load(catalog_file, material_root=root)
@@ -179,7 +206,7 @@ def build_material_selection_lock(
 
     lock: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "policy": POLICY,
+        "policy": REVIEWED_COLOR_POLICY if allow_reviewed_color_parameters else POLICY,
         "catalog_sha256": _sha256_file(catalog_file),
         "assignment_count": len(assignments),
         "assignments_sha256": _canonical_sha256(assignments),
@@ -194,9 +221,7 @@ def build_material_selection_lock(
             for assignment in assignments
         ],
         "selected_materials": material_records,
-        "selected_mdl_modules": [
-            modules[path] for path in sorted(modules)
-        ],
+        "selected_mdl_modules": [modules[path] for path in sorted(modules)],
         "post_selection_operations": {
             "replace_material_id": False,
             "write_parameters": False,
@@ -205,7 +230,8 @@ def build_material_selection_lock(
             "quality_repair_material_mutation": False,
             "camera_pose_and_quality_measurement_only": True,
         },
-        "selected_mdl_library_defaults_required": True,
+        "selected_mdl_library_defaults_required": (not allow_reviewed_color_parameters),
+        "reviewed_color_parameters_locked": allow_reviewed_color_parameters,
     }
     lock["integrity"] = {
         "lock_sha256": _canonical_sha256(lock),
@@ -222,7 +248,11 @@ def validate_material_selection_lock(
 ) -> dict[str, Any]:
     """Recompute and validate a selected-MDL lock, returning a safe copy."""
 
-    if lock.get("schema_version") != SCHEMA_VERSION or lock.get("policy") != POLICY:
+    policy = lock.get("policy")
+    if lock.get("schema_version") != SCHEMA_VERSION or policy not in {
+        POLICY,
+        REVIEWED_COLOR_POLICY,
+    }:
         raise MaterialSelectionLockError(
             "material selection lock has an unsupported schema or policy"
         )
@@ -238,6 +268,7 @@ def validate_material_selection_lock(
         plan=plan,
         catalog_path=catalog_path,
         material_root=material_root,
+        allow_reviewed_color_parameters=(policy == REVIEWED_COLOR_POLICY),
     )
     if dict(lock) != expected:
         raise MaterialSelectionLockError(
@@ -289,6 +320,7 @@ def main() -> int:
 __all__ = [
     "MaterialSelectionLockError",
     "POLICY",
+    "REVIEWED_COLOR_POLICY",
     "SCHEMA_VERSION",
     "build_material_selection_lock",
     "validate_material_selection_lock",

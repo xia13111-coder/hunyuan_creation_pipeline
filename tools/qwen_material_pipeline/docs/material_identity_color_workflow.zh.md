@@ -79,9 +79,16 @@ CAD Part-ID 与参考照片对应
 校验计划、每作用域增益、apply report、USD 和 rendered registry 的路径与哈希，并证明所有
 MDL 身份保持不变。
 
-## 5. 统一运行入口
+## 5. 主流程接入与独立复现入口
 
-以下命令把自动提议、真实 CAD 渲染、历史择优、最终重渲染和绝对 QA 固化为一次运行：
+默认 `manual-material-pipeline` 配置已经直接执行本流程。主流程在 Part-ID 材质身份计划封存后
+调用真实 CAD 自适应校色，并把 `material_identity_color/workflow_manifest.json`、最终计划、
+apply report、rendered registry 与四视图报告逐一按路径和 SHA256 复验；随后 Part-ID 发布审计
+改绑到校色后的同一 MDL 计划，最终 selection lock 同时锁住 MDL 身份和经审核的颜色参数。
+旧的跨材质纯视觉赛不会在该分支运行。
+
+以下独立复现命令把自动提议、真实 CAD 渲染、历史择优、最终重渲染和绝对 QA 固化为一次
+运行：
 
 ```bash
 PYTHONPATH=tools python -m qwen_material_pipeline \
@@ -126,7 +133,9 @@ final_selected/
 ```
 
 `workflow_manifest.json` 保存全部输入路径/哈希、候选、策略、最终计划、USD、渲染 registry 和
-QA 报告。失败时保留 `workflow_state=FAILED` 及日志；不能在同一目录隐式续跑。
+QA 报告。若封存参考图只发生同目录改名，流程只允许按证据中的原始 SHA256 唯一重定位，禁止
+按视角名猜测；实际使用的路径也会写回清单。失败时保留 `workflow_state=FAILED` 及日志；不能
+在同一目录隐式续跑。
 
 ## 6. 验收和边界
 

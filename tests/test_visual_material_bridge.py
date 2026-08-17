@@ -725,9 +725,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             self.assertEqual(manifest["status"], "COMPLETED")
             self.assertEqual(manifest["reason"], "test_policy_change")
             self.assertEqual(len(manifest["archived"]), 3)
-            self.assertTrue(
-                (archive / "analysis" / policy_plan.name).is_file()
-            )
+            self.assertTrue((archive / "analysis" / policy_plan.name).is_file())
 
     def test_multigroup_compare_command_is_strictly_group_local(self) -> None:
         command = _multigroup_local_compare_command(
@@ -1079,39 +1077,25 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                 "schema_version": "qwen-local-inference-ledger/v2",
                 "requested_model_family": config.qwen_model_family,
                 "requested_model_revision": config.qwen_model_revision,
-                "model_identity": {
-                    "model_path": str(config.qwen_model_path.resolve())
-                },
+                "model_identity": {"model_path": str(config.qwen_model_path.resolve())},
                 "palette_generation_policy": {
                     "initial_max_new_tokens": config.qwen_max_new_tokens,
-                    "max_new_tokens_ceiling": (
-                        config.qwen_max_new_tokens_ceiling
-                    ),
+                    "max_new_tokens_ceiling": (config.qwen_max_new_tokens_ceiling),
                     "truncation_growth_factor": 2,
                     "retry_condition": "token_limit_reached_without_eos",
-                    "minimum_usable_views": (
-                        config.qwen_minimum_usable_palette_views
-                    ),
+                    "minimum_usable_views": (config.qwen_minimum_usable_palette_views),
                     "minimum_usable_view_ratio": (
                         config.qwen_minimum_usable_palette_view_ratio
                     ),
                 },
             }
-            qwen_ledger["integrity"] = {
-                "ledger_sha256": canonical_sha256(qwen_ledger)
-            }
+            qwen_ledger["integrity"] = {"ledger_sha256": canonical_sha256(qwen_ledger)}
             qwen_ledger_path = analysis / "qwen_inference_ledger.json"
-            qwen_ledger_path.write_text(
-                json.dumps(qwen_ledger), encoding="utf-8"
-            )
+            qwen_ledger_path.write_text(json.dumps(qwen_ledger), encoding="utf-8")
             self.assertTrue(
-                _verified_partial_live_resume_available(
-                    destination, references, config
-                )
+                _verified_partial_live_resume_available(destination, references, config)
             )
-            qwen_ledger["palette_generation_policy"][
-                "max_new_tokens_ceiling"
-            ] += 1
+            qwen_ledger["palette_generation_policy"]["max_new_tokens_ceiling"] += 1
             qwen_ledger["integrity"] = {
                 "ledger_sha256": canonical_sha256(
                     {
@@ -1121,17 +1105,11 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                     }
                 )
             }
-            qwen_ledger_path.write_text(
-                json.dumps(qwen_ledger), encoding="utf-8"
-            )
+            qwen_ledger_path.write_text(json.dumps(qwen_ledger), encoding="utf-8")
             self.assertFalse(
-                _verified_partial_live_resume_available(
-                    destination, references, config
-                )
+                _verified_partial_live_resume_available(destination, references, config)
             )
-            qwen_ledger["palette_generation_policy"][
-                "max_new_tokens_ceiling"
-            ] -= 1
+            qwen_ledger["palette_generation_policy"]["max_new_tokens_ceiling"] -= 1
             qwen_ledger["integrity"] = {
                 "ledger_sha256": canonical_sha256(
                     {
@@ -1141,9 +1119,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                     }
                 )
             }
-            qwen_ledger_path.write_text(
-                json.dumps(qwen_ledger), encoding="utf-8"
-            )
+            qwen_ledger_path.write_text(json.dumps(qwen_ledger), encoding="utf-8")
             premature_apply = destination / "apply_visual_materials_report.json"
             premature_apply.write_text("{}", encoding="utf-8")
             self.assertFalse(
@@ -1199,9 +1175,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             retained_candidate = tournament_directory / "g01_01_deadbeef00"
             retained_candidate.mkdir()
             (retained_candidate / "plan.json").write_text("{}", encoding="utf-8")
-            provisional_part_id_directory = (
-                analysis / "part_id_sam3_refinement"
-            )
+            provisional_part_id_directory = analysis / "part_id_sam3_refinement"
             provisional_part_id_directory.mkdir()
             (provisional_part_id_directory / "manifest.json").write_text(
                 "{}", encoding="utf-8"
@@ -1621,8 +1595,16 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         )
         self.assertEqual(document["qwen"]["mapping_verification_views"], 2)
         self.assertEqual(document["qwen"]["parallel_requests"], 1)
+        self.assertEqual(
+            document["materials"]["prediction_mode"],
+            "catalog_family_first",
+        )
+        self.assertEqual(
+            document["materials"]["corresponding_color_calibration"],
+            "adaptive_actual_cad",
+        )
 
-    def test_family_first_profile_has_identity_only_contract(self) -> None:
+    def test_family_first_profile_runs_identity_then_actual_cad_colour(self) -> None:
         profile = (
             Path(__file__).resolve().parents[1]
             / "tools"
@@ -1644,6 +1626,14 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             "disabled",
         )
         self.assertEqual(
+            document["materials"]["corresponding_color_calibration"],
+            "adaptive_actual_cad",
+        )
+        self.assertEqual(
+            document["materials"]["corresponding_color_max_iterations"],
+            5,
+        )
+        self.assertEqual(
             document["materials"]["selection_objective"],
             "semantic_compatible_visual",
         )
@@ -1651,6 +1641,17 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             document["retrieval"]["final_top_k"],
             document["retrieval"]["siglip_top_k"],
         )
+
+    def test_actual_cad_colour_requires_family_first_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path, _isaac, _references = self._fixture(Path(temp_dir))
+            document = json.loads(config_path.read_text(encoding="utf-8"))
+            document["materials"][
+                "corresponding_color_calibration"
+            ] = "adaptive_actual_cad"
+            config_path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "catalog_family_first"):
+                load_visual_material_config(config_path)
 
     def test_config_rejects_palette_token_ceiling_below_initial_budget(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2358,9 +2359,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                 )
 
             audit = json.loads(
-                (output / "qwen_mvinverse_recovery.json").read_text(
-                    encoding="utf-8"
-                )
+                (output / "qwen_mvinverse_recovery.json").read_text(encoding="utf-8")
             )
 
         self.assertEqual(attempts, 1)
