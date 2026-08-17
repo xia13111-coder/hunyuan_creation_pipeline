@@ -321,34 +321,53 @@ def _partial_live_resume_terminal_paths(destination: Path) -> tuple[Path, ...]:
 
 
 def _verified_locked_precollection_resume_available(destination: Path) -> bool:
-    """Return whether a final lock may be replayed after collection was blocked.
+    """Return whether a final lock may be replayed after downstream failure.
 
     A selected-MDL lock is normally terminal.  There is one safe exception:
-    the immutable Look was completed and hash-verified, but no delivery or
-    success marker was ever written.  That state can occur when a downstream
-    visual gate improves between runs.  Replaying it is safe only after the
-    lock, locked USD, apply report, source USD, and final comparison all prove
-    an internally consistent pre-collection state.
+    the immutable Look was completed and hash-verified, but the run failed
+    before final visual acceptance completed.  That state can occur when a
+    downstream gate improves between runs.  Replaying it is safe only after
+    the lock, locked USD, apply report, source USD, final comparison, and any
+    existing delivery validation all prove an internally consistent state.
     """
 
     if not destination.is_dir():
         return False
     analysis_dir = destination / "analysis"
-    delivery_markers = (
-        destination / "delivery_validation.json",
-        destination / "_SUCCESS",
-        destination / "SUCCESS",
-    )
-    if any(path.exists() or path.is_symlink() for path in delivery_markers):
+    if any(
+        path.exists() or path.is_symlink()
+        for path in (destination / "_SUCCESS", destination / "SUCCESS")
+    ):
         return False
+    completed_final_gate = destination / "final_visual_acceptance" / (
+        "collected_visual_gate.json"
+    )
+    if completed_final_gate.is_file():
+        try:
+            if read_object(
+                completed_final_gate,
+                "completed final collected visual gate",
+            ).get("status") == "PASS":
+                return False
+        except (OSError, RuntimeError, ValueError):
+            return False
 
     lock_path = analysis_dir / "material_selection_lock.json"
     apply_report_path = destination / "apply_visual_materials_locked_report.json"
     locked_looks = tuple(sorted(destination.glob("*_look_locked.usda")))
-    final_quality_path = (
+    final_quality_candidates = (
+        destination / "visual_quality" / "reference_render_comparison.json",
+        destination
+        / "material_identity_color"
+        / "final_selected"
+        / "reference_render_comparison.json",
         destination
         / "visual_exact_mdl_tournament"
-        / "final_reference_render_comparison.json"
+        / "final_reference_render_comparison.json",
+    )
+    final_quality_path = next(
+        (path for path in final_quality_candidates if path.is_file()),
+        final_quality_candidates[-1],
     )
     if (
         not lock_path.is_file()
@@ -411,6 +430,37 @@ def _verified_locked_precollection_resume_available(destination: Path) -> bool:
         or any(validation.get(flag) is not True for flag in required_validation_flags)
     ):
         return False
+    delivery_path = destination / "delivery_validation.json"
+    if delivery_path.exists() or delivery_path.is_symlink():
+        try:
+            delivery = read_object(delivery_path, "locked delivery validation")
+            delivery_inputs = delivery.get("inputs")
+            collected_root = Path(
+                str(delivery_inputs["collected_root_usd"])
+            ).expanduser().resolve(strict=True)
+            bundle_root = Path(str(delivery_inputs["bundle_root"])).expanduser().resolve(
+                strict=True
+            )
+            delivery_look = Path(str(delivery_inputs["look_usd"])).expanduser().resolve(
+                strict=True
+            )
+            delivery_apply = Path(
+                str(delivery_inputs["apply_report"])
+            ).expanduser().resolve(strict=True)
+        except (KeyError, OSError, RuntimeError, TypeError, ValueError):
+            return False
+        if (
+            delivery.get("status") != "PASS"
+            or delivery.get("overall_pass") is not True
+            or delivery.get("failure_count") != 0
+            or not isinstance(delivery_inputs, Mapping)
+            or delivery_look != locked_look
+            or delivery_apply != apply_report_path.resolve()
+            or not collected_root.is_file()
+            or not bundle_root.is_dir()
+            or not collected_root.is_relative_to(bundle_root)
+        ):
+            return False
     aggregate = final_quality.get("aggregate")
     if not isinstance(aggregate, Mapping) or aggregate.get("status") not in {
         "PASS",
@@ -595,7 +645,10 @@ def _verified_partial_live_resume_available(
     sam3_foreground_manifest_path = analysis_dir / "sam3_foreground" / "manifest.json"
     sam3_manifest_path = analysis_dir / "sam3_regions" / "manifest.json"
     visual_retrieval_path = analysis_dir / "visual_retrieval" / "visual_retrieval.json"
-    if _partial_live_resume_terminal_paths(destination):
+    terminal_paths = _partial_live_resume_terminal_paths(destination)
+    if terminal_paths and not _verified_locked_precollection_resume_available(
+        destination
+    ):
         return False
 
     # Camera registration is the first expensive live-evidence stage.  It is

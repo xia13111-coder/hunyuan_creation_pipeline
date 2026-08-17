@@ -29,6 +29,7 @@ from asset_pipeline.visual_materials.orchestrator import (
     _validate_catalog_family_first_result,
     _validated_exact_mdl_tournament_mapping,
     _verified_partial_live_resume_available,
+    _verified_locked_precollection_resume_available,
 )
 from asset_pipeline.jobs.material import (
     CONFIG_SCHEMA_VERSION,
@@ -1325,6 +1326,93 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(RuntimeError, "final locked artifacts"):
                 _archive_partial_live_resume_downstream_artifacts(destination)
+
+    def test_locked_downstream_failure_resume_requires_verified_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "visual"
+            analysis = destination / "analysis"
+            analysis.mkdir(parents=True)
+            source = destination / "source.usda"
+            source.write_text("#usda 1.0\n", encoding="utf-8")
+            locked = destination / "asset_look_locked.usda"
+            locked.write_text("#usda 1.0\n", encoding="utf-8")
+            lock = {
+                "schema_version": "qwen-selected-mdl-lock/v1",
+                "assignments": [],
+            }
+            lock["integrity"] = {
+                "lock_sha256": canonical_sha256(lock),
+            }
+            (analysis / "material_selection_lock.json").write_text(
+                json.dumps(lock), encoding="utf-8"
+            )
+            validation = {
+                name: True
+                for name in (
+                    "mesh_geometry_and_topology_values_unchanged",
+                    "xforms_unchanged",
+                    "physics_properties_unchanged",
+                    "physics_bindings_unchanged",
+                    "visual_bindings_resolve",
+                    "mdl_sources_and_parameters_verified",
+                    "selected_mdl_lock_verified",
+                    "face_subsets_verified",
+                )
+            }
+            from asset_pipeline.visual_materials.references import sha256_file
+
+            apply_report = destination / "apply_visual_materials_locked_report.json"
+            apply_report.write_text(
+                json.dumps(
+                    {
+                        "output_usd": str(locked.resolve()),
+                        "output_sha256": sha256_file(locked),
+                        "source_usd": str(source.resolve()),
+                        "source_sha256": sha256_file(source),
+                        "validation": validation,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            quality = destination / "visual_quality" / (
+                "reference_render_comparison.json"
+            )
+            quality.parent.mkdir()
+            quality.write_text(
+                json.dumps({"aggregate": {"status": "PASS"}}),
+                encoding="utf-8",
+            )
+            bundle = Path(temp_dir) / "final" / "asset"
+            bundle.mkdir(parents=True)
+            collected = bundle / "asset.usda"
+            collected.write_text("#usda 1.0\n", encoding="utf-8")
+            delivery = destination / "delivery_validation.json"
+            delivery.write_text(
+                json.dumps(
+                    {
+                        "status": "PASS",
+                        "overall_pass": True,
+                        "failure_count": 0,
+                        "inputs": {
+                            "look_usd": str(locked.resolve()),
+                            "apply_report": str(apply_report.resolve()),
+                            "collected_root_usd": str(collected.resolve()),
+                            "bundle_root": str(bundle.resolve()),
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertTrue(
+                _verified_locked_precollection_resume_available(destination)
+            )
+            delivery_document = json.loads(delivery.read_text(encoding="utf-8"))
+            delivery_document["overall_pass"] = False
+            delivery.write_text(json.dumps(delivery_document), encoding="utf-8")
+            self.assertFalse(
+                _verified_locked_precollection_resume_available(destination)
+            )
 
     def test_public_api_uses_split_owner_package(self) -> None:
         self.assertIs(
