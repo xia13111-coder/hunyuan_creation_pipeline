@@ -23,6 +23,8 @@ from qwen_material_pipeline.evidence.camera_calibration import (
     _merge_registry,
     _part_balanced_structure_metrics,
     _reference_masks,
+    _reference_evidence_contract,
+    _registry_geometry_and_pose_contract,
     _residual_components,
     _rank_seed_candidates,
     _seal_full_resolution_winners,
@@ -91,10 +93,26 @@ def test_camera_phase_checkpoint_reuse_requires_exact_candidate_specs(
         json.dumps(
             {
                 "schema_version": camera_calibration.SCHEMA_VERSION,
+                "camera_objective_version": (
+                    camera_calibration.CAMERA_OBJECTIVE_VERSION
+                ),
+                "camera_selection_policy_version": (
+                    camera_calibration.CAMERA_SELECTION_POLICY_VERSION
+                ),
                 "reference_view_id": "front",
                 "phase": "micro",
-                "winner": {"view_id": "cal_front_micro_000"},
-                "candidates": [{"view_id": "cal_front_micro_000"}],
+                "winner": {
+                    "view_id": "cal_front_micro_000",
+                    "objective_version": camera_calibration.CAMERA_OBJECTIVE_VERSION,
+                },
+                "candidates": [
+                    {
+                        "view_id": "cal_front_micro_000",
+                        "objective_version": (
+                            camera_calibration.CAMERA_OBJECTIVE_VERSION
+                        ),
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -116,6 +134,20 @@ def test_camera_phase_checkpoint_reuse_requires_exact_candidate_specs(
             specs_path=specs_path,
             scores_path=scores_path,
             expected_specs=changed,
+            reference_id="front",
+            phase="micro",
+        )
+        is None
+    )
+
+    stale_scores = json.loads(scores_path.read_text(encoding="utf-8"))
+    stale_scores["camera_objective_version"] = "old-objective/v1"
+    scores_path.write_text(json.dumps(stale_scores), encoding="utf-8")
+    assert (
+        camera_calibration._completed_phase(
+            specs_path=specs_path,
+            scores_path=scores_path,
+            expected_specs=specs,
             reference_id="front",
             phase="micro",
         )
@@ -621,6 +653,50 @@ def test_valid_rigid_registration_precedes_better_invalid_boundary_fit() -> None
     assert ranked[0]["view_id"] == "valid_perspective"
 
 
+def test_exact_metric_tie_prefers_minimum_residual_not_generated_view_id() -> None:
+    base = {
+        "score": 0.90,
+        "projection_iou": 0.95,
+        "boundary_p95_px": 5.0,
+        "analysis_direction": [0.0, -1.0, 0.0],
+        "analysis_up_axis": [0.0, 0.0, 1.0],
+        "focal_length_mm": 45.0,
+        "distance_multiplier": 2.15,
+    }
+    candidates = [
+        {
+            **base,
+            "view_id": "a_generated_first",
+            "whole_asset_similarity": {
+                "ecc_status": "success",
+                "ecc_transform_audit": {
+                    "minimum_scale": 1.20,
+                    "maximum_scale": 1.20,
+                    "rotation_degrees": 1.0,
+                    "translation_ratio": 0.02,
+                },
+            },
+        },
+        {
+            **base,
+            "view_id": "z_generated_last",
+            "whole_asset_similarity": {
+                "ecc_status": "success",
+                "ecc_transform_audit": {
+                    "minimum_scale": 1.01,
+                    "maximum_scale": 1.01,
+                    "rotation_degrees": 0.0,
+                    "translation_ratio": 0.0,
+                },
+            },
+        },
+    ]
+
+    ranked = sorted(reversed(candidates), key=_alignment_candidate_sort_key)
+
+    assert ranked[0]["view_id"] == "z_generated_last"
+
+
 def test_incomplete_foreground_reports_recall_separately_from_precision() -> None:
     reference = np.zeros((64, 64), dtype=np.uint8)
     reference[16:48, 16:40] = 255
@@ -727,6 +803,64 @@ def test_camera_foreground_depends_only_on_stable_part_ids() -> None:
     assert np.array_equal(first, second)
     assert np.count_nonzero(first) == 16 * 12
     assert np.all(first[:8] == 0)
+
+
+def test_camera_input_contract_is_independent_of_run_directory(tmp_path: Path) -> None:
+    contracts = []
+    for name in ("run_a", "run_b"):
+        root = tmp_path / name
+        root.mkdir()
+        ids = np.zeros((16, 16, 3), dtype=np.uint8)
+        red, green, blue = _part_color("P0001")
+        ids[4:12, 5:11] = (blue, green, red)
+        ids_path = root / "part_ids.png"
+        assert cv2.imwrite(str(ids_path), ids)
+        registry = {
+            "schema_version": "qwen-material-parts/v1",
+            "parts": [
+                {
+                    "part_id": "P0001",
+                    "prim_path": "/World/P0001",
+                    "point_count": 8,
+                    "face_count": 12,
+                    "geometry_content_sha256": "a" * 64,
+                    "world_bbox": [[0, 0, 0], [1, 1, 1]],
+                    "source_subset_layout_sha256": "b" * 64,
+                }
+            ],
+            "render_set": {
+                "resolution": [16, 16],
+                "analysis_up_axis": [0.0, 0.0, 1.0],
+                "analysis_front_axis": [0.0, -1.0, 0.0],
+                "requested_view_tokens": ["front"],
+                "analysis_basis_world": {},
+                "views": [
+                    {
+                        "view_id": "front",
+                        "analysis_direction": [0.0, -1.0, 0.0],
+                        "analysis_camera_up_axis": [0.0, 0.0, 1.0],
+                        "focal_length_mm": 45.0,
+                        "camera_distance_multiplier": 2.15,
+                        "part_ids_raw": str(ids_path),
+                    }
+                ],
+            },
+        }
+        registry_path = root / "registry.json"
+        registry_path.write_text(json.dumps(registry), encoding="utf-8")
+        contracts.append(_registry_geometry_and_pose_contract(registry_path))
+
+    assert contracts[0] == contracts[1]
+
+    mask = np.zeros((16, 16), dtype=np.uint8)
+    mask[4:12, 5:11] = 255
+    image = np.repeat(mask[:, :, None], 3, axis=2)
+    reference_contract = _reference_evidence_contract(
+        {"front": (mask, {})},
+        {"front": image},
+    )
+    assert reference_contract["reference_count"] == 1
+    assert len(reference_contract["references_sha256"]) == 64
 
 
 def test_fast_candidates_use_the_authoritative_objective_and_metadata() -> None:
@@ -868,12 +1002,20 @@ def test_calibrated_registry_removes_discrete_seed_bank(
         calibrated_path=calibrated,
         output_path=output,
         reference_ids={"photo_01"},
+        calibration_provenance={
+            "calibration_input_fingerprint": "a" * 64,
+            "camera_solution_fingerprint": "b" * 64,
+        },
     )
     merged = json.loads(output.read_text(encoding="utf-8"))
 
     assert [view["view_id"] for view in merged["render_set"]["views"]] == ["photo_01"]
     assert merged["render_set"]["continuous_camera_calibration"] is True
     assert merged["render_set"]["calibration_source_view_count"] == 2
+    assert merged["render_set"]["camera_calibration_provenance"] == {
+        "calibration_input_fingerprint": "a" * 64,
+        "camera_solution_fingerprint": "b" * 64,
+    }
 
 
 def test_full_resolution_winner_is_sealed_without_rerender(

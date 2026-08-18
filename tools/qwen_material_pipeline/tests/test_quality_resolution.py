@@ -934,15 +934,39 @@ def test_live_camera_provenance_accepts_only_current_run_two_pass_seed(
     specs = tmp_path / "camera" / "search_pass" / "final_view_specs.json"
     specs.parent.mkdir(parents=True)
     specs.write_text("{}", encoding="utf-8")
+    reference_manifest = tmp_path / "annotations.json"
+    reference_manifest.write_text("{}", encoding="utf-8")
+    input_contract = {
+        "camera_objective_version": "hierarchical_visible_part_alignment/v9",
+        "camera_selection_policy_version": (
+            "alignment_gate_then_canonical_camera_signature/v1"
+        ),
+        "initial_view_specs_sha256": canonical_sha256({}),
+    }
+    solution_contract = {"schema_version": "qwen-camera-solution/v1", "views": []}
     report = tmp_path / "camera" / "camera_calibration_report.json"
     report.write_text(
         json.dumps(
             {
                 "schema_version": "qwen-whole-asset-camera-calibration/v9",
                 "source_registry": str(registry.resolve()),
+                "source_registry_sha256": hashlib.sha256(b"{}").hexdigest(),
+                "reference_manifest": str(reference_manifest.resolve()),
+                "reference_manifest_sha256": hashlib.sha256(b"{}").hexdigest(),
                 "source_spatial_mapping": None,
                 "source_initial_view_specs": str(specs.resolve()),
+                "source_initial_view_specs_sha256": hashlib.sha256(b"{}").hexdigest(),
                 "seed_search": {"mode": "existing_continuous_camera_specs"},
+                "camera_objective_version": "hierarchical_visible_part_alignment/v9",
+                "camera_selection_policy_version": (
+                    "alignment_gate_then_canonical_camera_signature/v1"
+                ),
+                "calibration_input_contract": input_contract,
+                "calibration_input_fingerprint": canonical_sha256(input_contract),
+                "camera_solution_contract": solution_contract,
+                "camera_solution_fingerprint": canonical_sha256(solution_contract),
+                "final_view_specs": str(specs.resolve()),
+                "final_view_specs_sha256": hashlib.sha256(b"{}").hexdigest(),
                 "whole_asset_only": True,
                 "per_part_geometric_warp_applied": False,
                 "camera_intrinsics_optimized": [
@@ -963,10 +987,20 @@ def test_live_camera_provenance_accepts_only_current_run_two_pass_seed(
     document = _validate_live_camera_registration_provenance(
         report,
         source_registry=registry,
+        reference_manifest=reference_manifest,
         initial_view_specs=specs,
     )
 
     assert document["whole_asset_only"] is True
+
+    reference_manifest.write_text('{"changed":true}', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="reference evidence differs"):
+        _validate_live_camera_registration_provenance(
+            report,
+            source_registry=registry,
+            reference_manifest=reference_manifest,
+            initial_view_specs=specs,
+        )
 
 
 def test_live_camera_provenance_rejects_external_or_legacy_seed(
@@ -974,6 +1008,8 @@ def test_live_camera_provenance_rejects_external_or_legacy_seed(
 ) -> None:
     registry = tmp_path / "part_registry.rendered.json"
     registry.write_text("{}", encoding="utf-8")
+    reference_manifest = tmp_path / "annotations.json"
+    reference_manifest.write_text("{}", encoding="utf-8")
     report = tmp_path / "camera_calibration_report.json"
     report.write_text(
         json.dumps(
@@ -994,6 +1030,7 @@ def test_live_camera_provenance_rejects_external_or_legacy_seed(
         _validate_live_camera_registration_provenance(
             report,
             source_registry=registry,
+            reference_manifest=reference_manifest,
             initial_view_specs=None,
         )
 

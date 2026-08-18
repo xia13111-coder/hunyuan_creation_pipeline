@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from .config import read_object, write_object
+from .config import canonical_sha256, read_object, write_object
 
 
 CAMERA_ALIGNMENT_USABLE_MINIMUM_IOU = 0.92
@@ -17,6 +18,18 @@ CAMERA_ALIGNMENT_LOCAL_BOX_MINIMUM_IOU = 0.80
 CAMERA_ALIGNMENT_LOCAL_BOX_MAXIMUM_BOUNDARY_P95_PX = 28.0
 CAMERA_ALIGNMENT_LOCAL_BOX_MINIMUM_RECALL = 0.90
 CAMERA_ALIGNMENT_LOCAL_BOX_MINIMUM_STRUCTURE_SCORE = 0.60
+CAMERA_OBJECTIVE_VERSION = "hierarchical_visible_part_alignment/v9"
+CAMERA_SELECTION_POLICY_VERSION = (
+    "alignment_gate_then_canonical_camera_signature/v1"
+)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def continuous_camera_view_specs(
@@ -136,6 +149,7 @@ def validate_live_camera_registration_provenance(
     report_path: Path,
     *,
     source_registry: Path,
+    reference_manifest: Path,
     initial_view_specs: Path | None,
 ) -> dict[str, Any]:
     """Reject stale, legacy, spatial-map or per-Part camera reuse in live mode."""
@@ -151,6 +165,19 @@ def validate_live_camera_registration_provenance(
         raise RuntimeError(
             "Live camera calibration source registry differs from this run"
         )
+    if report.get("source_registry_sha256") != _sha256_file(source_registry):
+        raise RuntimeError(
+            "Live camera calibration source registry content differs from this run"
+        )
+    expected_manifest = str(reference_manifest.expanduser().resolve(strict=True))
+    if (
+        report.get("reference_manifest") != expected_manifest
+        or report.get("reference_manifest_sha256")
+        != _sha256_file(reference_manifest)
+    ):
+        raise RuntimeError(
+            "Live camera calibration reference evidence differs from this run"
+        )
     if report.get("source_spatial_mapping") is not None:
         raise RuntimeError(
             "Live camera calibration must not reuse a previous spatial mapping"
@@ -160,17 +187,60 @@ def validate_live_camera_registration_provenance(
         raise RuntimeError("Live camera calibration lacks seed provenance")
     if initial_view_specs is None:
         expected_specs: str | None = None
+        expected_specs_file_sha256: str | None = None
+        expected_specs_canonical_sha256: str | None = None
         expected_mode = "source_render_continuous_seed"
     else:
         expected_specs = str(initial_view_specs.expanduser().resolve(strict=True))
+        expected_specs_file_sha256 = _sha256_file(initial_view_specs)
+        expected_specs_canonical_sha256 = canonical_sha256(
+            read_object(initial_view_specs, "camera seed view specs")
+        )
         expected_mode = "existing_continuous_camera_specs"
     if (
         report.get("source_initial_view_specs") != expected_specs
+        or report.get("source_initial_view_specs_sha256")
+        != expected_specs_file_sha256
         or seed_search.get("mode") != expected_mode
     ):
         raise RuntimeError(
             "Live camera calibration used camera seeds outside the current two-pass run"
         )
+    input_contract = report.get("calibration_input_contract")
+    if (
+        not isinstance(input_contract, dict)
+        or report.get("calibration_input_fingerprint")
+        != canonical_sha256(input_contract)
+        or input_contract.get("camera_objective_version")
+        != CAMERA_OBJECTIVE_VERSION
+        or input_contract.get("camera_selection_policy_version")
+        != CAMERA_SELECTION_POLICY_VERSION
+        or input_contract.get("initial_view_specs_sha256")
+        != expected_specs_canonical_sha256
+    ):
+        raise RuntimeError(
+            "Live camera calibration input fingerprint is missing or inconsistent"
+        )
+    if (
+        report.get("camera_objective_version") != CAMERA_OBJECTIVE_VERSION
+        or report.get("camera_selection_policy_version")
+        != CAMERA_SELECTION_POLICY_VERSION
+    ):
+        raise RuntimeError(
+            "Live camera calibration used a different candidate-selection contract"
+        )
+    solution_contract = report.get("camera_solution_contract")
+    final_specs_path = report.get("final_view_specs")
+    if (
+        not isinstance(solution_contract, dict)
+        or report.get("camera_solution_fingerprint")
+        != canonical_sha256(solution_contract)
+        or not isinstance(final_specs_path, str)
+    ):
+        raise RuntimeError("Live camera calibration solution fingerprint is invalid")
+    resolved_final_specs = Path(final_specs_path).expanduser().resolve(strict=True)
+    if report.get("final_view_specs_sha256") != _sha256_file(resolved_final_specs):
+        raise RuntimeError("Live camera calibration final camera specs were modified")
     if (
         report.get("whole_asset_only") is not True
         or report.get("per_part_geometric_warp_applied") is not False
@@ -327,6 +397,16 @@ def require_complete_live_camera_alignment(
         )
     return {
         "policy": "two_layer_box_first_part_id_alignment/v2",
+        "camera_objective_version": report.get("camera_objective_version"),
+        "camera_selection_policy_version": report.get(
+            "camera_selection_policy_version"
+        ),
+        "calibration_input_fingerprint": report.get(
+            "calibration_input_fingerprint"
+        ),
+        "camera_solution_fingerprint": report.get(
+            "camera_solution_fingerprint"
+        ),
         "strict_target": {
             "minimum_iou": 0.97,
             "maximum_boundary_p95_px": 3.0,

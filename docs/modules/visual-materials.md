@@ -53,6 +53,17 @@ manifest, and cross-resolution comparisons remove raster-size scale and
 translation before enforcing physical residual limits. These rules contain no
 asset name, camera-angle, or Part-ID special cases.
 
+Each camera result also seals two path-independent content fingerprints. The
+input fingerprint covers CAD geometry, actual Part-ID pixels, reference
+image/mask pixels, and search configuration; the solution fingerprint covers
+the final projection model, intrinsics, and extrinsics. Exact metric ties first
+prefer the camera requiring the least whole-asset 2-D residual correction, then
+use canonical camera parameters, never candidate generation order or temporary
+view IDs. High-resolution seeding, checkpoint reuse, and downstream material
+evidence verify current file hashes, objective versions, and the two-pass seed
+hash. Changed inputs trigger explicit recalibration instead of silently mixing
+old cameras, masks, or Part-ID evidence into a new run.
+
 `asset_pipeline/visual_materials/` coordinates the workflow.
 `tools/qwen_material_pipeline/` provides segmentation, evidence extraction,
 retrieval, model calls, and USD workers. Isaac Sim handles CAD/USD, MDL

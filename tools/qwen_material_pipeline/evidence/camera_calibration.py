@@ -37,7 +37,10 @@ FINALIST_COUNT = 5
 RENDER_RETRY_ATTEMPTS = 3
 RENDER_RETRY_DELAY_SECONDS = 3.0
 MAX_FOCAL_LENGTH_MM = 2000.0
-CAMERA_OBJECTIVE_VERSION = "hierarchical_visible_part_alignment/v8"
+CAMERA_OBJECTIVE_VERSION = "hierarchical_visible_part_alignment/v9"
+CAMERA_SELECTION_POLICY_VERSION = (
+    "alignment_gate_then_canonical_camera_signature/v1"
+)
 COMPLETE_ALIGNMENT_MINIMUM_IOU = 0.97
 COMPLETE_ALIGNMENT_MAXIMUM_BOUNDARY_P95_PX = 3.0
 FAST_SEARCH_MODES = ("auto", "disabled", "required")
@@ -74,6 +77,28 @@ def _sha256_file(path: Path) -> str:
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _canonical_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _array_sha256(value: np.ndarray) -> str:
+    contiguous = np.ascontiguousarray(value)
+    digest = hashlib.sha256()
+    digest.update(str(contiguous.dtype).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(json.dumps(list(contiguous.shape)).encode("ascii"))
+    digest.update(b"\0")
+    digest.update(contiguous.tobytes())
     return digest.hexdigest()
 
 
@@ -578,6 +603,162 @@ def _reference_image(
             f"{raw.get('id')}"
         )
     return image
+
+
+def _camera_signature(item: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Return a path- and generation-order-independent camera identity."""
+
+    direction = item.get("analysis_direction")
+    up_axis = item.get("analysis_up_axis")
+    if not isinstance(direction, Sequence) or isinstance(direction, (str, bytes)):
+        direction = ()
+    if not isinstance(up_axis, Sequence) or isinstance(up_axis, (str, bytes)):
+        up_axis = ()
+    return (
+        str(item.get("projection_mode", "perspective")),
+        tuple(round(float(value), 10) for value in direction),
+        tuple(round(float(value), 10) for value in up_axis),
+        round(float(item.get("focal_length_mm", 45.0)), 8),
+        round(float(item.get("distance_multiplier", 2.15)), 8),
+        round(float(item.get("target_offset_u", 0.0)), 8),
+        round(float(item.get("target_offset_v", 0.0)), 8),
+        round(float(item.get("orthographic_span_multiplier", 2.0)), 8),
+    )
+
+
+def _registry_geometry_and_pose_contract(registry_path: Path) -> dict[str, Any]:
+    """Fingerprint only camera-relevant CAD geometry and rendered Part IDs.
+
+    Absolute output paths, RTX RGB images, materials and timestamps are
+    intentionally excluded.  Camera calibration consumes stable CAD geometry,
+    camera metadata and lossless Part-ID pixels; identical inputs in another
+    run directory must therefore produce the same contract.
+    """
+
+    registry = _read_object(registry_path)
+    raw_parts = registry.get("parts")
+    render_set = registry.get("render_set")
+    if not isinstance(raw_parts, list) or not isinstance(render_set, Mapping):
+        raise ValueError("Camera source registry lacks parts or render_set")
+    parts: list[dict[str, Any]] = []
+    for raw in raw_parts:
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("part_id"), str):
+            raise ValueError("Camera source registry has a malformed Part-ID row")
+        parts.append(
+            {
+                "part_id": raw["part_id"],
+                "prim_path": raw.get("prim_path"),
+                "point_count": raw.get("point_count"),
+                "face_count": raw.get("face_count"),
+                "geometry_content_sha256": raw.get("geometry_content_sha256"),
+                "world_bbox": raw.get("world_bbox"),
+                "source_subset_layout_sha256": raw.get(
+                    "source_subset_layout_sha256"
+                ),
+            }
+        )
+    parts.sort(key=lambda row: str(row["part_id"]))
+
+    views: list[dict[str, Any]] = []
+    raw_views = render_set.get("views")
+    if not isinstance(raw_views, list) or not raw_views:
+        raise ValueError("Camera source registry has no rendered pose bank")
+    for raw in raw_views:
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("view_id"), str):
+            raise ValueError("Camera source registry has a malformed view row")
+        ids_path = _resolve_path(
+            raw.get("part_ids_raw") or raw.get("part_ids"),
+            registry_path,
+        )
+        ids = cv2.imread(str(ids_path), cv2.IMREAD_COLOR)
+        if ids is None:
+            raise ValueError(f"Unable to read source Part-ID render: {ids_path}")
+        views.append(
+            {
+                "view_id": raw["view_id"],
+                "analysis_direction": raw.get("analysis_direction"),
+                "analysis_up_axis": raw.get("analysis_camera_up_axis")
+                or raw.get("camera_up_axis"),
+                "focal_length_mm": raw.get("focal_length_mm"),
+                "distance_multiplier": raw.get("camera_distance_multiplier"),
+                "target_offset_u": raw.get("camera_target_offset_u", 0.0),
+                "target_offset_v": raw.get("camera_target_offset_v", 0.0),
+                "projection_mode": raw.get("camera_projection_mode", "perspective"),
+                "orthographic_span_multiplier": raw.get(
+                    "camera_orthographic_span_multiplier", 2.0
+                ),
+                "part_ids_pixel_sha256": _array_sha256(ids),
+            }
+        )
+    views.sort(key=lambda row: str(row["view_id"]))
+    return {
+        "schema_version": "qwen-camera-registry-input/v1",
+        "registry_schema_version": registry.get("schema_version"),
+        "part_count": len(parts),
+        "parts_sha256": _canonical_sha256(parts),
+        "render_contract": {
+            "resolution": render_set.get("resolution"),
+            "analysis_up_axis": render_set.get("analysis_up_axis"),
+            "analysis_front_axis": render_set.get("analysis_front_axis"),
+            "requested_view_tokens": render_set.get("requested_view_tokens"),
+            "analysis_basis_world": render_set.get("analysis_basis_world"),
+        },
+        "views_sha256": _canonical_sha256(views),
+        "view_count": len(views),
+    }
+
+
+def _reference_evidence_contract(
+    references: Mapping[str, tuple[np.ndarray, Mapping[str, Any]]],
+    reference_images: Mapping[str, np.ndarray],
+) -> dict[str, Any]:
+    rows = []
+    for reference_id in sorted(references):
+        mask = references[reference_id][0]
+        image = reference_images[reference_id]
+        rows.append(
+            {
+                "reference_view_id": reference_id,
+                "mask_pixel_sha256": _array_sha256(mask),
+                "image_pixel_sha256": _array_sha256(image),
+                "mask_shape": list(mask.shape),
+                "image_shape": list(image.shape),
+            }
+        )
+    return {
+        "schema_version": "qwen-camera-reference-input/v1",
+        "reference_count": len(rows),
+        "references_sha256": _canonical_sha256(rows),
+    }
+
+
+def _camera_solution_contract(specs: Mapping[str, Any]) -> dict[str, Any]:
+    raw_views = specs.get("views")
+    if not isinstance(raw_views, list) or not raw_views:
+        raise ValueError("Final camera specs have no views")
+    views = []
+    for raw in raw_views:
+        if not isinstance(raw, Mapping) or not isinstance(raw.get("view_id"), str):
+            raise ValueError("Final camera specs contain a malformed view")
+        signature = _camera_signature(raw)
+        views.append(
+            {
+                "reference_view_id": raw["view_id"],
+                "projection_mode": signature[0],
+                "analysis_direction": list(signature[1]),
+                "analysis_up_axis": list(signature[2]),
+                "focal_length_mm": signature[3],
+                "distance_multiplier": signature[4],
+                "target_offset_u": signature[5],
+                "target_offset_v": signature[6],
+                "orthographic_span_multiplier": signature[7],
+            }
+        )
+    views.sort(key=lambda row: str(row["reference_view_id"]))
+    return {
+        "schema_version": "qwen-camera-solution/v1",
+        "views": views,
+    }
 
 
 def _boundary_metrics(
@@ -1263,6 +1444,20 @@ def _alignment_candidate_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
         boundary_p95 - COMPLETE_ALIGNMENT_MAXIMUM_BOUNDARY_P95_PX,
     ) / COMPLETE_ALIGNMENT_MAXIMUM_BOUNDARY_P95_PX
     complete = iou_deficit <= 0.0 and boundary_deficit <= 0.0
+    residual_audit = (
+        similarity.get("ecc_transform_audit")
+        if isinstance(similarity, Mapping)
+        else None
+    )
+    residual_key = (0.0, 0.0, 0.0)
+    if isinstance(residual_audit, Mapping):
+        minimum_scale = float(residual_audit.get("minimum_scale", 1.0))
+        maximum_scale = float(residual_audit.get("maximum_scale", minimum_scale))
+        residual_key = (
+            round(abs(math.log(max(1e-12, 0.5 * (minimum_scale + maximum_scale)))), 10),
+            round(abs(float(residual_audit.get("rotation_degrees", 0.0))), 10),
+            round(abs(float(residual_audit.get("translation_ratio", 0.0))), 10),
+        )
     return (
         1 if invalid_transform else 0,
         0 if complete else 1,
@@ -1271,6 +1466,12 @@ def _alignment_candidate_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
         -float(item["score"]),
         -iou,
         boundary_p95,
+        # Only exact metric ties reach these final fields. Prefer the camera
+        # that needs the least whole-image residual correction, then a
+        # canonical camera signature. Candidate list order and generated view
+        # IDs therefore cannot decide an otherwise equivalent 3-D solution.
+        residual_key,
+        _camera_signature(item),
         str(item["view_id"]),
     )
 
@@ -1439,18 +1640,7 @@ def _global_finalists(
     output: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     for raw in ordered:
-        direction = tuple(round(float(value), 8) for value in raw["analysis_direction"])
-        up_axis = tuple(round(float(value), 8) for value in raw["analysis_up_axis"])
-        signature = (
-            direction,
-            up_axis,
-            round(float(raw["focal_length_mm"]), 6),
-            round(float(raw["distance_multiplier"]), 6),
-            round(float(raw.get("target_offset_u", 0.0)), 6),
-            round(float(raw.get("target_offset_v", 0.0)), 6),
-            str(raw.get("projection_mode", "perspective")),
-            round(float(raw.get("orthographic_span_multiplier", 2.0)), 6),
-        )
+        signature = _camera_signature(raw)
         if signature in seen:
             continue
         seen.add(signature)
@@ -1572,6 +1762,10 @@ def _completed_phase(
         stored_scores.get("schema_version") != SCHEMA_VERSION
         or stored_scores.get("reference_view_id") != reference_id
         or stored_scores.get("phase") != phase
+        or stored_scores.get("camera_objective_version")
+        != CAMERA_OBJECTIVE_VERSION
+        or stored_scores.get("camera_selection_policy_version")
+        != CAMERA_SELECTION_POLICY_VERSION
     ):
         return None
     winner = stored_scores.get("winner")
@@ -1594,6 +1788,12 @@ def _completed_phase(
         or candidate_ids != expected_ids
         or not isinstance(winner_id, str)
         or winner_id not in candidate_ids
+    ):
+        return None
+    if any(
+        not isinstance(candidate, Mapping)
+        or candidate.get("objective_version") != CAMERA_OBJECTIVE_VERSION
+        for candidate in candidates
     ):
         return None
     return dict(winner), [dict(candidate) for candidate in candidates]
@@ -1863,6 +2063,7 @@ def _merge_registry(
     calibrated_path: Path,
     output_path: Path,
     reference_ids: set[str],
+    calibration_provenance: Mapping[str, Any] | None = None,
 ) -> Path:
     baseline = _read_object(baseline_path)
     calibrated = _read_object(calibrated_path)
@@ -1892,6 +2093,11 @@ def _merge_registry(
         "visibility_source": "calibrated_render_set_visible_parts",
         "isolated_evidence_scope": "source_pose_bank_geometry_only",
         "calibration_source_view_count": len(baseline_render_set.get("views", [])),
+        **(
+            {"camera_calibration_provenance": dict(calibration_provenance)}
+            if calibration_provenance is not None
+            else {}
+        ),
     }
     return _write_object(output_path, baseline)
 
@@ -2040,6 +2246,46 @@ def calibrate(
         raise ValueError(
             "Missing reference masks or camera seeds: " + ", ".join(missing)
         )
+    registry_input_contract = _registry_geometry_and_pose_contract(registry)
+    reference_input_contract = _reference_evidence_contract(
+        references,
+        reference_images,
+    )
+    initial_specs_document = (
+        _read_object(initial_view_specs) if initial_view_specs is not None else None
+    )
+    spatial_mapping_document = (
+        _read_object(spatial_mapping) if spatial_mapping is not None else None
+    )
+    calibration_input_contract = {
+        "schema_version": "qwen-camera-calibration-input/v1",
+        "camera_objective_version": CAMERA_OBJECTIVE_VERSION,
+        "camera_selection_policy_version": CAMERA_SELECTION_POLICY_VERSION,
+        "registry_geometry_and_pose_sha256": _canonical_sha256(
+            registry_input_contract
+        ),
+        "reference_evidence_sha256": _canonical_sha256(reference_input_contract),
+        "initial_view_specs_sha256": (
+            _canonical_sha256(initial_specs_document)
+            if initial_specs_document is not None
+            else None
+        ),
+        "spatial_mapping_sha256": (
+            _canonical_sha256(spatial_mapping_document)
+            if spatial_mapping_document is not None
+            else None
+        ),
+        "reference_view_ids": sorted(requested),
+        "search_phases": list(active_phases),
+        "search_resolution": int(search_resolution),
+        "final_resolution": int(final_resolution),
+        "rt_subframes": int(rt_subframes),
+        "analysis_up_axis": str(analysis_up_axis),
+        "analysis_front_axis": str(analysis_front_axis),
+        "fast_search_mode": str(fast_search_mode),
+        "whole_asset_similarity_policy_sha256": _canonical_sha256(DEFAULT_POLICY),
+    }
+    calibration_input_fingerprint = _canonical_sha256(calibration_input_contract)
 
     fast_rasterizer = None
     fast_fallback_reason: str | None = None
@@ -2144,6 +2390,10 @@ def calibrate(
                     scores_path,
                     {
                         "schema_version": SCHEMA_VERSION,
+                        "camera_objective_version": CAMERA_OBJECTIVE_VERSION,
+                        "camera_selection_policy_version": (
+                            CAMERA_SELECTION_POLICY_VERSION
+                        ),
                         "reference_view_id": reference_id,
                         "phase": phase,
                         "search_backend": phase_backend,
@@ -2311,6 +2561,10 @@ def calibrate(
             destination / reference_id / "full_resolution_scores.json",
             {
                 "schema_version": SCHEMA_VERSION,
+                "camera_objective_version": CAMERA_OBJECTIVE_VERSION,
+                "camera_selection_policy_version": (
+                    CAMERA_SELECTION_POLICY_VERSION
+                ),
                 "reference_view_id": reference_id,
                 "phase": "full_resolution_rerank",
                 "winner": winner,
@@ -2335,6 +2589,8 @@ def calibrate(
             for reference_id in requested
         ],
     }
+    solution_contract = _camera_solution_contract(final_specs)
+    solution_fingerprint = _canonical_sha256(solution_contract)
     final_specs_path = _write_object(destination / "final_view_specs.json", final_specs)
     final_rendered = _seal_full_resolution_winners(
         rendered_path=finalist_rendered,
@@ -2369,6 +2625,12 @@ def calibrate(
         calibrated_path=final_rendered,
         output_path=destination / "part_registry.camera_calibrated.json",
         reference_ids=set(requested),
+        calibration_provenance={
+            "camera_objective_version": CAMERA_OBJECTIVE_VERSION,
+            "camera_selection_policy_version": CAMERA_SELECTION_POLICY_VERSION,
+            "calibration_input_fingerprint": calibration_input_fingerprint,
+            "camera_solution_fingerprint": solution_fingerprint,
+        },
     )
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -2379,9 +2641,21 @@ def calibrate(
         "source_spatial_mapping": (
             str(spatial_mapping) if spatial_mapping is not None else None
         ),
+        "source_spatial_mapping_sha256": (
+            _sha256_file(spatial_mapping) if spatial_mapping is not None else None
+        ),
         "source_initial_view_specs": (
             str(initial_view_specs) if initial_view_specs is not None else None
         ),
+        "source_initial_view_specs_sha256": (
+            _sha256_file(initial_view_specs)
+            if initial_view_specs is not None
+            else None
+        ),
+        "calibration_input_contract": calibration_input_contract,
+        "calibration_input_fingerprint": calibration_input_fingerprint,
+        "camera_solution_contract": solution_contract,
+        "camera_solution_fingerprint": solution_fingerprint,
         "search_phases": list(active_phases),
         "candidate_search": {
             "requested_mode": fast_search_mode,
@@ -2403,6 +2677,7 @@ def calibrate(
         "whole_asset_only": True,
         "per_part_geometric_warp_applied": False,
         "camera_objective_version": CAMERA_OBJECTIVE_VERSION,
+        "camera_selection_policy_version": CAMERA_SELECTION_POLICY_VERSION,
         "camera_intrinsics_optimized": [
             "projection_mode",
             "focal_length_mm",
@@ -2460,6 +2735,7 @@ def calibrate(
             for reference_id in requested
         ],
         "final_view_specs": str(final_specs_path),
+        "final_view_specs_sha256": _sha256_file(final_specs_path),
         "full_resolution_finalists": str(finalist_specs_path),
         "full_resolution_finalist_renders": str(finalist_rendered),
         "final_rendered_registry": str(final_rendered),

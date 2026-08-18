@@ -217,11 +217,25 @@ def prepare_source_evidence(
             and camera_calibration_search_specs.is_file()
             and camera_calibration_search_report.is_file()
         )
+        if calibration_is_reusable:
+            try:
+                _validate_live_camera_registration_provenance(
+                    camera_calibration_report,
+                    source_registry=rendered_registry,
+                    reference_manifest=resolved_foreground_annotations,
+                    initial_view_specs=camera_calibration_search_specs,
+                )
+            except (OSError, RuntimeError, ValueError):
+                # A final report from another objective, seed, mask or source
+                # registry is not a resumable camera solution. Rebuild the
+                # invalid pass from the current immutable inputs.
+                calibration_is_reusable = False
         if camera_search_is_reusable:
             try:
                 _validate_live_camera_registration_provenance(
                     camera_calibration_search_report,
                     source_registry=rendered_registry,
+                    reference_manifest=resolved_foreground_annotations,
                     initial_view_specs=None,
                 )
             except (OSError, RuntimeError, ValueError):
@@ -230,6 +244,7 @@ def prepare_source_evidence(
                 # the low-resolution seed pass than to inherit unverifiable
                 # camera evidence.
                 camera_search_is_reusable = False
+                calibration_is_reusable = False
         if not calibration_is_reusable:
             if not camera_search_is_reusable:
                 _run_stage(
@@ -311,11 +326,13 @@ def prepare_source_evidence(
         _validate_live_camera_registration_provenance(
             camera_calibration_search_report,
             source_registry=rendered_registry,
+            reference_manifest=resolved_foreground_annotations,
             initial_view_specs=None,
         )
         final_camera_report = _validate_live_camera_registration_provenance(
             camera_calibration_report,
             source_registry=rendered_registry,
+            reference_manifest=resolved_foreground_annotations,
             initial_view_specs=camera_calibration_search_specs,
         )
         camera_alignment_acceptance = _require_complete_live_camera_alignment(
