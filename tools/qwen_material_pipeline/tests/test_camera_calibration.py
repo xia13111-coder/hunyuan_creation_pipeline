@@ -24,6 +24,7 @@ from qwen_material_pipeline.evidence.camera_calibration import (
     _part_balanced_structure_metrics,
     _reference_masks,
     _residual_components,
+    _rank_seed_candidates,
     _seal_full_resolution_winners,
     _seed_by_view_specs,
     _score_fast_candidates,
@@ -569,6 +570,55 @@ def test_alignment_gate_precedes_weighted_structure_score() -> None:
     ranked = sorted(candidates, key=_alignment_candidate_sort_key)
 
     assert ranked[0]["view_id"] == "gate_pass"
+
+
+def test_global_seed_ranking_cannot_be_overridden_by_blended_score() -> None:
+    candidates = [
+        {
+            "view_id": "wrong_pose_basin",
+            "score": 0.99,
+            "projection_iou": 0.72,
+            "boundary_p95_px": 64.0,
+        },
+        {
+            "view_id": "geometric_seed",
+            "score": 0.58,
+            "projection_iou": 0.78,
+            "boundary_p95_px": 30.0,
+        },
+    ]
+
+    ranked = _rank_seed_candidates(candidates)
+
+    assert [item["view_id"] for item in ranked] == [
+        "geometric_seed",
+        "wrong_pose_basin",
+    ]
+
+
+def test_valid_rigid_registration_precedes_better_invalid_boundary_fit() -> None:
+    candidates = [
+        {
+            "view_id": "invalid_orthographic_scale",
+            "score": 0.95,
+            "projection_iou": 0.93,
+            "boundary_p95_px": 7.5,
+            "whole_asset_similarity": {
+                "ecc_status": "rejected_transform_constraints"
+            },
+        },
+        {
+            "view_id": "valid_perspective",
+            "score": 0.90,
+            "projection_iou": 0.925,
+            "boundary_p95_px": 9.0,
+            "whole_asset_similarity": {"ecc_status": "success"},
+        },
+    ]
+
+    ranked = sorted(candidates, key=_alignment_candidate_sort_key)
+
+    assert ranked[0]["view_id"] == "valid_perspective"
 
 
 def test_incomplete_foreground_reports_recall_separately_from_precision() -> None:

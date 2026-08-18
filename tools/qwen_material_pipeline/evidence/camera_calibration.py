@@ -1242,6 +1242,16 @@ def _score_fast_candidates(
 def _alignment_candidate_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
     """Rank by the published alignment gate before the secondary objective."""
 
+    similarity = item.get("whole_asset_similarity")
+    transform_status = (
+        similarity.get("ecc_status") if isinstance(similarity, Mapping) else None
+    )
+    # At equal render resolution, a camera that needs an out-of-contract 2-D
+    # scale/rotation/translation can never be a valid Part-ID projection.  It
+    # must not beat a physically valid camera merely by reducing one boundary
+    # statistic.  Legacy/synthetic score rows without this audit remain
+    # orderable; production rows always carry it.
+    invalid_transform = transform_status not in {None, "success"}
     iou = float(item["projection_iou"])
     boundary_p95 = float(item["boundary_p95_px"])
     iou_deficit = max(0.0, COMPLETE_ALIGNMENT_MINIMUM_IOU - iou) / max(
@@ -1254,6 +1264,7 @@ def _alignment_candidate_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
     ) / COMPLETE_ALIGNMENT_MAXIMUM_BOUNDARY_P95_PX
     complete = iou_deficit <= 0.0 and boundary_deficit <= 0.0
     return (
+        1 if invalid_transform else 0,
         0 if complete else 1,
         max(iou_deficit, boundary_deficit),
         iou_deficit + boundary_deficit,
@@ -1262,6 +1273,17 @@ def _alignment_candidate_sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
         boundary_p95,
         str(item["view_id"]),
     )
+
+
+def _rank_seed_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Rank global pose seeds by the same gate used for final cameras."""
+
+    return [
+        dict(item)
+        for item in sorted(candidates, key=_alignment_candidate_sort_key)
+    ]
 
 
 def _foreground_for_view(
@@ -1774,6 +1796,7 @@ def _seed_by_registry(
                             for key, value in component_coverage.items()
                         },
                         "boundary_p95_px": round(float(boundary["boundary_p95_px"]), 8),
+                        "whole_asset_similarity": projection,
                         **structure,
                         "analysis_direction": list(direction),
                         "analysis_up_axis": _rotate_about_axis(
@@ -1801,15 +1824,15 @@ def _seed_by_registry(
                 )
         if not candidates:
             raise ValueError(f"No source camera seed candidate for {reference_id}")
-        candidates.sort(
-            key=lambda item: (
-                -float(item["score"]),
-                -float(item["projection_iou"]),
-                float(item["boundary_p95_px"]),
-                str(item["view_id"]),
-                int(item["quarter_turns_ccw"]),
-            )
-        )
+        # Seed selection must use the same public geometry contract as every
+        # rendered refinement phase.  The blended secondary objective is
+        # intentionally useful after a camera is already in the correct pose
+        # basin, but it is not a safe global pose selector: a large component
+        # or a slightly different foreground mask can otherwise make a
+        # structurally plausible, badly bounded pose outrank a camera with a
+        # substantially better silhouette/boundary fit.  That single-seed
+        # mistake cannot be recovered by the later bounded local search.
+        candidates = _rank_seed_candidates(candidates)
         winner = candidates[0]
         seeds[reference_id] = {
             "analysis_direction": winner["analysis_direction"],
@@ -1827,6 +1850,9 @@ def _seed_by_registry(
             "winner": winner,
             "candidate_count": len(candidates),
             "top_candidates": candidates[:5],
+            "selection_policy": (
+                "published_alignment_gate_then_hierarchical_objective"
+            ),
         }
     return seeds, audit
 

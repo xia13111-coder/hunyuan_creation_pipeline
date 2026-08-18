@@ -68,6 +68,78 @@ def test_reference_foreground_removes_connected_viewer_axes() -> None:
     assert foreground[110, 80] == 255
 
 
+def test_manifest_foreground_is_shared_geometry_authority(tmp_path: Path) -> None:
+    image = np.zeros((48, 64, 3), dtype=np.uint8)
+    # The RGB heuristic would select this larger rectangle.
+    image[4:44, 5:59] = (45, 145, 62)
+    image_path = tmp_path / "reference.png"
+    Image.fromarray(image[:, :, ::-1]).save(image_path)
+    sealed = np.zeros((48, 64), dtype=np.uint8)
+    sealed[12:40, 18:52] = 255
+    mask_path = tmp_path / "foreground.png"
+    Image.fromarray(sealed).save(mask_path)
+
+    foreground, resolved, authority = (
+        spatial_gate._reference_foreground_from_manifest(
+            source={"image": str(image_path), "palette_mask": str(mask_path)},
+            manifest_path=None,
+            image=image,
+            view_id="front",
+        )
+    )
+
+    assert authority == "manifest_palette_mask"
+    assert resolved == mask_path.resolve()
+    assert np.array_equal(foreground, sealed)
+
+
+def test_declared_manifest_foreground_shape_mismatch_fails_closed(
+    tmp_path: Path,
+) -> None:
+    image = np.zeros((48, 64, 3), dtype=np.uint8)
+    mask_path = tmp_path / "wrong_shape.png"
+    Image.fromarray(np.full((24, 32), 255, dtype=np.uint8)).save(mask_path)
+
+    with pytest.raises(
+        SpatialMappingError,
+        match="does not match image shape",
+    ):
+        spatial_gate._reference_foreground_from_manifest(
+            source={"palette_mask": str(mask_path)},
+            manifest_path=None,
+            image=image,
+            view_id="front",
+        )
+
+
+def test_similarity_scale_contract_is_independent_of_raster_resolution() -> None:
+    reference = np.zeros((128, 128), dtype=np.uint8)
+    reference[32:96, 32:96] = 255
+    render_full = reference.copy()
+    render_half = np.zeros((64, 64), dtype=np.uint8)
+    render_half[16:48, 16:48] = 255
+
+    full = spatial_gate._refine_projection(
+        reference,
+        render_full,
+        spatial_gate.DEFAULT_POLICY,
+    )
+    half = spatial_gate._refine_projection(
+        reference,
+        render_half,
+        spatial_gate.DEFAULT_POLICY,
+    )
+
+    assert full["ecc_status"] == "success"
+    assert half["ecc_status"] == "success"
+    assert full["ecc_transform_audit"]["minimum_scale"] == pytest.approx(1.0)
+    assert half["ecc_transform_audit"]["minimum_scale"] == pytest.approx(1.0)
+    assert half["ecc_transform_audit"]["raw_uniform_scale"] == pytest.approx(2.0)
+    assert half["ecc_transform_audit"][
+        "resolution_scale_normalization"
+    ] == pytest.approx(0.5)
+
+
 def test_unique_multiview_canonical_color_supplements_omitted_local_palette() -> None:
     references = [
         {

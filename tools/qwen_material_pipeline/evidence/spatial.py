@@ -340,6 +340,47 @@ def _reference_foreground(image: np.ndarray) -> np.ndarray:
     return cleaned
 
 
+def _reference_foreground_from_manifest(
+    *,
+    source: Mapping[str, Any],
+    manifest_path: Path | None,
+    image: np.ndarray,
+    view_id: str,
+) -> tuple[np.ndarray, Path | None, str]:
+    """Return the sealed foreground used by camera calibration when present.
+
+    Camera calibration and Part-ID projection are two consumers of the same
+    reference geometry.  Re-segmenting the RGB independently here used to
+    create a second, incompatible coordinate contract: the camera could pass
+    against the SAM foreground while spatial ECC rejected the identical
+    camera against a border-colour heuristic.  A manifest-declared mask is
+    therefore authoritative and fail-closed.  Legacy manifests without one
+    retain the deterministic RGB fallback.
+    """
+
+    raw_mask = source.get("palette_mask")
+    if raw_mask is None:
+        return _reference_foreground(image), None, "deterministic_rgb_fallback"
+    mask_path = _resolve_file(
+        raw_mask,
+        manifest_path,
+        f"reference foreground mask {view_id}",
+    )
+    mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise SpatialMappingError(
+            f"unable to decode reference foreground mask {view_id}: {mask_path}"
+        )
+    if mask.shape != image.shape[:2]:
+        raise SpatialMappingError(
+            f"reference foreground mask {view_id} shape {mask.shape} does not "
+            f"match image shape {image.shape[:2]}"
+        )
+    foreground = (mask > 0).astype(np.uint8) * 255
+    _bbox(foreground, f"reference foreground mask {view_id}")
+    return foreground, mask_path, "manifest_palette_mask"
+
+
 def _cad_foreground(
     rgb: np.ndarray,
     part_ids: np.ndarray,
@@ -689,21 +730,35 @@ def _refine_projection(
         render_mask,
         reference_mask,
     )
-    scale = float(registration["uniform_scale"])
+    raw_scale = float(registration["uniform_scale"])
+    # The registration matrix maps render pixels into reference pixels.  Its
+    # raw scale therefore also contains the arbitrary raster-resolution ratio
+    # (for example a 256 px search render scored against a 582 px reference).
+    # Compare physical residual scale only after removing that ratio; without
+    # this normalization the exact same camera was invalid at search
+    # resolution and valid at delivery resolution.
+    resolution_scale_normalization = math.sqrt(
+        float(render_mask.size) / max(1.0, float(reference_mask.size))
+    )
+    scale = raw_scale * resolution_scale_normalization
     rotation_degrees = float(registration["rotation_degrees"])
     matrix = np.asarray(registration["affine_2x3"], dtype=np.float32)
-    source_centroid = _mask_centroid_for_global_registration(render_mask)
-    transformed_centroid = matrix[:, :2] @ np.asarray(
-        source_centroid,
-        dtype=np.float32,
-    ) + matrix[:, 2]
-    displacement = transformed_centroid - np.asarray(
-        source_centroid,
-        dtype=np.float32,
-    )
+    # ``affine_2x3`` maps between different raster canvases, so its absolute
+    # translation includes the expected recentering caused by resolution and
+    # scale.  Only the optimizer's residual offset is a physical alignment
+    # constraint.
+    residual_translation = registration.get("translation_offset_xy")
+    if (
+        not isinstance(residual_translation, Sequence)
+        or isinstance(residual_translation, (str, bytes))
+        or len(residual_translation) != 2
+    ):
+        raise SpatialMappingError(
+            "whole-asset registration lacks residual translation evidence"
+        )
     translation_ratio = max(
-        abs(float(displacement[0])) / max(1, reference_mask.shape[1]),
-        abs(float(displacement[1])) / max(1, reference_mask.shape[0]),
+        abs(float(residual_translation[0])) / max(1, reference_mask.shape[1]),
+        abs(float(residual_translation[1])) / max(1, reference_mask.shape[0]),
     )
     failures: list[str] = []
     if scale < float(policy["minimum_ecc_scale"]):
@@ -731,9 +786,14 @@ def _refine_projection(
         "registration_mode": (
             "whole_asset_uniform_scale_rotation_translation"
         ),
-        "determinant": round(scale * scale, 8),
+        "determinant": round(raw_scale * raw_scale, 8),
         "minimum_scale": round(scale, 8),
         "maximum_scale": round(scale, 8),
+        "raw_uniform_scale": round(raw_scale, 8),
+        "resolution_scale_normalization": round(
+            resolution_scale_normalization,
+            8,
+        ),
         "condition_number": 1.0,
         "rotation_degrees": round(rotation_degrees, 8),
         "shear": 0.0,
@@ -761,18 +821,6 @@ def _refine_projection(
         "projection_iou": round(float(registration["iou"]), 8),
         "ecc_transform_audit": diagnostics,
     }
-
-
-def _mask_centroid_for_global_registration(
-    mask: np.ndarray,
-) -> tuple[float, float]:
-    moments = cv2.moments((mask > 0).astype(np.uint8), binaryImage=True)
-    if moments["m00"] <= 0.0:
-        raise SpatialMappingError("global registration mask is empty")
-    return (
-        float(moments["m10"] / moments["m00"]),
-        float(moments["m01"] / moments["m00"]),
-    )
 
 
 def _candidate_render_ids(
@@ -3322,7 +3370,14 @@ def build_spatial_mapping_report(
             source.get("image"), manifest_path, f"reference image {view_id}"
         )
         image = _open_bgr(image_path, f"reference image {view_id}")
-        foreground = _reference_foreground(image)
+        foreground, foreground_mask_path, foreground_authority = (
+            _reference_foreground_from_manifest(
+                source=source,
+                manifest_path=manifest_path,
+                image=image,
+                view_id=view_id,
+            )
+        )
         _bbox(foreground, f"reference {view_id}")
         palette = normalized_palettes_by_view.get(view_id)
         if not isinstance(palette, Mapping):
@@ -3342,14 +3397,25 @@ def build_spatial_mapping_report(
             ),
             view_id=view_id,
         )
+        reference_image_sha256 = _sha256_file(image_path)
         files.append(
             {
                 "label": f"reference_image:{view_id}",
                 "path": str(image_path),
-                "sha256": _sha256_file(image_path),
+                "sha256": reference_image_sha256,
             }
         )
-        reference_sha256_by_view[view_id] = files[-1]["sha256"]
+        foreground_mask_sha256 = None
+        if foreground_mask_path is not None:
+            foreground_mask_sha256 = _sha256_file(foreground_mask_path)
+            files.append(
+                {
+                    "label": f"reference_foreground_mask:{view_id}",
+                    "path": str(foreground_mask_path),
+                    "sha256": foreground_mask_sha256,
+                }
+            )
+        reference_sha256_by_view[view_id] = reference_image_sha256
         reference_pixel_sha256_by_view[view_id] = _normalized_pixel_sha256(image)
         reference_phash_by_view[view_id] = _perceptual_hash(image)
         references.append(
@@ -3358,6 +3424,9 @@ def build_spatial_mapping_report(
                 "image_path": image_path,
                 "image": image,
                 "foreground": foreground,
+                "foreground_authority": foreground_authority,
+                "foreground_mask_path": foreground_mask_path,
+                "foreground_mask_sha256": foreground_mask_sha256,
                 "palette_groups": groups,
                 "group_id_map": dict(group_map),
                 "accepted_palette_evidence": accepted_palette_evidence,
@@ -3930,6 +3999,8 @@ def build_spatial_mapping_report(
                 "content_cluster_id": (
                     reference_content_cluster_by_view[reference["view_id"]]
                 ),
+                "foreground_authority": reference["foreground_authority"],
+                "foreground_mask_sha256": reference["foreground_mask_sha256"],
                 "selected_render_view_id": alignment_by_reference_id[
                     reference["view_id"]
                 ]["selected_render_view_id"],

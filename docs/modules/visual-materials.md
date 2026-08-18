@@ -44,6 +44,15 @@ view turns visible small parts into false hidden-part fallbacks. Fast search
 therefore remains available for explicit experiments, while the default
 material path prioritizes complete four-view evidence.
 
+Global camera seeds and per-phase candidates use the same geometry-gate
+ordering: candidates that require out-of-contract 2-D scale, rotation, or
+translation are rejected before silhouette IoU, boundary residual, and
+structure scores are compared. Camera calibration and spatial Part-ID
+projection share the sealed whole-workpiece foreground from the reference
+manifest, and cross-resolution comparisons remove raster-size scale and
+translation before enforcing physical residual limits. These rules contain no
+asset name, camera-angle, or Part-ID special cases.
+
 `asset_pipeline/visual_materials/` coordinates the workflow.
 `tools/qwen_material_pipeline/` provides segmentation, evidence extraction,
 retrieval, model calls, and USD workers. Isaac Sim handles CAD/USD, MDL
