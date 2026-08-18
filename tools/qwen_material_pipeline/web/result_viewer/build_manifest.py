@@ -641,6 +641,14 @@ def _final_collected_preview_images(
             if isinstance(final_measurements, Mapping)
             else None
         )
+        raw_aggregate_appearance_score = (
+            final_measurements.get(
+                "raw_aggregate_appearance_score",
+                final_measurements.get("aggregate_appearance_score"),
+            )
+            if isinstance(final_measurements, Mapping)
+            else None
+        )
         minimum_comparable_views = (
             _nonnegative_integer(policy.get("minimum_comparable_views"))
             if isinstance(policy, Mapping)
@@ -661,7 +669,12 @@ def _final_collected_preview_images(
             != comparable_view_count
             or final_measurements.get("scored_view_count")
             != comparable_view_count
-            or final_measurements.get("aggregate_appearance_score")
+            # Newer Part-ID gates expose a scoped/effective aggregate and
+            # retain the whole-report value separately.  The browser preview
+            # is bound to the collected report, so compare against the raw
+            # report aggregate when it is present.  Older gates used the
+            # effective field for both values and remain supported.
+            or raw_aggregate_appearance_score
             != aggregate.get("material_appearance_score")
             or not isinstance(part_id_views, list)
             or len(part_id_views) != comparable_view_count

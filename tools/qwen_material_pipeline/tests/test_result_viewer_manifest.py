@@ -620,7 +620,8 @@ def _write_final_collected_acceptance(
                     "measurements": {
                         "comparable_view_count": 3,
                         "scored_view_count": 3,
-                        "aggregate_appearance_score": 0.85,
+                        "aggregate_appearance_score": 0.86,
+                        "raw_aggregate_appearance_score": 0.85,
                         "views": comparable_views,
                     },
                     "limitations": [
