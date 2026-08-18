@@ -2086,6 +2086,72 @@ def result_policy(
     return policy
 
 
+def _automatic_cad_shape_contract_accepted(
+    box_audits: Sequence[Mapping[str, Any]],
+    view_shared_alignment: Mapping[str, Any],
+) -> bool:
+    """Return whether one automatic box satisfies the downstream CAD contract.
+
+    A detector box is only a coarse localization hint.  For an automatic
+    CAD-guided request, it must not make the whole record successful unless
+    SAM3 also produced one accepted shape refinement bound to the shared
+    whole-assembly camera alignment.  Human click requests and ordinary text
+    box requests do not use this contract.
+    """
+
+    translation = view_shared_alignment.get("translation_xy_pixels")
+    if (
+        not isinstance(translation, Sequence)
+        or isinstance(translation, (str, bytes))
+        or len(translation) != 2
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in translation
+        )
+        or view_shared_alignment.get("part_specific_translation_allowed") is not False
+        or len(box_audits) != 1
+    ):
+        return False
+
+    box_audit = box_audits[0]
+    selected_index = box_audit.get("selected_candidate_index")
+    candidates = box_audit.get("candidates")
+    refinement = box_audit.get("shape_point_refinement")
+    prompt_audit = (
+        refinement.get("prompt_audit") if isinstance(refinement, Mapping) else None
+    )
+    selected = (
+        next(
+            (
+                item
+                for item in candidates
+                if isinstance(item, Mapping)
+                and item.get("candidate_index") == selected_index
+                and item.get("accepted") is True
+            ),
+            None,
+        )
+        if isinstance(candidates, list)
+        and isinstance(selected_index, int)
+        and not isinstance(selected_index, bool)
+        else None
+    )
+    return bool(
+        box_audit.get("accepted") is True
+        and selected is not None
+        and isinstance(refinement, Mapping)
+        and refinement.get("accepted") is True
+        and isinstance(prompt_audit, Mapping)
+        and prompt_audit.get("per_mesh_pose_change_allowed") is False
+        and prompt_audit.get("part_specific_translation_allowed") is False
+        and prompt_audit.get("part_local_translation_xy_pixels") == [0.0, 0.0]
+        and prompt_audit.get("translation_xy_pixels")
+        == [float(translation[0]), float(translation[1])]
+    )
+
+
 def run(
     *,
     request_path: Path,
@@ -2502,6 +2568,17 @@ def run(
             union_pixels = int(np.count_nonzero(union))
             union_fraction = union_pixels / max(1, image.width * image.height)
             reasons: list[str] = []
+            automatic_cad_shape_requested = (
+                not click_sets and isinstance(cad_seed_record, Mapping)
+            )
+            automatic_cad_shape_contract_accepted = (
+                _automatic_cad_shape_contract_accepted(
+                    box_audits,
+                    view_shared_alignment,
+                )
+                if automatic_cad_shape_requested
+                else None
+            )
             if click_sets and accepted_point_sets != len(click_sets):
                 reasons.append("not_all_human_click_sets_reproduced")
             if click_sets and (
@@ -2511,6 +2588,11 @@ def run(
                 reasons.append("confirmed_mask_reproduction_mismatch")
             if not click_sets and accepted_boxes == 0:
                 reasons.append("no_box_prediction_accepted")
+            if (
+                automatic_cad_shape_requested
+                and automatic_cad_shape_contract_accepted is not True
+            ):
+                reasons.append("no_shape_guided_refinement_accepted")
             if union_pixels < minimum_mask_pixels:
                 reasons.append("union_mask_too_small")
             if union_fraction > maximum_image_fraction:
@@ -2529,11 +2611,7 @@ def run(
                         else "human_interactive_points"
                         if click_sets
                         else "cad_shape_guided_box_then_automatic_points"
-                        if any(
-                            isinstance(item.get("shape_point_refinement"), Mapping)
-                            and item["shape_point_refinement"].get("accepted") is True
-                            for item in box_audits
-                        )
+                        if automatic_cad_shape_contract_accepted is True
                         else "text_and_positive_boxes"
                     ),
                     "interaction_replay_mode": (
@@ -2552,6 +2630,9 @@ def run(
                     "source_image": str(source_paths[view_id]),
                     "source_image_sha256": _sha256_file(source_paths[view_id]),
                     "view_shared_alignment": view_shared_alignment,
+                    "automatic_cad_shape_contract_accepted": (
+                        automatic_cad_shape_contract_accepted
+                    ),
                     "accepted": accepted,
                     "reason_codes": reasons,
                     "accepted_box_count": accepted_boxes,

@@ -15,6 +15,7 @@ from qwen_material_pipeline.segmentation.sam3_regions import (
     POINT_SCHEMA_VERSION,
     SCHEMA_VERSION,
     Sam3RegionError,
+    _automatic_cad_shape_contract_accepted,
     _arbitrate_view_group_masks,
     _bounded_shared_camera_alignment,
     _box_pixels,
@@ -1062,6 +1063,56 @@ def test_result_policy_binds_automatic_cad_shape_refinement() -> None:
         "always_run_same_view_cad_shape_positive_negative_points"
     )
     assert "human_point_replay_policy" not in policy
+
+
+def _automatic_shape_box_audit(*, refinement_accepted: bool = True) -> dict:
+    return {
+        "accepted": True,
+        "selected_candidate_index": 1 if refinement_accepted else 0,
+        "candidates": [
+            {"candidate_index": 0, "accepted": True},
+            *(
+                [{"candidate_index": 1, "accepted": True}]
+                if refinement_accepted
+                else []
+            ),
+        ],
+        "shape_point_refinement": {
+            "accepted": refinement_accepted,
+            "prompt_audit": {
+                "translation_xy_pixels": [2.0, -1.0],
+                "part_local_translation_xy_pixels": [0.0, 0.0],
+                "part_specific_translation_allowed": False,
+                "per_mesh_pose_change_allowed": False,
+            },
+        },
+    }
+
+
+def test_automatic_cad_shape_contract_rejects_box_only_fallback() -> None:
+    assert not _automatic_cad_shape_contract_accepted(
+        [_automatic_shape_box_audit(refinement_accepted=False)],
+        {
+            "translation_xy_pixels": [2.0, -1.0],
+            "part_specific_translation_allowed": False,
+        },
+    )
+
+
+def test_automatic_cad_shape_contract_requires_one_shared_rigid_alignment() -> None:
+    box = _automatic_shape_box_audit()
+    shared = {
+        "translation_xy_pixels": [2.0, -1.0],
+        "part_specific_translation_allowed": False,
+    }
+
+    assert _automatic_cad_shape_contract_accepted([box], shared)
+    assert not _automatic_cad_shape_contract_accepted([box, box], shared)
+
+    box["shape_point_refinement"]["prompt_audit"][
+        "part_local_translation_xy_pixels"
+    ] = [1.0, 0.0]
+    assert not _automatic_cad_shape_contract_accepted([box], shared)
 
 
 def test_amodal_shape_restores_only_renderer_known_occlusion() -> None:
