@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 from .entityseg_comparison_report import _annotate, _mask, _overlay, _read_manifest
-from .entityseg_regions import EntitySegRegionError
+from .entityseg_regions import EntitySegRegionError, _internal_repair_support
 
 
 def _all_records(
@@ -31,9 +31,13 @@ def _all_records(
 
 
 def _record_mask(
-    root: Path, row: Mapping[str, Any], expected_shape: tuple[int, int]
+    root: Path,
+    row: Mapping[str, Any],
+    expected_shape: tuple[int, int],
+    *,
+    field: str = "mask",
 ) -> np.ndarray:
-    mask = row.get("mask")
+    mask = row.get(field)
     if not isinstance(mask, Mapping) or not isinstance(mask.get("path"), str):
         return np.zeros(expected_shape, dtype=bool)
     path = Path(mask["path"])
@@ -79,6 +83,7 @@ def _tile(
     hybrid: np.ndarray,
     sam_accepted: bool,
     entity_accepted: bool,
+    entity_internal_repair: bool,
     selected_source: str,
 ) -> np.ndarray:
     union = seed | amodal | sam | entity | hybrid
@@ -94,7 +99,11 @@ def _tile(
         ("isolated mesh shape", amodal, (0, 165, 255)),
         ("SAM3" if sam_accepted else "SAM3 rejected", sam, (0, 255, 0)),
         (
-            "EntitySeg" if entity_accepted else "EntitySeg rejected",
+            "EntitySeg"
+            if entity_accepted
+            else "EntitySeg repair support"
+            if entity_internal_repair
+            else "EntitySeg rejected",
             entity,
             (255, 255, 0),
         ),
@@ -194,7 +203,23 @@ def build_report(
         else:
             amodal = seed
         sam_mask = _record_mask(sam_root, sam_row, source.shape[:2])
-        entity_mask = _record_mask(entity_root, entity_row, source.shape[:2])
+        entity_internal_repair = (
+            entity_row.get("internal_repair_mask") is not None
+            and entity_row.get("accepted") is not True
+        )
+        entity_mask = _record_mask(
+            entity_root,
+            entity_row,
+            source.shape[:2],
+            field=("internal_repair_mask" if entity_internal_repair else "mask"),
+        )
+        if entity_internal_repair:
+            # The persisted repair mask is the raw (possibly oversized)
+            # EntitySeg proposal. Display only the bounded internal support
+            # that the fusion algorithm is actually authorized to consume.
+            entity_mask, _repair_metrics = _internal_repair_support(
+                entity_mask, seed, amodal
+            )
         final_mask = _record_mask(hybrid_root, final_row, source.shape[:2])
         decision = str(final_row["decision"])
         asset_name = f"{decision}__{key[0]}__{key[1]}.png"
@@ -208,6 +233,7 @@ def build_report(
             hybrid=final_mask,
             sam_accepted=sam_row.get("accepted") is True,
             entity_accepted=entity_row.get("accepted") is True,
+            entity_internal_repair=entity_internal_repair,
             selected_source=str(final_row["selected_source"]),
         )
         if not cv2.imwrite(str(asset_path), tile):
@@ -224,6 +250,10 @@ def build_report(
                 "metrics": final_row.get("fusion_metrics"),
                 "cad_support_trim": final_row.get("cad_support_trim"),
                 "iterative_refinement": final_row.get("iterative_refinement"),
+                "entityseg_internal_repair_candidate_available": final_row.get(
+                    "entityseg_internal_repair_candidate_available"
+                )
+                is True,
                 "aligned_cad_template": final_row.get("aligned_cad_template"),
                 "accepted": final_row.get("accepted") is True,
                 "asset": f"assets/{asset_name}",
@@ -278,6 +308,25 @@ def build_report(
                 )
                 if isinstance(removed, int) and removed:
                     details.append(f"移除遮挡误归属 {removed} px")
+                repair_pixels = refinement.get("entityseg_internal_repair_pixels")
+                if (
+                    refinement.get("entityseg_internal_repair_applied") is True
+                    and isinstance(repair_pixels, int)
+                    and repair_pixels
+                ):
+                    final_repair_pixels = int(
+                        refinement.get("entityseg_internal_repair_final_pixels", 0)
+                    )
+                    details.append(
+                        "EntitySeg 修复封闭或尺度受限的 CAD 内部缺口 "
+                        f"{final_repair_pixels}/{repair_pixels} px"
+                    )
+                elif (
+                    refinement.get("entityseg_internal_repair_authorized") is True
+                    and isinstance(repair_pixels, int)
+                    and repair_pixels
+                ):
+                    details.append(f"EntitySeg 内部修复候选 {repair_pixels} px 未提升目标，未应用")
             alignment = row.get("aligned_cad_template")
             if isinstance(alignment, Mapping):
                 translation = alignment.get("translation_xy_pixels", [0.0, 0.0])
@@ -311,7 +360,7 @@ h1{{margin:.1em 0}}h2{{margin-top:42px}}.lead,.card p{{color:var(--muted)}}.stat
 .card img{{display:block;width:100%;height:auto;border-radius:7px}}.card p{{margin:8px 2px 0}}@media(max-width:650px){{main{{padding:14px}}.grid{{grid-template-columns:1fr}}}}
 </style></head><body><main><h1>SAM3 + EntitySeg 辅助分割</h1>
 <p class="lead">红色是整机渲染得到的当前视图可见 Part-ID（遮挡归属权威），黄色是保持同一整机相机和刚体位姿、仅隐藏其他 mesh 后投影出的完整零件形状。绿色和青色是 SAM3 与 EntitySeg 的前序估计；紫色不是二选一，而是在完整 mesh、当前可见性和照片边缘之间逐轮优化并选择最优安全迭代。每个视角只允许整件工件共享一个有界 2D 相机残差，不允许单独移动、旋转或缩放 mesh。</p>
-<div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">联合候选迭代 <b>{summary['decision_counts'].get('iterative_refinement_from_sam3_entityseg', 0)}</b></div><div class="stat">单候选 + mesh 迭代 <b>{summary['decision_counts'].get('iterative_refinement_from_sam3', 0) + summary['decision_counts'].get('iterative_refinement_from_entityseg', 0)}</b></div><div class="stat">最终边界：迭代优化 <b>{summary['selected_source_counts'].get('shape_guided_iterative', 0)}</b></div></div>
+<div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">联合候选迭代 <b>{summary['decision_counts'].get('iterative_refinement_from_sam3_entityseg', 0)}</b></div><div class="stat">单候选 + mesh 迭代 <b>{summary['decision_counts'].get('iterative_refinement_from_sam3', 0) + summary['decision_counts'].get('iterative_refinement_from_entityseg', 0)}</b></div><div class="stat">EntitySeg 内部修复 <b>{summary.get('entityseg_internal_repair_applied_region_count', 0)}</b> / 候选 {summary.get('entityseg_internal_repair_authorized_region_count', 0)}</div><div class="stat">最终边界：迭代优化 <b>{summary['selected_source_counts'].get('shape_guided_iterative', 0)}</b></div></div>
 <p class="lead">这是正式 Part-ID 材质证据使用的边界融合结果；无安全候选时会回退到已审计的 CAD 投影，不会猜测零件边界。点击图片可查看原始像素。</p>
 <nav>{''.join(f'<a href="#{key}">{value}</a>' for key,value in labels.items())}</nav>{''.join(sections)}</main></body></html>"""
     (output_dir / "index.html").write_text(page, encoding="utf-8")

@@ -11,6 +11,9 @@ import pytest
 from qwen_material_pipeline.evidence.part_id_projection import (
     _load_part_id_refinement_manifest,
 )
+from qwen_material_pipeline.segmentation.entityseg_regions import (
+    _internal_repair_support,
+)
 from qwen_material_pipeline.segmentation.hybrid_part_masks import (
     build_hybrid_masks,
     _connected_component_count,
@@ -184,6 +187,46 @@ def test_iterative_refinement_jointly_consumes_safe_sam_and_entity_priors() -> N
     assert audit["candidate_sources"] == ["entityseg", "sam3"]
     assert audit["prior_candidate_role"] == "probable_foreground_initialization_only"
     assert audit["method"] == "iterative_visible_mesh_edge_optimization"
+
+
+def test_rejected_entity_can_fill_enclosed_cad_hole_but_not_outer_boundary() -> None:
+    image = np.zeros((96, 128, 3), dtype=np.uint8)
+    image[18:78, 24:104] = (30, 130, 40)
+    amodal = np.zeros((96, 128), dtype=bool)
+    amodal[18:78, 24:104] = True
+    visible = amodal.copy()
+    visible[42:52, 54:78] = False
+    sam = visible.copy()
+    oversized_entity = np.zeros_like(visible)
+    oversized_entity[12:84, 14:116] = True
+    repair_support, repair_metrics = _internal_repair_support(
+        oversized_entity, visible, amodal
+    )
+    repair_audit = {
+        "internal_repair_eligible": True,
+        "internal_repair": repair_metrics,
+    }
+
+    refined, audit, _support = _iterative_shape_guided_refinement(
+        image=image,
+        visible_seed=visible,
+        amodal_seed=amodal,
+        candidate_masks=[("sam3", sam)],
+        primary_candidate_source="sam3",
+        internal_repair_mask=oversized_entity,
+        internal_repair_candidate_audit=repair_audit,
+    )
+
+    assert np.any(repair_support)
+    assert np.all(refined[repair_support])
+    assert not np.any(refined & ~amodal)
+    assert audit["entityseg_internal_repair_authorized"] is True
+    assert audit["entityseg_internal_repair_applied"] is True
+    assert audit["entityseg_internal_repair_pixels"] == np.count_nonzero(repair_support)
+    assert (
+        audit["entityseg_internal_repair_final_pixels"]
+        > audit["entityseg_internal_repair_initial_pixels"]
+    )
 
 
 def test_hybrid_replays_sam_shared_camera_template_translation() -> None:

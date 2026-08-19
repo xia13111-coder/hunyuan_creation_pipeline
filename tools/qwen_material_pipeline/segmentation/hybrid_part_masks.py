@@ -13,7 +13,11 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
-from .entityseg_regions import EntitySegRegionError, _boundary_metrics
+from .entityseg_regions import (
+    EntitySegRegionError,
+    _boundary_metrics,
+    _internal_repair_support,
+)
 
 
 SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v2"
@@ -388,6 +392,7 @@ def _refinement_metrics(
     visible_seed: np.ndarray,
     amodal_seed: np.ndarray,
     candidate_masks: list[np.ndarray],
+    internal_repair_support: np.ndarray,
 ) -> dict[str, float | int]:
     mask_pixels = int(np.count_nonzero(mask))
     visible_pixels = int(np.count_nonzero(visible_seed))
@@ -397,6 +402,7 @@ def _refinement_metrics(
     candidate_agreements = [_mask_iou(mask, candidate) for candidate in candidate_masks]
     edge = _boundary_metrics(image, mask)
     visible_iou = _mask_iou(mask, visible_seed)
+    visibility_plus_repair_iou = _mask_iou(mask, visible_seed | internal_repair_support)
     mean_candidate_iou = float(np.mean(candidate_agreements))
     edge_support = float(edge["image_edge_support_fraction_025"])
     # An unweighted geometric mean prevents any one authority (CAD, image
@@ -404,7 +410,7 @@ def _refinement_metrics(
     objective = float(
         np.cbrt(
             max(edge_support, 1e-9)
-            * max(visible_iou, 1e-9)
+            * max(visibility_plus_repair_iou, 1e-9)
             * max(mean_candidate_iou, 1e-9)
         )
     )
@@ -414,6 +420,11 @@ def _refinement_metrics(
         "visible_seed_recall": visible_intersection / max(visible_pixels, 1),
         "visible_seed_precision": visible_intersection / max(mask_pixels, 1),
         "visible_seed_iou": visible_iou,
+        "visibility_plus_entity_repair_iou": visibility_plus_repair_iou,
+        "entity_internal_repair_recall": int(
+            np.count_nonzero(mask & internal_repair_support)
+        )
+        / max(int(np.count_nonzero(internal_repair_support)), 1),
         "final_to_visible_area_ratio": mask_pixels / max(visible_pixels, 1),
         "amodal_candidate_precision": amodal_intersection / max(mask_pixels, 1),
         "final_to_amodal_area_ratio": mask_pixels / max(amodal_pixels, 1),
@@ -432,6 +443,8 @@ def _iterative_shape_guided_refinement(
     amodal_seed: np.ndarray | None,
     candidate_masks: list[tuple[str, np.ndarray]],
     primary_candidate_source: str,
+    internal_repair_mask: np.ndarray | None = None,
+    internal_repair_candidate_audit: Mapping[str, Any] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any], dict[str, float | int]]:
     """Optimize one visible instance without choosing one model mask verbatim.
 
@@ -471,11 +484,30 @@ def _iterative_shape_guided_refinement(
     support_radius, core_radius, occlusion_margin = _automatic_refinement_radii(visible)
     visible_support = _ellipse_morphology(visible, radius=support_radius, dilate=True)
     complete_support = _ellipse_morphology(amodal, radius=support_radius, dilate=True)
-    optimization_support = visible_support & complete_support
     visible_with_margin = _ellipse_morphology(
         visible, radius=occlusion_margin, dilate=True
     )
     known_occluded = amodal & ~visible_with_margin
+    entity_internal_repair = np.zeros_like(visible)
+    replayed_repair_metrics: dict[str, Any] | None = None
+    if internal_repair_mask is not None:
+        if internal_repair_candidate_audit is None:
+            raise EntitySegRegionError("EntitySeg internal repair has no sealed audit")
+        entity_internal_repair, replayed_repair_metrics = _internal_repair_support(
+            np.asarray(internal_repair_mask, dtype=bool), visible, amodal
+        )
+        sealed_metrics = internal_repair_candidate_audit.get("internal_repair")
+        if (
+            internal_repair_candidate_audit.get("internal_repair_eligible") is not True
+            or not isinstance(sealed_metrics, Mapping)
+            or dict(sealed_metrics) != replayed_repair_metrics
+            or not np.any(entity_internal_repair)
+        ):
+            raise EntitySegRegionError(
+                "EntitySeg internal repair does not replay its sealed CAD-hole audit"
+            )
+    hard_known_occluded = known_occluded & ~entity_internal_repair
+    optimization_support = (visible_support | entity_internal_repair) & complete_support
     prior_union = np.logical_or.reduce(list(candidate_by_source.values()))
     primary_unbounded = candidate_by_source[primary_candidate_source]
     initial, _initial_visible_bound = _trim_entity_to_cad_support(
@@ -495,14 +527,29 @@ def _iterative_shape_guided_refinement(
         visible_core = visible & (distance >= max(0.5, 0.5 * maximum))
     if not np.any(visible_core):
         raise EntitySegRegionError("visible CAD seed has no stable interior core")
+    entity_repair_core = np.zeros_like(visible)
+    if np.any(entity_internal_repair):
+        entity_repair_core = _ellipse_morphology(
+            entity_internal_repair, radius=1, dilate=False
+        )
+        if not np.any(entity_repair_core):
+            repair_distance = cv2.distanceTransform(
+                entity_internal_repair.astype(np.uint8), cv2.DIST_L2, 3
+            )
+            entity_repair_core = entity_internal_repair & (
+                repair_distance >= max(0.5, 0.5 * float(repair_distance.max()))
+            )
 
     candidate_values = list(candidate_by_source.values())
+    if np.any(entity_internal_repair):
+        candidate_values.append(initial | entity_internal_repair)
     initial_metrics = _refinement_metrics(
         image=image,
         mask=initial,
         visible_seed=visible,
         amodal_seed=amodal,
         candidate_masks=candidate_values,
+        internal_repair_support=entity_internal_repair,
     )
     best_mask = initial
     best_metrics = initial_metrics
@@ -519,13 +566,18 @@ def _iterative_shape_guided_refinement(
     crop = np.s_[top:bottom, left:right]
     labels = np.full(visible[crop].shape, cv2.GC_PR_BGD, dtype=np.uint8)
     local_support = optimization_support[crop]
-    local_occluded = known_occluded[crop]
+    local_hard_occluded = hard_known_occluded[crop]
     labels[~local_support] = cv2.GC_BGD
     labels[
-        ((prior_union | visible) & optimization_support & ~known_occluded)[crop]
+        (
+            (prior_union | visible | entity_internal_repair)
+            & optimization_support
+            & ~hard_known_occluded
+        )[crop]
     ] = cv2.GC_PR_FGD
     labels[visible_core[crop]] = cv2.GC_FGD
-    labels[local_occluded] = cv2.GC_BGD
+    labels[entity_repair_core[crop]] = cv2.GC_FGD
+    labels[local_hard_occluded] = cv2.GC_BGD
     if not np.any(labels == cv2.GC_FGD) or not np.any(labels == cv2.GC_BGD):
         raise EntitySegRegionError("shape-guided optimization lacks hard seeds")
 
@@ -560,19 +612,22 @@ def _iterative_shape_guided_refinement(
         refined = np.zeros_like(visible)
         refined[crop] = local_mask
         refined &= optimization_support
-        refined &= ~known_occluded
+        refined &= ~hard_known_occluded
         metrics = _refinement_metrics(
             image=image,
             mask=refined,
             visible_seed=visible,
             amodal_seed=amodal,
             candidate_masks=candidate_values,
+            internal_repair_support=entity_internal_repair,
         )
         reasons: list[str] = []
         if not np.any(refined):
             reasons.append("refinement_is_empty")
         if not np.all(refined[visible_core]):
             reasons.append("visible_cad_core_was_not_preserved")
+        if np.any(entity_repair_core) and not np.all(refined[entity_repair_core]):
+            reasons.append("entityseg_internal_repair_core_was_not_preserved")
         if float(metrics["visible_seed_recall"]) < minimum_visible_recall:
             reasons.append("visible_cad_recall_regressed")
         area_ratio = float(metrics["final_to_visible_area_ratio"])
@@ -610,6 +665,8 @@ def _iterative_shape_guided_refinement(
     initial_pixels = int(np.count_nonzero(initial))
     final_pixels = int(np.count_nonzero(best_mask))
     unbounded_pixels = int(np.count_nonzero(primary_unbounded))
+    initial_repair_pixels = int(np.count_nonzero(initial & entity_internal_repair))
+    final_repair_pixels = int(np.count_nonzero(best_mask & entity_internal_repair))
     support_audit: dict[str, float | int] = {
         "maximum_support_radius_pixels": support_radius,
         "selected_support_radius_pixels": support_radius,
@@ -631,10 +688,7 @@ def _iterative_shape_guided_refinement(
         "executed_iteration_count": len(iteration_audits),
         "optimization_converged": bool(
             iteration_audits
-            and iteration_audits[-1].get(
-                "changed_pixels_from_previous_iteration"
-            )
-            == 0
+            and iteration_audits[-1].get("changed_pixels_from_previous_iteration") == 0
         ),
         "automatic_radii": {
             "visible_support_radius_pixels": support_radius,
@@ -646,6 +700,25 @@ def _iterative_shape_guided_refinement(
         "image_boundary_authority": "current_reference_view_edges",
         "prior_candidate_role": "probable_foreground_initialization_only",
         "known_occluded_pixels": int(np.count_nonzero(known_occluded)),
+        "entityseg_internal_repair_authorized": bool(np.any(entity_internal_repair)),
+        "entityseg_internal_repair_applied": (
+            final_repair_pixels > initial_repair_pixels
+        ),
+        "entityseg_internal_repair_pixels": int(
+            np.count_nonzero(entity_internal_repair)
+        ),
+        "entityseg_internal_repair_initial_pixels": initial_repair_pixels,
+        "entityseg_internal_repair_final_pixels": final_repair_pixels,
+        "entityseg_internal_repair_retained_fraction": final_repair_pixels
+        / max(int(np.count_nonzero(entity_internal_repair)), 1),
+        "entityseg_internal_repair_core_pixels": int(
+            np.count_nonzero(entity_repair_core)
+        ),
+        "entityseg_internal_repair_replay": replayed_repair_metrics,
+        "internal_repair_policy": (
+            "only_entity_supported_enclosed_or_scale_bounded_narrow_cad_"
+            "internal_gaps; exterior_connected_occlusions_remain_hard_background"
+        ),
         "known_occluded_primary_candidate_pixels_removed": int(
             np.count_nonzero(primary_unbounded & known_occluded)
         ),
@@ -905,6 +978,27 @@ def build_hybrid_masks(
             if entity_accepted
             else None
         )
+        internal_repair_mask: np.ndarray | None = None
+        internal_repair_candidate_audit = entity_row.get("internal_repair_candidate")
+        internal_repair_doc = entity_row.get("internal_repair_mask")
+        if internal_repair_doc is not None:
+            if (
+                not isinstance(internal_repair_doc, Mapping)
+                or not isinstance(internal_repair_candidate_audit, Mapping)
+                or not isinstance(internal_repair_doc.get("path"), str)
+            ):
+                raise EntitySegRegionError(
+                    f"malformed EntitySeg internal repair candidate: {key}"
+                )
+            repair_path = Path(str(internal_repair_doc["path"]))
+            if not repair_path.is_absolute():
+                repair_path = entity_root / repair_path
+            repair_path = repair_path.expanduser().resolve(strict=True)
+            if internal_repair_doc.get("sha256") != _sha256_file(repair_path):
+                raise EntitySegRegionError(
+                    f"EntitySeg internal repair mask hash mismatch: {key}"
+                )
+            internal_repair_mask = _load_mask(repair_path, image.shape[:2])
         metrics: dict[str, float | int] | None = None
         entity_reasons: list[str] = []
         if entity_mask is not None:
@@ -958,6 +1052,12 @@ def build_hybrid_masks(
                     amodal_seed=aligned_amodal,
                     candidate_masks=candidate_masks,
                     primary_candidate_source=primary_candidate_source,
+                    internal_repair_mask=internal_repair_mask,
+                    internal_repair_candidate_audit=(
+                        internal_repair_candidate_audit
+                        if isinstance(internal_repair_candidate_audit, Mapping)
+                        else None
+                    ),
                 )
             except EntitySegRegionError as exc:
                 final_mask = None
@@ -1018,6 +1118,14 @@ def build_hybrid_masks(
                 "candidate_sources": [source for source, _mask in candidate_masks],
                 "decision": decision,
                 "entityseg_candidate_accepted": entity_accepted,
+                "entityseg_internal_repair_candidate_available": (
+                    internal_repair_mask is not None
+                ),
+                "entityseg_internal_repair_candidate_audit": (
+                    dict(internal_repair_candidate_audit)
+                    if isinstance(internal_repair_candidate_audit, Mapping)
+                    else None
+                ),
                 "entityseg_fusion_rejection_reasons": entity_reasons,
                 "fusion_metrics": metrics,
                 "cad_support_trim": cad_support_trim,
@@ -1089,7 +1197,13 @@ def build_hybrid_masks(
                 "agreement_and_prior_candidate_agreement"
             ),
             "known_occlusion_policy": (
-                "amodal_minus_current_view_visible_projection_is_background"
+                "exterior_connected_amodal_minus_visible_is_background;_"
+                "entity_supported_enclosed_or_scale_bounded_narrow_internal_"
+                "gaps_are_iterative_repair_proposals"
+            ),
+            "entityseg_internal_repair_policy": (
+                "high_recall_local_candidate_can_repair_only_bounded_cad_"
+                "internal_gaps_without_outer_boundary_authority"
             ),
             "alignment_model": "one_whole_workpiece_translation_per_view",
             "per_mesh_pose_change_allowed": False,
@@ -1103,6 +1217,20 @@ def build_hybrid_masks(
             "decision_counts": dict(sorted(decision_counts.items())),
             "selected_unique_part_count": len(
                 {row["group_id"] for row in records if row["accepted"]}
+            ),
+            "entityseg_internal_repair_applied_region_count": sum(
+                isinstance(row.get("iterative_refinement"), Mapping)
+                and row["iterative_refinement"].get("entityseg_internal_repair_applied")
+                is True
+                for row in records
+            ),
+            "entityseg_internal_repair_authorized_region_count": sum(
+                isinstance(row.get("iterative_refinement"), Mapping)
+                and row["iterative_refinement"].get(
+                    "entityseg_internal_repair_authorized"
+                )
+                is True
+                for row in records
             ),
         },
     }
