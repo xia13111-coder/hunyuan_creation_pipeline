@@ -78,10 +78,13 @@ Each CAD Part-ID is projected separately. The global camera supplies its modal
 visible region and initial box. With that same sealed camera, the workflow also
 projects the target mesh in isolation to obtain its complete amodal shape.
 The same CAD request guides both SAM3 and class-agnostic EntitySeg with the
-location/visibility template and isolated-mesh shape template. EntitySeg is a
-boundary candidate only; CAD Part-ID remains the identity authority. Fusion
-accepts it only when CAD shape, location, area, connectivity, and image-edge
-checks pass and it improves on SAM3. Every Part-ID in a view shares one
+location/visibility template and isolated-mesh shape template. Neither model
+mask is copied directly into the final evidence. Safe SAM3/EntitySeg estimates
+initialize an iterative current-view optimizer: the isolated mesh constrains
+the complete shape, the assembled Part-ID projection owns visibility and
+occlusion, and photograph edges refine the boundary inside an automatically
+scaled narrow band. The safest iterate maximizes the unweighted geometric mean
+of those three agreements. CAD Part-ID remains the identity authority. Every Part-ID in a view shares one
 whole-workpiece camera residual; no individual mesh may translate, rotate, or
 scale. If local refinement is unreliable, the workflow uses the
 global projection or marks the part as unobserved. These adjustments affect
@@ -94,8 +97,9 @@ run instead of silently continuing with a two-view material decision.
 
 | Component | Role |
 | --- | --- |
-| SAM3 | Whole-workpiece foreground and per-part semantic candidates. |
-| EntitySeg / CropFormer | Class-agnostic boundary candidates accepted only inside the CAD safety contract. |
+| SAM3 | Whole-workpiece foreground and per-part initialization candidates. |
+| EntitySeg / CropFormer | Class-agnostic initialization candidates accepted only inside the CAD safety contract. |
+| Iterative boundary optimizer | Combines isolated shape, assembled visibility, prior masks, and current-image edges; it never moves an individual mesh. |
 | MVInverse | Albedo, roughness, and metallic estimates inside accepted masks. |
 | SigLIP2 | Retrieve visually related MDLs from NVIDIA `Materials/Base`. |
 | DINOv2 | Compare local surface and texture appearance. |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fuse CAD-bound SAM3 instances with safely matched EntitySeg boundaries."""
+"""Iteratively refine photo masks with CAD shape and visibility constraints."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import numpy as np
 from .entityseg_regions import EntitySegRegionError, _boundary_metrics
 
 
-SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v1"
+SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v2"
 MAXIMUM_ENTITY_TO_CAD_AREA_RATIO = 1.85
 MINIMUM_ENTITY_CAD_DIRECT_IOU = 0.50
 MINIMUM_ENTITY_CAD_SHAPE_IOU = 0.55
@@ -31,6 +31,12 @@ MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION = 0.04
 MINIMUM_CAD_SUPPORT_RADIUS_PIXELS = 2
 MINIMUM_AMODAL_CANDIDATE_PRECISION = 0.88
 MINIMUM_AMODAL_COMPLETION_SHAPE_IOU = 0.62
+SHAPE_GUIDED_OPTIMIZATION_ITERATIONS = 5
+MAXIMUM_VISIBLE_SUPPORT_RADIUS_FRACTION = 0.025
+MAXIMUM_VISIBLE_SUPPORT_RADIUS_PIXELS = 12
+MAXIMUM_VISIBLE_CORE_RADIUS_PIXELS = 3
+MINIMUM_REFINED_TO_VISIBLE_AREA_RATIO = 0.35
+MINIMUM_REFINED_AMODAL_PRECISION = 0.85
 
 
 def _sha256_file(path: Path) -> str:
@@ -63,7 +69,9 @@ def _read_manifest(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
-def _records(document: Mapping[str, Any], label: str) -> dict[tuple[str, str], Mapping[str, Any]]:
+def _records(
+    document: Mapping[str, Any], label: str
+) -> dict[tuple[str, str], Mapping[str, Any]]:
     output: dict[tuple[str, str], Mapping[str, Any]] = {}
     for index, row in enumerate(document["records"]):
         if not isinstance(row, Mapping):
@@ -97,7 +105,9 @@ def _sam_selected_shape_candidate(row: Mapping[str, Any]) -> dict[str, Any]:
                 and candidate.get("accepted") is True
             ):
                 return dict(candidate)
-    raise EntitySegRegionError("accepted SAM3 region has no selected CAD-shape candidate")
+    raise EntitySegRegionError(
+        "accepted SAM3 region has no selected CAD-shape candidate"
+    )
 
 
 def _load_mask(path: Path, expected_shape: tuple[int, int]) -> np.ndarray:
@@ -124,9 +134,7 @@ def _sam_aligned_cad_seed(
             continue
         prompt = refinement.get("prompt_audit")
         translation = (
-            prompt.get("translation_xy_pixels")
-            if isinstance(prompt, Mapping)
-            else None
+            prompt.get("translation_xy_pixels") if isinstance(prompt, Mapping) else None
         )
         if (
             not isinstance(translation, list)
@@ -144,14 +152,17 @@ def _sam_aligned_cad_seed(
             ],
             dtype=np.float32,
         )
-        aligned = cv2.warpAffine(
-            seed.astype(np.uint8),
-            matrix,
-            (seed.shape[1], seed.shape[0]),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        ) > 0
+        aligned = (
+            cv2.warpAffine(
+                seed.astype(np.uint8),
+                matrix,
+                (seed.shape[1], seed.shape[0]),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+            > 0
+        )
         return aligned, {
             "source": "sam3_same_view_cad_template_prompt",
             "translation_xy_pixels": [float(translation[0]), float(translation[1])],
@@ -204,14 +215,17 @@ def _entity_aligned_cad_seed(
         ],
         dtype=np.float32,
     )
-    aligned = cv2.warpAffine(
-        seed.astype(np.uint8),
-        matrix,
-        (seed.shape[1], seed.shape[0]),
-        flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    ) > 0
+    aligned = (
+        cv2.warpAffine(
+            seed.astype(np.uint8),
+            matrix,
+            (seed.shape[1], seed.shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        > 0
+    )
     return aligned, {
         "source": "entityseg_selected_candidate_bounded_camera_residual",
         "translation_xy_pixels": [float(translation[0]), float(translation[1])],
@@ -230,14 +244,17 @@ def _align_with_audit(mask: np.ndarray, audit: Mapping[str, Any]) -> np.ndarray:
         ],
         dtype=np.float32,
     )
-    return cv2.warpAffine(
-        mask.astype(np.uint8),
-        matrix,
-        (mask.shape[1], mask.shape[0]),
-        flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    ) > 0
+    return (
+        cv2.warpAffine(
+            mask.astype(np.uint8),
+            matrix,
+            (mask.shape[1], mask.shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        > 0
+    )
 
 
 def _connected_component_count(mask: np.ndarray) -> int:
@@ -285,9 +302,7 @@ def _trim_entity_to_cad_support(
         int(round(MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION * diagonal)),
     )
     seed_pixels = int(np.count_nonzero(seed))
-    maximum_pixels = int(
-        np.floor(maximum_final_to_cad_area_ratio * seed_pixels)
-    )
+    maximum_pixels = int(np.floor(maximum_final_to_cad_area_ratio * seed_pixels))
     selected_radius = 0
     selected = entity & seed
     for radius in range(maximum_radius + 1):
@@ -305,7 +320,9 @@ def _trim_entity_to_cad_support(
         selected = candidate
     selected_pixels = int(np.count_nonzero(selected))
     if selected_pixels == 0:
-        raise EntitySegRegionError("CAD support trim removed the complete EntitySeg mask")
+        raise EntitySegRegionError(
+            "CAD support trim removed the complete EntitySeg mask"
+        )
     entity_pixels = int(np.count_nonzero(entity))
     return selected, {
         "maximum_support_radius_pixels": maximum_radius,
@@ -316,6 +333,330 @@ def _trim_entity_to_cad_support(
         "retained_entity_fraction": selected_pixels / entity_pixels,
         "final_to_cad_area_ratio": selected_pixels / seed_pixels,
     }
+
+
+def _ellipse_morphology(mask: np.ndarray, *, radius: int, dilate: bool) -> np.ndarray:
+    source = np.asarray(mask, dtype=bool)
+    if radius <= 0:
+        return source.copy()
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1)
+    )
+    operation = cv2.dilate if dilate else cv2.erode
+    return operation(source.astype(np.uint8), kernel) > 0
+
+
+def _mask_iou(left: np.ndarray, right: np.ndarray) -> float:
+    union = int(np.count_nonzero(left | right))
+    if union == 0:
+        return 0.0
+    return int(np.count_nonzero(left & right)) / union
+
+
+def _automatic_refinement_radii(visible_seed: np.ndarray) -> tuple[int, int, int]:
+    ys, xs = np.where(visible_seed)
+    if not len(xs):
+        raise EntitySegRegionError("visible CAD seed is empty")
+    diagonal = float(
+        np.hypot(
+            int(xs.max() - xs.min() + 1),
+            int(ys.max() - ys.min() + 1),
+        )
+    )
+    support_radius = max(
+        MINIMUM_CAD_SUPPORT_RADIUS_PIXELS,
+        min(
+            MAXIMUM_VISIBLE_SUPPORT_RADIUS_PIXELS,
+            int(round(MAXIMUM_VISIBLE_SUPPORT_RADIUS_FRACTION * diagonal)),
+        ),
+    )
+    core_radius = max(
+        1,
+        min(
+            MAXIMUM_VISIBLE_CORE_RADIUS_PIXELS,
+            int(round(0.008 * diagonal)),
+        ),
+    )
+    occlusion_margin = max(1, min(2, int(round(0.006 * diagonal))))
+    return support_radius, core_radius, occlusion_margin
+
+
+def _refinement_metrics(
+    *,
+    image: np.ndarray,
+    mask: np.ndarray,
+    visible_seed: np.ndarray,
+    amodal_seed: np.ndarray,
+    candidate_masks: list[np.ndarray],
+) -> dict[str, float | int]:
+    mask_pixels = int(np.count_nonzero(mask))
+    visible_pixels = int(np.count_nonzero(visible_seed))
+    amodal_pixels = int(np.count_nonzero(amodal_seed))
+    visible_intersection = int(np.count_nonzero(mask & visible_seed))
+    amodal_intersection = int(np.count_nonzero(mask & amodal_seed))
+    candidate_agreements = [_mask_iou(mask, candidate) for candidate in candidate_masks]
+    edge = _boundary_metrics(image, mask)
+    visible_iou = _mask_iou(mask, visible_seed)
+    mean_candidate_iou = float(np.mean(candidate_agreements))
+    edge_support = float(edge["image_edge_support_fraction_025"])
+    # An unweighted geometric mean prevents any one authority (CAD, image
+    # edge, or prior model result) from dominating the optimization.
+    objective = float(
+        np.cbrt(
+            max(edge_support, 1e-9)
+            * max(visible_iou, 1e-9)
+            * max(mean_candidate_iou, 1e-9)
+        )
+    )
+    return {
+        "mask_pixels": mask_pixels,
+        "visible_seed_pixels": visible_pixels,
+        "visible_seed_recall": visible_intersection / max(visible_pixels, 1),
+        "visible_seed_precision": visible_intersection / max(mask_pixels, 1),
+        "visible_seed_iou": visible_iou,
+        "final_to_visible_area_ratio": mask_pixels / max(visible_pixels, 1),
+        "amodal_candidate_precision": amodal_intersection / max(mask_pixels, 1),
+        "final_to_amodal_area_ratio": mask_pixels / max(amodal_pixels, 1),
+        "mean_prior_candidate_iou": mean_candidate_iou,
+        "minimum_prior_candidate_iou": min(candidate_agreements),
+        "image_edge_support": edge_support,
+        "normalized_image_edge_mean": float(edge["normalized_image_edge_mean"]),
+        "objective_geometric_mean": objective,
+    }
+
+
+def _iterative_shape_guided_refinement(
+    *,
+    image: np.ndarray,
+    visible_seed: np.ndarray,
+    amodal_seed: np.ndarray | None,
+    candidate_masks: list[tuple[str, np.ndarray]],
+    primary_candidate_source: str,
+) -> tuple[np.ndarray, dict[str, Any], dict[str, float | int]]:
+    """Optimize one visible instance without choosing one model mask verbatim.
+
+    The isolated mesh is the complete-shape authority, while the assembled CAD
+    projection is the current-view visibility/occlusion authority.  SAM3 and
+    EntitySeg are treated as previous estimates.  GrabCut then updates the
+    boundary inside a scale-derived narrow band for several iterations and the
+    best safe iterate is selected by the unweighted agreement of all three
+    authorities.
+    """
+
+    visible = np.asarray(visible_seed, dtype=bool)
+    amodal = (
+        np.asarray(amodal_seed, dtype=bool)
+        if amodal_seed is not None
+        else visible.copy()
+    )
+    if image.shape[:2] != visible.shape or amodal.shape != visible.shape:
+        raise EntitySegRegionError("shape-guided refinement inputs are incompatible")
+    if not candidate_masks or not np.any(visible) or not np.any(amodal):
+        raise EntitySegRegionError("shape-guided refinement has no usable authority")
+    candidate_by_source = {
+        source: np.asarray(mask, dtype=bool) for source, mask in candidate_masks
+    }
+    if len(candidate_by_source) != len(candidate_masks):
+        raise EntitySegRegionError("duplicate shape-guided candidate source")
+    if primary_candidate_source not in candidate_by_source:
+        raise EntitySegRegionError("primary candidate is absent from refinement inputs")
+    if any(
+        mask.shape != visible.shape or not np.any(mask)
+        for mask in candidate_by_source.values()
+    ):
+        raise EntitySegRegionError(
+            "shape-guided candidate mask is empty or incompatible"
+        )
+
+    support_radius, core_radius, occlusion_margin = _automatic_refinement_radii(visible)
+    visible_support = _ellipse_morphology(visible, radius=support_radius, dilate=True)
+    complete_support = _ellipse_morphology(amodal, radius=support_radius, dilate=True)
+    optimization_support = visible_support & complete_support
+    visible_with_margin = _ellipse_morphology(
+        visible, radius=occlusion_margin, dilate=True
+    )
+    known_occluded = amodal & ~visible_with_margin
+    prior_union = np.logical_or.reduce(list(candidate_by_source.values()))
+    primary_unbounded = candidate_by_source[primary_candidate_source]
+    initial, _initial_visible_bound = _trim_entity_to_cad_support(
+        primary_unbounded,
+        visible,
+        maximum_final_to_cad_area_ratio=MAXIMUM_FINAL_TO_CAD_AREA_RATIO,
+    )
+    initial &= optimization_support
+    initial &= ~known_occluded
+    if not np.any(initial):
+        raise EntitySegRegionError("visibility constraints removed the primary mask")
+
+    visible_core = _ellipse_morphology(visible, radius=core_radius, dilate=False)
+    if not np.any(visible_core):
+        distance = cv2.distanceTransform(visible.astype(np.uint8), cv2.DIST_L2, 3)
+        maximum = float(distance.max())
+        visible_core = visible & (distance >= max(0.5, 0.5 * maximum))
+    if not np.any(visible_core):
+        raise EntitySegRegionError("visible CAD seed has no stable interior core")
+
+    candidate_values = list(candidate_by_source.values())
+    initial_metrics = _refinement_metrics(
+        image=image,
+        mask=initial,
+        visible_seed=visible,
+        amodal_seed=amodal,
+        candidate_masks=candidate_values,
+    )
+    best_mask = initial
+    best_metrics = initial_metrics
+    selected_iteration = 0
+    iteration_audits: list[dict[str, Any]] = []
+    previous_iterate = initial
+
+    ys, xs = np.where(optimization_support)
+    pad = 2
+    top = max(0, int(ys.min()) - pad)
+    bottom = min(visible.shape[0], int(ys.max()) + pad + 1)
+    left = max(0, int(xs.min()) - pad)
+    right = min(visible.shape[1], int(xs.max()) + pad + 1)
+    crop = np.s_[top:bottom, left:right]
+    labels = np.full(visible[crop].shape, cv2.GC_PR_BGD, dtype=np.uint8)
+    local_support = optimization_support[crop]
+    local_occluded = known_occluded[crop]
+    labels[~local_support] = cv2.GC_BGD
+    labels[
+        ((prior_union | visible) & optimization_support & ~known_occluded)[crop]
+    ] = cv2.GC_PR_FGD
+    labels[visible_core[crop]] = cv2.GC_FGD
+    labels[local_occluded] = cv2.GC_BGD
+    if not np.any(labels == cv2.GC_FGD) or not np.any(labels == cv2.GC_BGD):
+        raise EntitySegRegionError("shape-guided optimization lacks hard seeds")
+
+    background_model = np.zeros((1, 65), dtype=np.float64)
+    foreground_model = np.zeros((1, 65), dtype=np.float64)
+    cv2.setRNGSeed(0)
+    minimum_visible_recall = max(
+        0.50, float(initial_metrics["visible_seed_recall"]) - 0.02
+    )
+    for iteration in range(1, SHAPE_GUIDED_OPTIMIZATION_ITERATIONS + 1):
+        try:
+            cv2.grabCut(
+                image[crop],
+                labels,
+                None,
+                background_model,
+                foreground_model,
+                1,
+                cv2.GC_INIT_WITH_MASK if iteration == 1 else cv2.GC_EVAL,
+            )
+        except cv2.error as exc:
+            iteration_audits.append(
+                {
+                    "iteration": iteration,
+                    "accepted": False,
+                    "reason_codes": ["opencv_grabcut_failed"],
+                    "error": str(exc),
+                }
+            )
+            break
+        local_mask = (labels == cv2.GC_FGD) | (labels == cv2.GC_PR_FGD)
+        refined = np.zeros_like(visible)
+        refined[crop] = local_mask
+        refined &= optimization_support
+        refined &= ~known_occluded
+        metrics = _refinement_metrics(
+            image=image,
+            mask=refined,
+            visible_seed=visible,
+            amodal_seed=amodal,
+            candidate_masks=candidate_values,
+        )
+        reasons: list[str] = []
+        if not np.any(refined):
+            reasons.append("refinement_is_empty")
+        if not np.all(refined[visible_core]):
+            reasons.append("visible_cad_core_was_not_preserved")
+        if float(metrics["visible_seed_recall"]) < minimum_visible_recall:
+            reasons.append("visible_cad_recall_regressed")
+        area_ratio = float(metrics["final_to_visible_area_ratio"])
+        if (
+            not MINIMUM_REFINED_TO_VISIBLE_AREA_RATIO
+            <= area_ratio
+            <= MAXIMUM_FINAL_TO_CAD_AREA_RATIO
+        ):
+            reasons.append("refined_area_outside_visible_cad_bound")
+        if (
+            float(metrics["amodal_candidate_precision"])
+            < MINIMUM_REFINED_AMODAL_PRECISION
+        ):
+            reasons.append("refinement_extends_outside_complete_mesh")
+        accepted = not reasons
+        iteration_audits.append(
+            {
+                "iteration": iteration,
+                "accepted": accepted,
+                "reason_codes": reasons,
+                "metrics": metrics,
+                "changed_pixels_from_previous_iteration": int(
+                    np.count_nonzero(refined ^ previous_iterate)
+                ),
+            }
+        )
+        if accepted and float(metrics["objective_geometric_mean"]) > float(
+            best_metrics["objective_geometric_mean"]
+        ):
+            best_mask = refined
+            best_metrics = metrics
+            selected_iteration = iteration
+        previous_iterate = refined
+
+    initial_pixels = int(np.count_nonzero(initial))
+    final_pixels = int(np.count_nonzero(best_mask))
+    unbounded_pixels = int(np.count_nonzero(primary_unbounded))
+    support_audit: dict[str, float | int] = {
+        "maximum_support_radius_pixels": support_radius,
+        "selected_support_radius_pixels": support_radius,
+        "visible_core_radius_pixels": core_radius,
+        "occlusion_margin_pixels": occlusion_margin,
+        "maximum_final_to_cad_area_ratio": MAXIMUM_FINAL_TO_CAD_AREA_RATIO,
+        "untrimmed_entity_pixels": unbounded_pixels,
+        "trimmed_entity_pixels": final_pixels,
+        "retained_entity_fraction": final_pixels / max(unbounded_pixels, 1),
+        "final_to_cad_area_ratio": final_pixels
+        / max(int(np.count_nonzero(visible)), 1),
+    }
+    audit = {
+        "method": "iterative_visible_mesh_edge_optimization",
+        "candidate_sources": sorted(candidate_by_source),
+        "primary_candidate_source": primary_candidate_source,
+        "iteration_budget": SHAPE_GUIDED_OPTIMIZATION_ITERATIONS,
+        "selected_iteration": selected_iteration,
+        "executed_iteration_count": len(iteration_audits),
+        "optimization_converged": bool(
+            iteration_audits
+            and iteration_audits[-1].get(
+                "changed_pixels_from_previous_iteration"
+            )
+            == 0
+        ),
+        "automatic_radii": {
+            "visible_support_radius_pixels": support_radius,
+            "visible_core_radius_pixels": core_radius,
+            "occlusion_margin_pixels": occlusion_margin,
+        },
+        "complete_shape_authority": "isolated_mesh_amodal_projection",
+        "current_view_visibility_authority": "whole_assembly_part_id_projection",
+        "image_boundary_authority": "current_reference_view_edges",
+        "prior_candidate_role": "probable_foreground_initialization_only",
+        "known_occluded_pixels": int(np.count_nonzero(known_occluded)),
+        "known_occluded_primary_candidate_pixels_removed": int(
+            np.count_nonzero(primary_unbounded & known_occluded)
+        ),
+        "initial_metrics": initial_metrics,
+        "final_metrics": best_metrics,
+        "final_changed_pixels_from_initial": int(np.count_nonzero(best_mask ^ initial)),
+        "iterations": iteration_audits,
+    }
+    return best_mask, audit, support_audit
+
+
 def _entity_rejection_reasons(
     metrics: Mapping[str, float | int], *, sam_accepted: bool
 ) -> list[str]:
@@ -334,8 +675,7 @@ def _entity_rejection_reasons(
     ):
         reasons.append("entity_extends_outside_complete_mesh_shape")
     if "entity_amodal_shape_iou" in metrics and (
-        float(metrics["entity_amodal_shape_iou"])
-        < MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
+        float(metrics["entity_amodal_shape_iou"]) < MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
     ):
         reasons.append("entity_occlusion_aware_amodal_shape_mismatch")
     if (
@@ -346,10 +686,7 @@ def _entity_rejection_reasons(
     if float(metrics["entity_edge_support"]) < MINIMUM_ENTITY_EDGE_SUPPORT:
         reasons.append("entity_boundary_has_insufficient_image_edge_support")
     if sam_accepted:
-        if (
-            float(metrics["entity_edge_improvement"])
-            < MINIMUM_ENTITY_EDGE_IMPROVEMENT
-        ):
+        if float(metrics["entity_edge_improvement"]) < MINIMUM_ENTITY_EDGE_IMPROVEMENT:
             reasons.append("entity_boundary_does_not_improve_over_sam3")
         if (
             float(metrics["sam_entity_overlap_smaller"])
@@ -371,7 +708,9 @@ def _entity_metrics(
 ) -> dict[str, float | int]:
     selected = entity_row.get("selected_candidate")
     if not isinstance(selected, Mapping):
-        raise EntitySegRegionError("accepted EntitySeg record has no selected candidate")
+        raise EntitySegRegionError(
+            "accepted EntitySeg record has no selected candidate"
+        )
     seed_pixels = int(np.count_nonzero(seed))
     entity_boundary = _boundary_metrics(image, entity_mask)
     output: dict[str, float | int] = {
@@ -398,9 +737,7 @@ def _entity_metrics(
                 "entity_amodal_completion_iou": float(
                     selected["cad_amodal_completion_iou"]
                 ),
-                "entity_amodal_shape_iou": float(
-                    selected["cad_amodal_shape_iou"]
-                ),
+                "entity_amodal_shape_iou": float(selected["cad_amodal_shape_iou"]),
                 "entity_to_amodal_area_ratio": float(
                     selected["candidate_to_cad_amodal_area_ratio"]
                 ),
@@ -441,7 +778,9 @@ def build_hybrid_masks(
     sam_document = _read_manifest(sam_manifest_path, "SAM3 manifest")
     entity_document = _read_manifest(entity_manifest_path, "EntitySeg manifest")
     if sam_document.get("request") != entity_document.get("request"):
-        raise EntitySegRegionError("SAM3 and EntitySeg manifests bind different requests")
+        raise EntitySegRegionError(
+            "SAM3 and EntitySeg manifests bind different requests"
+        )
     sam_records = _records(sam_document, "SAM3")
     entity_records = _records(entity_document, "EntitySeg")
     if set(sam_records) != set(entity_records):
@@ -470,11 +809,14 @@ def build_hybrid_masks(
                 f"SAM3 and EntitySeg do not share one whole-workpiece alignment: {key}"
             )
         authority = entity_row if entity_row.get("source_image") else sam_row
-        source_path = Path(str(authority["source_image"])).expanduser().resolve(strict=True)
+        source_path = (
+            Path(str(authority["source_image"])).expanduser().resolve(strict=True)
+        )
         source_sha256 = _sha256_file(source_path)
-        if sam_row.get("source_image_sha256") != source_sha256 or entity_row.get(
-            "source_image_sha256"
-        ) != source_sha256:
+        if (
+            sam_row.get("source_image_sha256") != source_sha256
+            or entity_row.get("source_image_sha256") != source_sha256
+        ):
             raise EntitySegRegionError(f"source image hash mismatch: {key}")
         image = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
         if image is None:
@@ -506,13 +848,13 @@ def build_hybrid_masks(
         sam_amodal_doc = sam_row.get("cad_amodal_template")
         entity_amodal_doc = entity_row.get("cad_amodal_template")
         amodal_doc = (
-            sam_amodal_doc
-            if isinstance(sam_amodal_doc, Mapping)
-            else entity_amodal_doc
+            sam_amodal_doc if isinstance(sam_amodal_doc, Mapping) else entity_amodal_doc
         )
         amodal: np.ndarray | None = None
         if isinstance(amodal_doc, Mapping):
-            amodal_path = Path(str(amodal_doc["path"])).expanduser().resolve(strict=True)
+            amodal_path = (
+                Path(str(amodal_doc["path"])).expanduser().resolve(strict=True)
+            )
             expected_amodal_hash = amodal_doc.get("sha256")
             if (
                 not isinstance(expected_amodal_hash, str)
@@ -520,9 +862,11 @@ def build_hybrid_masks(
             ):
                 raise EntitySegRegionError(f"CAD amodal hash mismatch: {key}")
             if isinstance(entity_amodal_doc, Mapping):
-                entity_path = Path(
-                    str(entity_amodal_doc["path"])
-                ).expanduser().resolve(strict=True)
+                entity_path = (
+                    Path(str(entity_amodal_doc["path"]))
+                    .expanduser()
+                    .resolve(strict=True)
+                )
                 if (
                     entity_path != amodal_path
                     or entity_amodal_doc.get("sha256") != expected_amodal_hash
@@ -557,9 +901,7 @@ def build_hybrid_masks(
             else None
         )
         entity_mask = (
-            _load_mask(
-                _resolved_mask_path(entity_root, entity_row), image.shape[:2]
-            )
+            _load_mask(_resolved_mask_path(entity_root, entity_row), image.shape[:2])
             if entity_accepted
             else None
         )
@@ -577,60 +919,79 @@ def build_hybrid_masks(
                 metrics, sam_accepted=sam_accepted
             )
 
-        final_mask: np.ndarray | None
+        final_mask: np.ndarray | None = None
         cad_support_trim: dict[str, float | int] | None = None
+        iterative_refinement: dict[str, Any] | None = None
+        candidate_masks: list[tuple[str, np.ndarray]] = []
+        primary_candidate_source: str | None = None
         if entity_mask is not None and not entity_reasons:
-            final_mask, cad_support_trim = _trim_entity_to_cad_support(
-                entity_mask,
+            candidate_masks.append(("entityseg", entity_mask))
+            primary_candidate_source = "entityseg"
+        if sam_mask is not None:
+            candidate_masks.append(("sam3", sam_mask))
+            if primary_candidate_source is None:
+                primary_candidate_source = "sam3"
+        aligned_seed_audit = (
+            entity_alignment_audit
+            if primary_candidate_source == "entityseg"
+            else sam_alignment_audit
+        )
+        if primary_candidate_source is not None:
+            aligned_visible = (
+                entity_aligned_seed
+                if primary_candidate_source == "entityseg"
+                else sam_aligned_seed
+            )
+            aligned_amodal = (
                 entity_aligned_amodal
-                if entity_aligned_amodal is not None
-                else entity_aligned_seed,
+                if primary_candidate_source == "entityseg"
+                else sam_aligned_amodal
             )
-            aligned_seed_audit = entity_alignment_audit
-            selected_source = "entityseg"
-            decision = (
-                "entityseg_replaces_sam3_boundary"
-                if sam_accepted
-                else "entityseg_fills_sam3_gap"
-            )
-        elif sam_mask is not None:
             try:
-                final_mask, cad_support_trim = _trim_entity_to_cad_support(
-                    sam_mask,
-                    sam_aligned_amodal
-                    if sam_aligned_amodal is not None
-                    else sam_aligned_seed,
-                    maximum_final_to_cad_area_ratio=1.15,
+                (
+                    final_mask,
+                    iterative_refinement,
+                    cad_support_trim,
+                ) = _iterative_shape_guided_refinement(
+                    image=image,
+                    visible_seed=aligned_visible,
+                    amodal_seed=aligned_amodal,
+                    candidate_masks=candidate_masks,
+                    primary_candidate_source=primary_candidate_source,
                 )
-            except EntitySegRegionError:
+            except EntitySegRegionError as exc:
                 final_mask = None
-                aligned_seed_audit = sam_alignment_audit
                 selected_source = "none"
-                decision = "sam3_rejected_outside_aligned_cad_support"
+                decision = "iterative_refinement_rejected"
+                iterative_refinement = {
+                    "method": "iterative_visible_mesh_edge_optimization",
+                    "accepted": False,
+                    "reason_codes": ["shape_guided_refinement_failed"],
+                    "error": str(exc),
+                }
             else:
-                aligned_seed_audit = sam_alignment_audit
-                selected_source = "sam3"
-                decision = (
-                    "sam3_retained_after_entityseg_rejection"
-                    if entity_mask is not None
-                    else "sam3_only_candidate"
-                )
+                selected_source = "shape_guided_iterative"
+                candidate_sources = {source for source, _mask in candidate_masks}
+                if candidate_sources == {"sam3", "entityseg"}:
+                    decision = "iterative_refinement_from_sam3_entityseg"
+                elif candidate_sources == {"entityseg"}:
+                    decision = "iterative_refinement_from_entityseg"
+                else:
+                    decision = "iterative_refinement_from_sam3"
         else:
-            final_mask = None
-            aligned_seed_audit = sam_alignment_audit
             selected_source = "none"
             decision = "no_safe_candidate"
 
         mask_document: dict[str, Any] | None = None
         shape_candidate: dict[str, Any] | None = None
-        if selected_source == "entityseg":
+        if primary_candidate_source == "entityseg":
             selected_entity = entity_row.get("selected_candidate")
             if not isinstance(selected_entity, Mapping):
                 raise EntitySegRegionError(
                     f"accepted EntitySeg region has no shape candidate: {key}"
                 )
             shape_candidate = dict(selected_entity)
-        elif selected_source == "sam3":
+        elif primary_candidate_source == "sam3":
             shape_candidate = _sam_selected_shape_candidate(sam_row)
         if final_mask is not None:
             mask_path = masks_dir / f"{key[0]}__{key[1]}.png"
@@ -653,11 +1014,14 @@ def build_hybrid_masks(
                 "cad_projection_seed": dict(seed_doc),
                 "accepted": final_mask is not None,
                 "selected_source": selected_source,
+                "primary_candidate_source": primary_candidate_source,
+                "candidate_sources": [source for source, _mask in candidate_masks],
                 "decision": decision,
                 "entityseg_candidate_accepted": entity_accepted,
                 "entityseg_fusion_rejection_reasons": entity_reasons,
                 "fusion_metrics": metrics,
                 "cad_support_trim": cad_support_trim,
+                "iterative_refinement": iterative_refinement,
                 "aligned_cad_template": aligned_seed_audit,
                 "shape_candidate": shape_candidate,
                 "fusion_audit": {
@@ -665,6 +1029,7 @@ def build_hybrid_masks(
                     "decision": decision,
                     "fusion_metrics": metrics,
                     "cad_support_trim": cad_support_trim,
+                    "iterative_refinement": iterative_refinement,
                 },
                 "cad_amodal_template": (
                     {
@@ -695,7 +1060,8 @@ def build_hybrid_masks(
         "request": dict(sam_document.get("request", {})),
         "policy": {
             "identity_authority": "registered_cad_part_id_plus_sam3_instance",
-            "entityseg_role": "boundary_candidate_only",
+            "sam3_role": "probable_foreground_initialization_only",
+            "entityseg_role": "probable_foreground_initialization_only",
             "maximum_entity_to_cad_area_ratio": MAXIMUM_ENTITY_TO_CAD_AREA_RATIO,
             "minimum_entity_cad_direct_iou": MINIMUM_ENTITY_CAD_DIRECT_IOU,
             "minimum_entity_cad_shape_iou": MINIMUM_ENTITY_CAD_SHAPE_IOU,
@@ -713,6 +1079,18 @@ def build_hybrid_masks(
             ),
             "shape_authority": "isolated_mesh_amodal_projection",
             "visibility_authority": "whole_assembly_part_id_projection",
+            "final_boundary_method": "iterative_visible_mesh_edge_optimization",
+            "shape_guided_optimization_iterations": SHAPE_GUIDED_OPTIMIZATION_ITERATIONS,
+            "candidate_selection_policy": (
+                "joint_iterative_optimization_not_single_model_arbitration"
+            ),
+            "optimization_objective": (
+                "unweighted_geometric_mean_of_current_view_edges_visible_cad_"
+                "agreement_and_prior_candidate_agreement"
+            ),
+            "known_occlusion_policy": (
+                "amodal_minus_current_view_visible_projection_is_background"
+            ),
             "alignment_model": "one_whole_workpiece_translation_per_view",
             "per_mesh_pose_change_allowed": False,
             "part_specific_translation_allowed": False,

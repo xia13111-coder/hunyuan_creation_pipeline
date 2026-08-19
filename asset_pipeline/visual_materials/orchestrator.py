@@ -380,8 +380,7 @@ def _coating_consistency_audit_for_quality_gate(
         material_prediction_mode == "catalog_family_first"
         and material_plan.get("coating_consistency_used") is False
         and isinstance(provenance, Mapping)
-        and provenance.get("material_prediction_mode")
-        == "catalog_family_first"
+        and provenance.get("material_prediction_mode") == "catalog_family_first"
         and provenance.get("coating_consistency_enabled") is False
         and provenance.get("coating_consistency_schema_version")
         == raw_gate.get("schema_version")
@@ -451,15 +450,18 @@ def _verified_locked_precollection_resume_available(destination: Path) -> bool:
         for path in (destination / "_SUCCESS", destination / "SUCCESS")
     ):
         return False
-    completed_final_gate = destination / "final_visual_acceptance" / (
-        "collected_visual_gate.json"
+    completed_final_gate = (
+        destination / "final_visual_acceptance" / ("collected_visual_gate.json")
     )
     if completed_final_gate.is_file():
         try:
-            if read_object(
-                completed_final_gate,
-                "completed final collected visual gate",
-            ).get("status") == "PASS":
+            if (
+                read_object(
+                    completed_final_gate,
+                    "completed final collected visual gate",
+                ).get("status")
+                == "PASS"
+            ):
                 return False
         except (OSError, RuntimeError, ValueError):
             return False
@@ -547,18 +549,24 @@ def _verified_locked_precollection_resume_available(destination: Path) -> bool:
         try:
             delivery = read_object(delivery_path, "locked delivery validation")
             delivery_inputs = delivery.get("inputs")
-            collected_root = Path(
-                str(delivery_inputs["collected_root_usd"])
-            ).expanduser().resolve(strict=True)
-            bundle_root = Path(str(delivery_inputs["bundle_root"])).expanduser().resolve(
-                strict=True
+            collected_root = (
+                Path(str(delivery_inputs["collected_root_usd"]))
+                .expanduser()
+                .resolve(strict=True)
             )
-            delivery_look = Path(str(delivery_inputs["look_usd"])).expanduser().resolve(
-                strict=True
+            bundle_root = (
+                Path(str(delivery_inputs["bundle_root"]))
+                .expanduser()
+                .resolve(strict=True)
             )
-            delivery_apply = Path(
-                str(delivery_inputs["apply_report"])
-            ).expanduser().resolve(strict=True)
+            delivery_look = (
+                Path(str(delivery_inputs["look_usd"])).expanduser().resolve(strict=True)
+            )
+            delivery_apply = (
+                Path(str(delivery_inputs["apply_report"]))
+                .expanduser()
+                .resolve(strict=True)
+            )
         except (KeyError, OSError, RuntimeError, TypeError, ValueError):
             return False
         if (
@@ -2255,9 +2263,7 @@ def _run_policy_part_id_stage(
             for stale_dir in (part_id_entityseg_dir, part_id_hybrid_mask_dir):
                 if stale_dir.exists() or stale_dir.is_symlink():
                     archived = unique_path(
-                        analysis_dir
-                        / "recovery_archive"
-                        / f"stale_{stale_dir.name}"
+                        analysis_dir / "recovery_archive" / f"stale_{stale_dir.name}"
                     )
                     archived.parent.mkdir(parents=True, exist_ok=True)
                     stale_dir.rename(archived)
@@ -2333,13 +2339,14 @@ def _run_policy_part_id_stage(
             log_cb,
             "Two-layer one-to-one Part-ID mapping completed: every coarse box "
             "inherits the rigid whole-asset camera and the single residual shared "
-            "by that view, then automatic local SAM3/EntitySeg fusion refines "
-            "its photo evidence. "
+            "by that view, then the isolated mesh, current-view CAD visibility, "
+            "SAM3/EntitySeg priors, and photo edges iteratively refine its boundary. "
             "No CAD/USD transform was changed. "
             f"{evidence_document['summary'].get('sam3_refined_observation_count', 0)} "
             "observations passed local refinement ("
             f"EntitySeg={evidence_document['summary'].get('entityseg_refined_observation_count', 0)}, "
             f"SAM3={evidence_document['summary'].get('sam3_selected_observation_count', 0)}); "
+            f"iterative={evidence_document['summary'].get('shape_guided_iterative_refined_observation_count', 0)}; "
             f"{evidence_document['summary'].get('global_projection_fallback_observation_count', 0)} "
             "used the audited coarse fallback. "
             f"{evidence_document['summary'].get('chromatic_isolated_observation_count', 0)} "
@@ -3254,17 +3261,18 @@ def _run_visual_qa_stage(
 
     corresponding_part_ids: tuple[str, ...] = ()
     if config.corresponding_color_calibration_mode == "adaptive_actual_cad":
-        corresponding_part_ids, preserved_corresponding_part_ids = (
-            corresponding_material_eligibility(
-                read_object(
-                    part_id_paths.qwen_result,
-                    "material-identity Qwen choices for colour calibration",
-                ),
-                read_object(
-                    effective_material_plan,
-                    "identity-fixed material plan for colour calibration",
-                ),
-            )
+        (
+            corresponding_part_ids,
+            preserved_corresponding_part_ids,
+        ) = corresponding_material_eligibility(
+            read_object(
+                part_id_paths.qwen_result,
+                "material-identity Qwen choices for colour calibration",
+            ),
+            read_object(
+                effective_material_plan,
+                "identity-fixed material plan for colour calibration",
+            ),
         )
         if not corresponding_part_ids:
             if preserved_corresponding_part_ids:

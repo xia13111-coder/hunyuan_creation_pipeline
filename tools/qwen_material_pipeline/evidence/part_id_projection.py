@@ -797,10 +797,8 @@ def _selected_cad_shape_candidate(record: Mapping[str, Any]) -> dict[str, Any]:
                     amodal_area_ratio,
                 )
             )
-            and float(amodal_precision)
-            >= DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION
-            and float(amodal_shape_iou)
-            >= DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
+            and float(amodal_precision) >= DEFAULT_MINIMUM_AMODAL_CANDIDATE_PRECISION
+            and float(amodal_shape_iou) >= DEFAULT_MINIMUM_AMODAL_COMPLETION_SHAPE_IOU
             and float(visible_recall) >= DEFAULT_MINIMUM_VISIBLE_CAD_SEED_RECALL
             and float(amodal_area_ratio)
             <= DEFAULT_MAXIMUM_CANDIDATE_TO_AMODAL_AREA_RATIO
@@ -814,8 +812,7 @@ def _selected_cad_shape_candidate(record: Mapping[str, Any]) -> dict[str, Any]:
             and isinstance(area_agreement, (int, float))
             and not isinstance(area_agreement, bool)
             and math.isfinite(float(area_agreement))
-            and float(area_agreement)
-            >= DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
+            and float(area_agreement) >= DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT
         )
     if not base_contract_valid or not shape_contract_valid:
         raise PartIdProjectionError(
@@ -841,16 +838,21 @@ def _load_part_id_refinement_manifest(
     SAM3.  It never grants either segmenter authority to move one Part-ID.
     """
 
-    label = "Part-ID SAM3/EntitySeg hybrid manifest" if hybrid else (
-        "Part-ID SAM3 refinement manifest"
+    label = (
+        "Part-ID SAM3/EntitySeg hybrid manifest"
+        if hybrid
+        else ("Part-ID SAM3 refinement manifest")
     )
     refinement, refinement_path = _read_object(value, label)
-    expected_schema = (
-        "qwen-cad-sam3-entityseg-hybrid/v1"
+    expected_schemas = (
+        {
+            "qwen-cad-sam3-entityseg-hybrid/v1",
+            "qwen-cad-sam3-entityseg-hybrid/v2",
+        }
         if hybrid
-        else "qwen-sam3-region-result/v1"
+        else {"qwen-sam3-region-result/v1"}
     )
-    if refinement.get("schema_version") != expected_schema:
+    if refinement.get("schema_version") not in expected_schemas:
         raise PartIdProjectionError(f"unsupported {label} schema")
     unsigned = copy.deepcopy(refinement)
     integrity = unsigned.pop("integrity", None)
@@ -863,8 +865,14 @@ def _load_part_id_refinement_manifest(
     if not isinstance(policy, Mapping):
         raise PartIdProjectionError(f"{label} has no policy")
     if hybrid:
+        schema_version = refinement.get("schema_version")
+        expected_entity_role = (
+            "probable_foreground_initialization_only"
+            if schema_version == "qwen-cad-sam3-entityseg-hybrid/v2"
+            else "boundary_candidate_only"
+        )
         if (
-            policy.get("entityseg_role") != "boundary_candidate_only"
+            policy.get("entityseg_role") != expected_entity_role
             or policy.get("per_mesh_pose_change_allowed") is not False
             or policy.get("part_specific_translation_allowed") is not False
             or policy.get("alignment_model")
@@ -873,6 +881,17 @@ def _load_part_id_refinement_manifest(
             raise PartIdProjectionError(
                 "Part-ID hybrid manifest does not enforce CAD identity and "
                 "view-shared alignment"
+            )
+        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v2" and (
+            policy.get("sam3_role") != "probable_foreground_initialization_only"
+            or policy.get("final_boundary_method")
+            != "iterative_visible_mesh_edge_optimization"
+            or policy.get("candidate_selection_policy")
+            != "joint_iterative_optimization_not_single_model_arbitration"
+        ):
+            raise PartIdProjectionError(
+                "Part-ID hybrid manifest does not seal iterative shape-guided "
+                "boundary optimization"
             )
         if refinement_path is None:
             raise PartIdProjectionError(
@@ -903,11 +922,9 @@ def _load_part_id_refinement_manifest(
                     f"Part-ID hybrid {input_name} document hash mismatch"
                 )
             linked_documents.append(linked)
-        if (
-            linked_documents[0].get("request")
-            != linked_documents[1].get("request")
-            or refinement.get("request") != linked_documents[0].get("request")
-        ):
+        if linked_documents[0].get("request") != linked_documents[1].get(
+            "request"
+        ) or refinement.get("request") != linked_documents[0].get("request"):
             raise PartIdProjectionError(
                 "Part-ID hybrid inputs do not bind the same CAD request"
             )
@@ -956,9 +973,7 @@ def _load_part_id_refinement_manifest(
                 f"{label} record {identity} has malformed shared alignment"
             )
         shared_document = copy.deepcopy(dict(shared))
-        prior_shared = shared_alignment_by_view.setdefault(
-            identity[0], shared_document
-        )
+        prior_shared = shared_alignment_by_view.setdefault(identity[0], shared_document)
         if prior_shared != shared_document:
             raise PartIdProjectionError(
                 f"{label} records disagree on shared alignment for {identity[0]}"
@@ -998,11 +1013,29 @@ def _load_part_id_refinement_manifest(
         )
         if hybrid and (
             not shape_candidate
-            or raw.get("selected_source") not in {"sam3", "entityseg"}
+            or raw.get("selected_source")
+            not in {"sam3", "entityseg", "shape_guided_iterative"}
         ):
             raise PartIdProjectionError(
                 f"Part-ID hybrid record {identity} has no selected safe boundary"
             )
+        if hybrid and raw.get("selected_source") == "shape_guided_iterative":
+            iterative = raw.get("iterative_refinement")
+            candidate_sources = raw.get("candidate_sources")
+            primary_candidate_source = raw.get("primary_candidate_source")
+            if (
+                not isinstance(iterative, Mapping)
+                or iterative.get("method") != "iterative_visible_mesh_edge_optimization"
+                or not isinstance(iterative.get("selected_iteration"), int)
+                or not isinstance(candidate_sources, list)
+                or primary_candidate_source not in candidate_sources
+                or not all(
+                    source in {"sam3", "entityseg"} for source in candidate_sources
+                )
+            ):
+                raise PartIdProjectionError(
+                    f"Part-ID hybrid record {identity} has no sealed iterative audit"
+                )
         accepted_by_identity[identity] = {
             "mask_path": mask_path,
             "cad_seed_path": seed_path,
@@ -1010,6 +1043,12 @@ def _load_part_id_refinement_manifest(
             "shape_candidate": shape_candidate,
             "view_shared_alignment": shared_document,
             "selected_source": raw.get("selected_source") if hybrid else "sam3",
+            "primary_candidate_source": (
+                raw.get("primary_candidate_source") if hybrid else "sam3"
+            ),
+            "candidate_sources": (
+                copy.deepcopy(raw.get("candidate_sources", [])) if hybrid else ["sam3"]
+            ),
         }
     return refinement, refinement_path, accepted_by_identity, records_by_identity
 
@@ -1965,9 +2004,7 @@ def build_part_id_reference_evidence(
     refinement_path: Path | None = None
     refinement_backend: str | None = None
     refinement_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
-    refinement_records_by_identity: dict[
-        tuple[str, str], Mapping[str, Any]
-    ] = {}
+    refinement_records_by_identity: dict[tuple[str, str], Mapping[str, Any]] = {}
     if part_id_hybrid_manifest is not None:
         (
             refinement,
@@ -2040,9 +2077,7 @@ def build_part_id_reference_evidence(
             raise PartIdProjectionError(
                 f"Part-ID SAM3 record uses unknown reference view {view_id}/{part_id}"
             )
-        if raw.get("source_image_sha256") != _sha256_file(
-            reference["image_path"]
-        ):
+        if raw.get("source_image_sha256") != _sha256_file(reference["image_path"]):
             raise PartIdProjectionError(
                 f"Part-ID SAM3 source image mismatch for {view_id}/{part_id}"
             )
@@ -2309,9 +2344,9 @@ def build_part_id_reference_evidence(
                             f"Part-ID SAM3 CAD seed shape differs for "
                             f"{reference_id}/{part_id}"
                         )
-                    shared_translation = refined_record[
-                        "view_shared_alignment"
-                    ]["translation_xy_pixels"]
+                    shared_translation = refined_record["view_shared_alignment"][
+                        "translation_xy_pixels"
+                    ]
                     aligned_sealed_seed = cv2.warpAffine(
                         sealed_seed,
                         np.asarray(
@@ -2329,9 +2364,7 @@ def build_part_id_reference_evidence(
                     refined_pixels = int(np.count_nonzero(refined))
                     coarse_pixels = int(np.count_nonzero(aligned_sealed_seed))
                     intersection = int(
-                        np.count_nonzero(
-                            (refined > 0) & (aligned_sealed_seed > 0)
-                        )
+                        np.count_nonzero((refined > 0) & (aligned_sealed_seed > 0))
                     )
                     overlap_smaller = intersection / max(
                         1, min(refined_pixels, coarse_pixels)
@@ -2356,9 +2389,7 @@ def build_part_id_reference_evidence(
                             [1.0, 0.0, 0.0],
                             [0.0, 1.0, 0.0],
                         ],
-                        "optimization": (
-                            "none_view_shared_manifest_direct_overlap"
-                        ),
+                        "optimization": ("none_view_shared_manifest_direct_overlap"),
                         "optimization_domain": "shared_reference_image_canvas",
                     }
                     # Candidate geometry, amodal occlusion, neighboring-Part
@@ -2423,6 +2454,12 @@ def build_part_id_reference_evidence(
                         ),
                         "refinement_backend": refinement_backend,
                         "selected_source": refined_record["selected_source"],
+                        "primary_candidate_source": refined_record[
+                            "primary_candidate_source"
+                        ],
+                        "candidate_sources": copy.deepcopy(
+                            refined_record["candidate_sources"]
+                        ),
                         "per_part_geometric_warp_applied": False,
                         "view_shared_alignment": copy.deepcopy(
                             refined_record["view_shared_alignment"]
@@ -2435,9 +2472,7 @@ def build_part_id_reference_evidence(
                         "registration": registration,
                         "sealed_cad_seed": {
                             "path": str(refined_record["cad_seed_path"]),
-                            "sha256": _sha256_file(
-                                refined_record["cad_seed_path"]
-                            ),
+                            "sha256": _sha256_file(refined_record["cad_seed_path"]),
                         },
                         "shape_candidate": copy.deepcopy(
                             refined_record["shape_candidate"]
@@ -2881,28 +2916,48 @@ def build_part_id_reference_evidence(
             ),
             "entityseg_refined_observation_count": sum(
                 sum(
-                    (observation.get("part_id_sam3_refinement") or {}).get(
-                        "applied"
-                    )
+                    (observation.get("part_id_sam3_refinement") or {}).get("applied")
                     is True
-                    and (observation.get("part_id_sam3_refinement") or {}).get(
-                        "selected_source"
+                    and (
+                        (observation.get("part_id_sam3_refinement") or {}).get(
+                            "selected_source"
+                        )
+                        == "entityseg"
+                        or (observation.get("part_id_sam3_refinement") or {}).get(
+                            "primary_candidate_source"
+                        )
+                        == "entityseg"
                     )
-                    == "entityseg"
                     for observation in record["observations"]
                 )
                 for record in materialized_records
             ),
             "sam3_selected_observation_count": sum(
                 sum(
-                    (observation.get("part_id_sam3_refinement") or {}).get(
-                        "applied"
+                    (observation.get("part_id_sam3_refinement") or {}).get("applied")
+                    is True
+                    and (
+                        (observation.get("part_id_sam3_refinement") or {}).get(
+                            "selected_source"
+                        )
+                        == "sam3"
+                        or (observation.get("part_id_sam3_refinement") or {}).get(
+                            "primary_candidate_source"
+                        )
+                        == "sam3"
                     )
+                    for observation in record["observations"]
+                )
+                for record in materialized_records
+            ),
+            "shape_guided_iterative_refined_observation_count": sum(
+                sum(
+                    (observation.get("part_id_sam3_refinement") or {}).get("applied")
                     is True
                     and (observation.get("part_id_sam3_refinement") or {}).get(
                         "selected_source"
                     )
-                    == "sam3"
+                    == "shape_guided_iterative"
                     for observation in record["observations"]
                 )
                 for record in materialized_records

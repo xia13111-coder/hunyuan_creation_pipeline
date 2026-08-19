@@ -16,6 +16,7 @@ from qwen_material_pipeline.segmentation.hybrid_part_masks import (
     _connected_component_count,
     _entity_aligned_cad_seed,
     _entity_rejection_reasons,
+    _iterative_shape_guided_refinement,
     _sam_aligned_cad_seed,
     _trim_entity_to_cad_support,
 )
@@ -127,6 +128,62 @@ def test_sam_specific_cad_area_bound_is_stricter_than_entity_default() -> None:
 
     assert np.count_nonzero(sam_trimmed) < np.count_nonzero(default_trimmed)
     assert sam_audit["final_to_cad_area_ratio"] <= 1.15
+
+
+def test_iterative_refinement_removes_current_view_occluder_and_snaps_edges() -> None:
+    image = np.zeros((96, 128, 3), dtype=np.uint8)
+    image[20:76, 24:104] = (30, 130, 40)
+    # A light occluding bar crosses a green CAD panel in the current view.
+    image[42:50, 60:112] = (210, 210, 210)
+    amodal = np.zeros((96, 128), dtype=bool)
+    amodal[20:76, 24:104] = True
+    visible = amodal.copy()
+    visible[42:50, 60:104] = False
+    sam = amodal.copy()
+    sam[40:53, 58:108] = True
+    sam[38:41, 92:101] = True
+
+    refined, audit, _support = _iterative_shape_guided_refinement(
+        image=image,
+        visible_seed=visible,
+        amodal_seed=amodal,
+        candidate_masks=[("sam3", sam)],
+        primary_candidate_source="sam3",
+    )
+
+    known_occluded = amodal & ~visible
+    assert np.count_nonzero(refined & known_occluded) == 0
+    assert audit["known_occluded_primary_candidate_pixels_removed"] > 0
+    assert audit["selected_iteration"] > 0
+    assert (
+        audit["final_metrics"]["image_edge_support"]
+        > audit["initial_metrics"]["image_edge_support"]
+    )
+    assert not np.array_equal(refined, sam)
+
+
+def test_iterative_refinement_jointly_consumes_safe_sam_and_entity_priors() -> None:
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    image[18:62, 20:80] = (80, 140, 90)
+    visible = np.zeros((80, 100), dtype=bool)
+    visible[18:62, 20:80] = True
+    sam = np.zeros_like(visible)
+    sam[17:61, 19:79] = True
+    entity = np.zeros_like(visible)
+    entity[19:63, 21:81] = True
+
+    refined, audit, _support = _iterative_shape_guided_refinement(
+        image=image,
+        visible_seed=visible,
+        amodal_seed=visible,
+        candidate_masks=[("entityseg", entity), ("sam3", sam)],
+        primary_candidate_source="entityseg",
+    )
+
+    assert np.any(refined)
+    assert audit["candidate_sources"] == ["entityseg", "sam3"]
+    assert audit["prior_candidate_role"] == "probable_foreground_initialization_only"
+    assert audit["method"] == "iterative_visible_mesh_edge_optimization"
 
 
 def test_hybrid_replays_sam_shared_camera_template_translation() -> None:
@@ -299,9 +356,12 @@ def test_hybrid_manifest_is_directly_consumable_as_part_id_evidence(
     assert owner == manifest_path
     assert set(records) == {("front", "P0001")}
     selected = accepted[("front", "P0001")]
-    assert selected["selected_source"] == "sam3"
+    assert selected["selected_source"] == "shape_guided_iterative"
+    assert selected["primary_candidate_source"] == "sam3"
+    assert selected["candidate_sources"] == ["sam3"]
     assert selected["view_shared_alignment"] == shared
     assert selected["shape_candidate"]["cad_shape_iou"] == 1.0
-    assert result["records"][0]["cad_projection_seed"]["sha256"] == _sha256(
-        seed_path
+    assert result["records"][0]["cad_projection_seed"]["sha256"] == _sha256(seed_path)
+    assert result["records"][0]["iterative_refinement"]["method"] == (
+        "iterative_visible_mesh_edge_optimization"
     )

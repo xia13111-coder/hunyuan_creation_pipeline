@@ -56,14 +56,17 @@ def _aligned_template(
         [[1.0, 0.0, float(translation[0])], [0.0, 1.0, float(translation[1])]],
         dtype=np.float32,
     )
-    return cv2.warpAffine(
-        seed.astype(np.uint8),
-        matrix,
-        (seed.shape[1], seed.shape[0]),
-        flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    ) > 0
+    return (
+        cv2.warpAffine(
+            seed.astype(np.uint8),
+            matrix,
+            (seed.shape[1], seed.shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        > 0
+    )
 
 
 def _tile(
@@ -97,7 +100,9 @@ def _tile(
         ),
         (
             (
-                "FINAL: Entity+CAD"
+                "FINAL: iterative mesh-guided"
+                if selected_source == "shape_guided_iterative"
+                else "FINAL: Entity+CAD"
                 if selected_source == "entityseg"
                 else "FINAL: SAM3"
                 if selected_source == "sam3"
@@ -161,8 +166,8 @@ def build_report(
         final_row = hybrid[key]
         sam_row = sam[key]
         entity_row = entity[key]
-        source_path = Path(str(final_row["source_image"])).expanduser().resolve(
-            strict=True
+        source_path = (
+            Path(str(final_row["source_image"])).expanduser().resolve(strict=True)
         )
         source = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
         if source is None:
@@ -176,9 +181,11 @@ def build_report(
             _mask(Path(str(seed_doc["path"])), source.shape[:2]),
             final_row,
         )
-        amodal_doc = final_row.get("cad_amodal_template") or entity_row.get(
-            "cad_amodal_template"
-        ) or sam_row.get("cad_amodal_template")
+        amodal_doc = (
+            final_row.get("cad_amodal_template")
+            or entity_row.get("cad_amodal_template")
+            or sam_row.get("cad_amodal_template")
+        )
         if isinstance(amodal_doc, Mapping) and isinstance(amodal_doc.get("path"), str):
             amodal = _aligned_template(
                 _mask(Path(str(amodal_doc["path"])), source.shape[:2]),
@@ -216,6 +223,7 @@ def build_report(
                 ),
                 "metrics": final_row.get("fusion_metrics"),
                 "cad_support_trim": final_row.get("cad_support_trim"),
+                "iterative_refinement": final_row.get("iterative_refinement"),
                 "aligned_cad_template": final_row.get("aligned_cad_template"),
                 "accepted": final_row.get("accepted") is True,
                 "asset": f"assets/{asset_name}",
@@ -223,11 +231,10 @@ def build_report(
         )
 
     labels = {
-        "entityseg_replaces_sam3_boundary": "EntitySeg 改善 SAM3 边界",
-        "entityseg_fills_sam3_gap": "EntitySeg 补充 SAM3 未通过区域",
-        "sam3_retained_after_entityseg_rejection": "EntitySeg 不安全，保留 SAM3",
-        "sam3_only_candidate": "仅 SAM3 有安全候选",
-        "sam3_rejected_outside_aligned_cad_support": "SAM3 超出完整 mesh 形状，拒绝",
+        "iterative_refinement_from_sam3_entityseg": "SAM3 + EntitySeg 联合迭代优化",
+        "iterative_refinement_from_sam3": "SAM3 + mesh/可见性迭代优化",
+        "iterative_refinement_from_entityseg": "EntitySeg + mesh/可见性迭代优化",
+        "iterative_refinement_rejected": "迭代优化未通过安全约束",
         "no_safe_candidate": "没有通过双模板约束的候选",
     }
     sections: list[str] = []
@@ -250,6 +257,27 @@ def build_report(
                     "CAD 支持域裁剪：保留 "
                     f"{100.0 * float(trim['retained_entity_fraction']):.1f}%"
                 )
+            refinement = row.get("iterative_refinement")
+            if isinstance(refinement, Mapping):
+                initial = refinement.get("initial_metrics")
+                final = refinement.get("final_metrics")
+                if isinstance(initial, Mapping) and isinstance(final, Mapping):
+                    details.append(
+                        "迭代 "
+                        f"{int(refinement.get('selected_iteration', 0))}/"
+                        f"{int(refinement.get('iteration_budget', 0))}："
+                        "边缘支持 "
+                        f"{float(initial['image_edge_support']):.3f}→"
+                        f"{float(final['image_edge_support']):.3f}，"
+                        "可见 CAD IoU "
+                        f"{float(initial['visible_seed_iou']):.3f}→"
+                        f"{float(final['visible_seed_iou']):.3f}"
+                    )
+                removed = refinement.get(
+                    "known_occluded_primary_candidate_pixels_removed"
+                )
+                if isinstance(removed, int) and removed:
+                    details.append(f"移除遮挡误归属 {removed} px")
             alignment = row.get("aligned_cad_template")
             if isinstance(alignment, Mapping):
                 translation = alignment.get("translation_xy_pixels", [0.0, 0.0])
@@ -282,8 +310,8 @@ h1{{margin:.1em 0}}h2{{margin-top:42px}}.lead,.card p{{color:var(--muted)}}.stat
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(590px,1fr));gap:14px}}.card{{padding:12px;overflow:hidden}}.card h3{{margin:0 0 8px}}
 .card img{{display:block;width:100%;height:auto;border-radius:7px}}.card p{{margin:8px 2px 0}}@media(max-width:650px){{main{{padding:14px}}.grid{{grid-template-columns:1fr}}}}
 </style></head><body><main><h1>SAM3 + EntitySeg 辅助分割</h1>
-<p class="lead">红色是整机渲染得到的可见 Part-ID（定位与遮挡先验），黄色是保持同一整机相机和刚体位姿、仅隐藏其他 mesh 后投影出的完整零件形状。绿色和青色分别是 SAM3 与 EntitySeg 候选，紫色才是最终通过双模板约束的结果。每个视角只允许整件工件共享一个有界 2D 相机残差，不允许单独移动、旋转或缩放 mesh。</p>
-<div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">Entity 改善 SAM <b>{summary['decision_counts'].get('entityseg_replaces_sam3_boundary', 0)}</b></div><div class="stat">Entity 补充缺口 <b>{summary['decision_counts'].get('entityseg_fills_sam3_gap', 0)}</b></div><div class="stat">最终来源：Entity <b>{summary['selected_source_counts'].get('entityseg', 0)}</b> / SAM <b>{summary['selected_source_counts'].get('sam3', 0)}</b></div></div>
+<p class="lead">红色是整机渲染得到的当前视图可见 Part-ID（遮挡归属权威），黄色是保持同一整机相机和刚体位姿、仅隐藏其他 mesh 后投影出的完整零件形状。绿色和青色是 SAM3 与 EntitySeg 的前序估计；紫色不是二选一，而是在完整 mesh、当前可见性和照片边缘之间逐轮优化并选择最优安全迭代。每个视角只允许整件工件共享一个有界 2D 相机残差，不允许单独移动、旋转或缩放 mesh。</p>
+<div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">联合候选迭代 <b>{summary['decision_counts'].get('iterative_refinement_from_sam3_entityseg', 0)}</b></div><div class="stat">单候选 + mesh 迭代 <b>{summary['decision_counts'].get('iterative_refinement_from_sam3', 0) + summary['decision_counts'].get('iterative_refinement_from_entityseg', 0)}</b></div><div class="stat">最终边界：迭代优化 <b>{summary['selected_source_counts'].get('shape_guided_iterative', 0)}</b></div></div>
 <p class="lead">这是正式 Part-ID 材质证据使用的边界融合结果；无安全候选时会回退到已审计的 CAD 投影，不会猜测零件边界。点击图片可查看原始像素。</p>
 <nav>{''.join(f'<a href="#{key}">{value}</a>' for key,value in labels.items())}</nav>{''.join(sections)}</main></body></html>"""
     (output_dir / "index.html").write_text(page, encoding="utf-8")
