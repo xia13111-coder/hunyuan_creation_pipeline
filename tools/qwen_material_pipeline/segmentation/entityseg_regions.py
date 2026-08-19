@@ -45,16 +45,11 @@ from .sam3_regions import (
 )
 
 
-SCHEMA_VERSION = "qwen-entityseg-region-result/v2"
+SCHEMA_VERSION = "qwen-entityseg-region-result/v1"
 DEFAULT_MINIMUM_MODEL_SCORE = 0.30
 DEFAULT_MINIMUM_MASK_PIXELS = 16
 DEFAULT_MAXIMUM_CANDIDATES_PER_SOURCE = 12
 DEFAULT_MAXIMUM_CAD_CENTROID_DISTANCE = 0.15
-MINIMUM_INTERNAL_REPAIR_VISIBLE_RECALL = 0.90
-MINIMUM_INTERNAL_REPAIR_COMPONENT_PIXELS = 8
-MINIMUM_INTERNAL_REPAIR_COMPONENT_COVERAGE = 0.80
-INTERNAL_REPAIR_CLOSING_RADIUS_FRACTION = 0.02
-MAXIMUM_INTERNAL_REPAIR_CLOSING_RADIUS_PIXELS = 6
 
 
 class EntitySegRegionError(ValueError):
@@ -138,14 +133,11 @@ def _boundary_metrics(image_bgr: np.ndarray, mask: np.ndarray) -> dict[str, Any]
     gradient = cv2.magnitude(gradient_x, gradient_y)
     normalizer = float(np.percentile(gradient, 95.0))
     normalized = np.clip(gradient / max(normalizer, 1e-6), 0.0, 1.0)
-    boundary = (
-        cv2.morphologyEx(
-            binary.astype(np.uint8),
-            cv2.MORPH_GRADIENT,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
-        )
-        > 0
-    )
+    boundary = cv2.morphologyEx(
+        binary.astype(np.uint8),
+        cv2.MORPH_GRADIENT,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+    ) > 0
     values = normalized[boundary]
     contours, _hierarchy = cv2.findContours(
         binary.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
@@ -203,118 +195,6 @@ def _cad_location_agreement(mask: np.ndarray, seed: np.ndarray) -> dict[str, Any
     }
 
 
-def _internal_repair_support(
-    candidate: np.ndarray,
-    visible_seed: np.ndarray,
-    amodal_seed: np.ndarray | None,
-) -> tuple[np.ndarray, dict[str, Any]]:
-    """Find bounded CAD-internal defects supported by one EntitySeg region.
-
-    A missing visible region that reaches the isolated mesh exterior is an
-    occlusion and remains CAD-owned. A fully enclosed missing component, or a
-    narrow opening that closes at a scale derived from the projected part,
-    may instead be a false CAD internal cutout. EntitySeg can propose filling
-    only those bounded components; it never receives authority over the outer
-    Part-ID boundary.
-    """
-
-    if amodal_seed is None:
-        empty = np.zeros_like(visible_seed, dtype=bool)
-        return empty, {
-            "enclosed_cad_hole_count": 0,
-            "automatic_internal_gap_closing_radius_pixels": 0,
-            "narrow_cad_internal_gap_pixels": 0,
-            "entity_supported_enclosed_hole_count": 0,
-            "entity_supported_enclosed_hole_pixels": 0,
-            "entity_supported_enclosed_hole_component_ids": [],
-        }
-    entity = np.asarray(candidate, dtype=bool)
-    visible = np.asarray(visible_seed, dtype=bool)
-    amodal = np.asarray(amodal_seed, dtype=bool)
-    if entity.shape != visible.shape or amodal.shape != visible.shape:
-        raise EntitySegRegionError("internal repair masks are incompatible")
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    visible_with_margin = cv2.dilate(visible.astype(np.uint8), kernel) > 0
-    missing = amodal & ~visible_with_margin
-    amodal_boundary = amodal & ~(cv2.erode(amodal.astype(np.uint8), kernel) > 0)
-    (
-        missing_count,
-        missing_labels,
-        missing_statistics,
-        _centroids,
-    ) = cv2.connectedComponentsWithStats(missing.astype(np.uint8), connectivity=8)
-    enclosed_count = 0
-    enclosed_mask = np.zeros_like(visible)
-    for component_id in range(1, missing_count):
-        pixels = int(missing_statistics[component_id, cv2.CC_STAT_AREA])
-        component = missing_labels == component_id
-        if pixels < MINIMUM_INTERNAL_REPAIR_COMPONENT_PIXELS:
-            continue
-        if np.any(component & amodal_boundary):
-            continue
-        enclosed_count += 1
-        enclosed_mask |= component
-
-    visible_y, visible_x = np.where(visible)
-    if not len(visible_x):
-        raise EntitySegRegionError("internal repair visible CAD seed is empty")
-    diagonal = float(
-        np.hypot(
-            int(visible_x.max() - visible_x.min() + 1),
-            int(visible_y.max() - visible_y.min() + 1),
-        )
-    )
-    closing_radius = max(
-        1,
-        min(
-            MAXIMUM_INTERNAL_REPAIR_CLOSING_RADIUS_PIXELS,
-            int(round(INTERNAL_REPAIR_CLOSING_RADIUS_FRACTION * diagonal)),
-        ),
-    )
-    closing_kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE,
-        (2 * closing_radius + 1, 2 * closing_radius + 1),
-    )
-    closed_visible = (
-        cv2.morphologyEx(visible.astype(np.uint8), cv2.MORPH_CLOSE, closing_kernel) > 0
-    )
-    narrow_internal_gaps = closed_visible & amodal & ~visible
-    proposed_support = enclosed_mask | narrow_internal_gaps
-    count, labels, statistics, _centroids = cv2.connectedComponentsWithStats(
-        proposed_support.astype(np.uint8), connectivity=8
-    )
-    supported_ids: list[int] = []
-    supported_pixels = 0
-    supported_mask = np.zeros_like(visible)
-    for component_id in range(1, count):
-        pixels = int(statistics[component_id, cv2.CC_STAT_AREA])
-        component = labels == component_id
-        if pixels < MINIMUM_INTERNAL_REPAIR_COMPONENT_PIXELS:
-            continue
-        coverage = int(np.count_nonzero(component & entity)) / pixels
-        if coverage < MINIMUM_INTERNAL_REPAIR_COMPONENT_COVERAGE:
-            continue
-        supported_ids.append(component_id)
-        supported_pixels += pixels
-        supported_mask |= component
-    return supported_mask, {
-        "enclosed_cad_hole_count": enclosed_count,
-        "automatic_internal_gap_closing_radius_pixels": closing_radius,
-        "narrow_cad_internal_gap_pixels": int(np.count_nonzero(narrow_internal_gaps)),
-        "entity_supported_enclosed_hole_count": len(supported_ids),
-        "entity_supported_enclosed_hole_pixels": supported_pixels,
-        "entity_supported_enclosed_hole_component_ids": supported_ids,
-    }
-
-
-def _internal_repair_metrics(
-    candidate: np.ndarray,
-    visible_seed: np.ndarray,
-    amodal_seed: np.ndarray | None,
-) -> dict[str, Any]:
-    return _internal_repair_support(candidate, visible_seed, amodal_seed)[1]
-
-
 def _setup_predictor(
     *,
     cropformer_root: Path,
@@ -338,9 +218,7 @@ def _setup_predictor(
             raise
         compatibility = types.ModuleType("mmcv")
 
-        def list_from_file(
-            filename: str, prefix: str = "", offset: int = 0
-        ) -> list[str]:
+        def list_from_file(filename: str, prefix: str = "", offset: int = 0) -> list[str]:
             with Path(filename).expanduser().resolve(strict=True).open(
                 "r", encoding="utf-8"
             ) as handle:
@@ -377,9 +255,7 @@ def _prediction_candidates(
     minimum_score: float,
 ) -> list[dict[str, Any]]:
     predictions = predictor.run_on_image(image_bgr)
-    instances = (
-        predictions.get("instances") if isinstance(predictions, Mapping) else None
-    )
+    instances = predictions.get("instances") if isinstance(predictions, Mapping) else None
     if instances is None or not hasattr(instances, "pred_masks"):
         raise EntitySegRegionError("CropFormer output has no instance masks")
     masks = instances.pred_masks.detach().to("cpu").numpy()
@@ -424,14 +300,15 @@ def _select_candidate(
     maximum_centroid_distance: float,
     box: Sequence[int] | None = None,
     view_shared_alignment: Mapping[str, Any] | None = None,
-) -> tuple[dict[str, Any] | None, list[dict[str, Any]], dict[str, Any] | None,]:
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     audited: list[tuple[tuple[float, ...], dict[str, Any], np.ndarray]] = []
     for candidate in candidates:
         mask = np.asarray(candidate["mask"], dtype=bool)
         registered_location = _cad_location_agreement(mask, seed)
         if (
             box is None
-            or int(np.count_nonzero(seed)) < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS
+            or int(np.count_nonzero(seed))
+            < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS
         ):
             aligned_seed = seed
             alignment = {
@@ -453,23 +330,20 @@ def _select_candidate(
             if amodal.shape != seed.shape:
                 raise EntitySegRegionError("CAD amodal template shape is incompatible")
             translation = alignment["translation_xy_pixels"]
-            aligned_amodal = (
-                cv2.warpAffine(
-                    amodal.astype(np.uint8),
-                    np.asarray(
-                        [
-                            [1.0, 0.0, float(translation[0])],
-                            [0.0, 1.0, float(translation[1])],
-                        ],
-                        dtype=np.float32,
-                    ),
-                    (source_image.shape[1], source_image.shape[0]),
-                    flags=cv2.INTER_NEAREST,
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=0,
-                )
-                > 0
-            )
+            aligned_amodal = cv2.warpAffine(
+                amodal.astype(np.uint8),
+                np.asarray(
+                    [
+                        [1.0, 0.0, float(translation[0])],
+                        [0.0, 1.0, float(translation[1])],
+                    ],
+                    dtype=np.float32,
+                ),
+                (source_image.shape[1], source_image.shape[0]),
+                flags=cv2.INTER_NEAREST,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            ) > 0
         metrics = _normalized_shape_agreement(mask, aligned_seed)
         amodal_metrics = (
             _occlusion_aware_amodal_agreement(mask, aligned_seed, aligned_amodal)
@@ -477,12 +351,8 @@ def _select_candidate(
             else {}
         )
         location = _cad_location_agreement(mask, aligned_seed)
-        internal_repair = _internal_repair_metrics(mask, aligned_seed, aligned_amodal)
         reasons: list[str] = []
-        if (
-            int(metrics["cad_shape_seed_pixels"])
-            < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS
-        ):
+        if int(metrics["cad_shape_seed_pixels"]) < DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS:
             reasons.append("cad_shape_seed_too_small")
         if aligned_amodal is not None:
             visible_intersection = int(np.count_nonzero(mask & aligned_seed))
@@ -537,26 +407,7 @@ def _select_candidate(
             "accepted": not reasons,
             "reason_codes": reasons,
             "boundary": _boundary_metrics(source_image, mask),
-            "internal_repair": internal_repair,
         }
-        repair_reasons: list[str] = []
-        if candidate["source"] != "cad_local_crop":
-            repair_reasons.append("internal_repair_requires_local_entity_candidate")
-        if float(amodal_metrics.get("cad_visible_seed_recall", 0.0)) < (
-            MINIMUM_INTERNAL_REPAIR_VISIBLE_RECALL
-        ):
-            repair_reasons.append("insufficient_visible_recall_for_internal_repair")
-        if (
-            float(registered_location["cad_centroid_distance_normalized"])
-            > maximum_centroid_distance
-        ):
-            repair_reasons.append("internal_repair_candidate_centroid_too_far")
-        if int(internal_repair["entity_supported_enclosed_hole_pixels"]) < (
-            MINIMUM_INTERNAL_REPAIR_COMPONENT_PIXELS
-        ):
-            repair_reasons.append("no_entity_supported_bounded_cad_internal_gap")
-        row["internal_repair_eligible"] = not repair_reasons
-        row["internal_repair_rejection_reasons"] = repair_reasons
         rank = (
             -float(registered_location["cad_centroid_distance_normalized"]),
             float(amodal_metrics.get("cad_amodal_shape_iou", metrics["cad_shape_iou"])),
@@ -569,24 +420,15 @@ def _select_candidate(
         audited.append((rank, row, mask))
     audited.sort(key=lambda item: item[0], reverse=True)
     accepted = next((item for item in audited if item[1]["accepted"]), None)
-    repair = next(
-        (item for item in audited if item[1]["internal_repair_eligible"]), None
-    )
     compact_items = list(audited[:DEFAULT_MAXIMUM_CANDIDATES_PER_SOURCE])
     if accepted is not None and not any(item is accepted for item in compact_items):
         compact_items[-1:] = [accepted]
-    if repair is not None and not any(item is repair for item in compact_items):
-        compact_items[-1:] = [repair]
     compact = [item[1] for item in compact_items]
-    selected_document: dict[str, Any] | None = None
-    if accepted is not None:
-        selected_document = dict(accepted[1])
-        selected_document["mask"] = accepted[2]
-    repair_document: dict[str, Any] | None = None
-    if repair is not None:
-        repair_document = dict(repair[1])
-        repair_document["mask"] = repair[2]
-    return selected_document, compact, repair_document
+    if accepted is None:
+        return None, compact
+    selected = dict(accepted[1])
+    selected["mask"] = accepted[2]
+    return selected, compact
 
 
 def run(
@@ -607,9 +449,7 @@ def run(
     owner = request_path.parent
     output_dir = output_dir.expanduser().resolve()
     masks_dir = output_dir / "masks"
-    repair_masks_dir = output_dir / "internal_repair_masks"
     masks_dir.mkdir(parents=True, exist_ok=True)
-    repair_masks_dir.mkdir(parents=True, exist_ok=True)
     source_by_view: dict[str, tuple[Path, np.ndarray]] = {}
     foreground_by_view: dict[str, np.ndarray] = {}
     for index, row in enumerate(request.get("source_views", [])):
@@ -766,7 +606,7 @@ def run(
             origin_xy=(left, top),
             minimum_score=minimum_score,
         )
-        selected, audits, internal_repair_candidate = _select_candidate(
+        selected, audits = _select_candidate(
             [*local_candidates, *full_candidates[view_id]],
             seed=seed,
             amodal=amodal,
@@ -782,29 +622,11 @@ def run(
             mask = np.asarray(selected.pop("mask"), dtype=np.uint8) * 255
             mask_path = masks_dir / f"{view_id}__{part_id}.png"
             if not cv2.imwrite(str(mask_path), mask):
-                raise EntitySegRegionError(
-                    f"unable to write EntitySeg mask: {mask_path}"
-                )
+                raise EntitySegRegionError(f"unable to write EntitySeg mask: {mask_path}")
             mask_doc = {
                 "path": str(mask_path.relative_to(output_dir)),
                 "sha256": _sha256_file(mask_path),
             }
-        internal_repair_doc: dict[str, Any] | None = None
-        internal_repair_audit: dict[str, Any] | None = None
-        if internal_repair_candidate is not None:
-            repair_mask = (
-                np.asarray(internal_repair_candidate.pop("mask"), dtype=np.uint8) * 255
-            )
-            repair_path = repair_masks_dir / f"{view_id}__{part_id}.png"
-            if not cv2.imwrite(str(repair_path), repair_mask):
-                raise EntitySegRegionError(
-                    f"unable to write EntitySeg internal repair mask: {repair_path}"
-                )
-            internal_repair_doc = {
-                "path": str(repair_path.relative_to(output_dir)),
-                "sha256": _sha256_file(repair_path),
-            }
-            internal_repair_audit = internal_repair_candidate
         records.append(
             {
                 "view_id": view_id,
@@ -831,10 +653,8 @@ def run(
                 "local_candidate_count": len(local_candidates),
                 "accepted": selected is not None,
                 "selected_candidate": selected,
-                "internal_repair_candidate": internal_repair_audit,
                 "candidate_audits": audits,
                 "mask": mask_doc,
-                "internal_repair_mask": internal_repair_doc,
             }
         )
         print(
@@ -886,28 +706,6 @@ def run(
             "shape_authority": "isolated_mesh_amodal_projection",
             "visibility_authority": "whole_assembly_part_id_projection",
             "role": "boundary_candidate_only_cad_part_id_remains_identity_authority",
-            "internal_repair_role": (
-                "local_entity_continuity_may_repair_only_enclosed_or_"
-                "scale_bounded_narrow_cad_internal_gaps"
-            ),
-            "minimum_internal_repair_visible_recall": (
-                MINIMUM_INTERNAL_REPAIR_VISIBLE_RECALL
-            ),
-            "minimum_internal_repair_component_pixels": (
-                MINIMUM_INTERNAL_REPAIR_COMPONENT_PIXELS
-            ),
-            "minimum_internal_repair_component_coverage": (
-                MINIMUM_INTERNAL_REPAIR_COMPONENT_COVERAGE
-            ),
-            "internal_repair_closing_radius_fraction": (
-                INTERNAL_REPAIR_CLOSING_RADIUS_FRACTION
-            ),
-            "maximum_internal_repair_closing_radius_pixels": (
-                MAXIMUM_INTERNAL_REPAIR_CLOSING_RADIUS_PIXELS
-            ),
-            "outer_boundary_authority_for_internal_repair": (
-                "isolated_mesh_plus_current_view_visible_cad"
-            ),
             "alignment_model": "one_whole_workpiece_translation_per_view",
             "per_mesh_pose_change_allowed": False,
             "part_specific_translation_allowed": False,
@@ -921,16 +719,8 @@ def run(
             "accepted_view_counts": dict(
                 sorted(Counter(row["view_id"] for row in accepted).items())
             ),
-            "accepted_unique_part_count": len({row["group_id"] for row in accepted}),
-            "internal_repair_candidate_count": sum(
-                row.get("internal_repair_candidate") is not None for row in records
-            ),
-            "internal_repair_unique_part_count": len(
-                {
-                    row["group_id"]
-                    for row in records
-                    if row.get("internal_repair_candidate") is not None
-                }
+            "accepted_unique_part_count": len(
+                {row["group_id"] for row in accepted}
             ),
         },
     }
@@ -950,12 +740,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--checkpoint", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument(
-        "--minimum-model-score", type=float, default=DEFAULT_MINIMUM_MODEL_SCORE
-    )
-    parser.add_argument(
-        "--minimum-shape-iou", type=float, default=DEFAULT_MINIMUM_CAD_SHAPE_IOU
-    )
+    parser.add_argument("--minimum-model-score", type=float, default=DEFAULT_MINIMUM_MODEL_SCORE)
+    parser.add_argument("--minimum-shape-iou", type=float, default=DEFAULT_MINIMUM_CAD_SHAPE_IOU)
     parser.add_argument(
         "--minimum-area-agreement",
         type=float,

@@ -84,18 +84,7 @@ initialize an iterative current-view optimizer: the isolated mesh constrains
 the complete shape, the assembled Part-ID projection owns visibility and
 occlusion, and photograph edges refine the boundary inside an automatically
 scaled narrow band. The safest iterate maximizes the unweighted geometric mean
-of those three agreements. CAD Part-ID remains the identity authority.
-When the assembled projection itself contains a false internal cutout, a local
-EntitySeg candidate may still provide repair evidence even if its complete mask
-is rejected for crossing the outer boundary. Admission requires high visible
-recall and location agreement. Repair authority is limited to enclosed holes or
-narrow gaps closed at a scale derived automatically from the projected part;
-wide exterior-connected occlusions remain hard background. A repair reaches the
-final mask only when it improves the joint photograph-edge, isolated-mesh, and
-current-view visibility objective. No Part ID or asset-specific threshold is
-used.
-
-Every Part-ID in a view shares one
+of those three agreements. CAD Part-ID remains the identity authority. Every Part-ID in a view shares one
 whole-workpiece camera residual; no individual mesh may translate, rotate, or
 scale. If local refinement is unreliable, the workflow uses the
 global projection or marks the part as unobserved. These adjustments affect
@@ -109,7 +98,7 @@ run instead of silently continuing with a two-view material decision.
 | Component | Role |
 | --- | --- |
 | SAM3 | Whole-workpiece foreground and per-part initialization candidates. |
-| EntitySeg / CropFormer | Class-agnostic initialization plus bounded, image-supported repair of CAD-internal gaps. |
+| EntitySeg / CropFormer | Class-agnostic initialization candidates accepted only inside the CAD safety contract. |
 | Iterative boundary optimizer | Combines isolated shape, assembled visibility, prior masks, and current-image edges; it never moves an individual mesh. |
 | MVInverse | Albedo, roughness, and metallic estimates inside accepted masks. |
 | SigLIP2 | Retrieve visually related MDLs from NVIDIA `Materials/Base`. |
