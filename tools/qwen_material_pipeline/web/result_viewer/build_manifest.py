@@ -230,7 +230,32 @@ def _locate_quality_report(
             effective_path if effective_path not in recorded_candidate_paths else None,
         )
 
+    final_selected_color_root = (
+        visual_material_root / "material_identity_color" / "final_selected"
+    )
+    final_selected_color_audit = _read_object(
+        final_selected_color_root
+        / "corresponding_material_color_selection_audit.json"
+    )
+    accepted_final_selected_color_report = None
+    if (
+        final_selected_color_audit is not None
+        and final_selected_color_audit.get("schema_version")
+        == "qwen-corresponding-material-color-render-selection-audit/v1"
+        and final_selected_color_audit.get("status") == "PASS"
+    ):
+        accepted_final_selected_color_report = (
+            final_selected_color_root / "reference_render_comparison.json"
+        )
+
     conventional_candidates = (
+        # A strict downstream visual gate can reject publication after the
+        # colour tournament has already selected and rendered its best
+        # candidate.  In that case there is no root pipeline result yet, but
+        # the PASS selection audit still makes final_selected the truthful
+        # preview of the material plan that was evaluated.  Never expose this
+        # directory when its independent selection audit is absent or failed.
+        accepted_final_selected_color_report,
         visual_material_root
         / "visual_quality_repair"
         / "reference_render_comparison.json",

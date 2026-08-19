@@ -281,6 +281,60 @@ def test_resolution_and_quality_report_work_without_root_result(
     assert manifest["source"]["legacy_compatibility"] is False
 
 
+@pytest.mark.parametrize(
+    ("selection_status", "expected_round"),
+    [
+        ("PASS", "material_identity_color/final_selected"),
+        ("FAIL", "visual_quality"),
+    ],
+)
+def test_colour_selection_audit_controls_final_selected_preview_without_root_result(
+    tmp_path: Path,
+    selection_status: str,
+    expected_round: str,
+) -> None:
+    visual_root = tmp_path / "visual_material"
+    baseline_root = visual_root / "visual_quality"
+    selected_root = visual_root / "material_identity_color" / "final_selected"
+    baseline_image = baseline_root / "renders" / "rgb" / "front.png"
+    selected_image = selected_root / "renders" / "rgb" / "front.png"
+    baseline_image.parent.mkdir(parents=True)
+    selected_image.parent.mkdir(parents=True)
+    baseline_image.write_bytes(b"pre-colour")
+    selected_image.write_bytes(b"post-colour")
+    _write_json(
+        baseline_root / "reference_render_comparison.json",
+        {"aggregate": {"status": "FAIL"}},
+    )
+    _write_json(
+        selected_root / "reference_render_comparison.json",
+        {"aggregate": {"status": "FAIL"}},
+    )
+    _write_json(
+        selected_root / "corresponding_material_color_selection_audit.json",
+        {
+            "schema_version": (
+                "qwen-corresponding-material-color-render-selection-audit/v1"
+            ),
+            "status": selection_status,
+        },
+    )
+
+    manifest = VIEWER.build_viewer_manifest(tmp_path)
+
+    expected_root = visual_root / expected_round
+    expected_image = expected_root / "renders" / "rgb" / "front.png"
+    assert manifest["source"]["quality_report"] == (
+        "delivery/"
+        + (expected_root / "reference_render_comparison.json")
+        .relative_to(tmp_path)
+        .as_posix()
+    )
+    assert manifest["source"]["preview_images"] == {
+        "front": "delivery/" + expected_image.relative_to(tmp_path).as_posix(),
+    }
+
+
 def test_report_count_mismatch_is_not_hidden(tmp_path: Path) -> None:
     resolution_path = (
         tmp_path / "visual_material" / "analysis" / "visual_quality_resolution.json"
