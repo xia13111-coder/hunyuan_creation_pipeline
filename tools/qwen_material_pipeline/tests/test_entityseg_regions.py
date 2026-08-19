@@ -108,3 +108,45 @@ def test_selection_does_not_move_cad_template_per_candidate() -> None:
     assert row["cad_template_alignment"]["per_mesh_pose_change_allowed"] is False
     assert row["cad_direct_iou"] == pytest.approx(0.72413793)
     assert row["registered_cad_centroid_distance_normalized"] > 0.0
+
+
+def test_selection_uses_one_shared_view_translation_for_every_candidate() -> None:
+    source = np.zeros((100, 120, 3), dtype=np.uint8)
+    seed = np.zeros((100, 120), dtype=bool)
+    shifted = np.zeros_like(seed)
+    seed[30:60, 40:60] = True
+    shifted[33:63, 44:64] = True
+    shared = {
+        "translation_xy_pixels": [4.0, 3.0],
+        "maximum_translation_xy_pixels": [12, 12],
+        "estimation_mode": (
+            "whole_workpiece_foreground_to_visible_cad_union_integer_translation"
+        ),
+        "part_specific_translation_allowed": False,
+        "cad_union_pixels": 600,
+    }
+
+    selected, audit = _select_candidate(
+        [
+            {
+                "source": "cad_local_crop",
+                "prediction_index": 0,
+                "model_score": 0.8,
+                "mask": shifted,
+            }
+        ],
+        seed=seed,
+        source_image=source,
+        minimum_shape_iou=0.5,
+        minimum_area_agreement=0.5,
+        maximum_centroid_distance=0.15,
+        box=[250, 200, 700, 800],
+        view_shared_alignment=shared,
+    )
+
+    assert selected is not None
+    alignment = audit[0]["cad_template_alignment"]
+    assert alignment["translation_xy_pixels"] == [4.0, 3.0]
+    assert alignment["part_local_translation_xy_pixels"] == [0.0, 0.0]
+    assert alignment["part_specific_translation_allowed"] is False
+    assert alignment["per_mesh_pose_change_allowed"] is False

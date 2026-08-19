@@ -1632,6 +1632,8 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         self.assertEqual(config.sam3_minimum_prompt_overlap, 0.25)
         self.assertEqual(config.sam3_maximum_image_fraction, 0.8)
         self.assertEqual(config.sam3_minimum_mask_pixels, 32)
+        self.assertFalse(config.entityseg_enabled)
+        self.assertIsNone(config.entityseg_python)
         self.assertEqual(config.retrieval_device, "cuda")
         self.assertEqual(config.siglip_top_k, 64)
         self.assertEqual(config.retrieval_final_top_k, 32)
@@ -1828,6 +1830,11 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             "adaptive_actual_cad",
         )
         self.assertEqual(document["render"]["camera_fast_search"], "disabled")
+        self.assertTrue(document["sam3"]["entityseg"]["enabled"])
+        self.assertEqual(
+            document["sam3"]["entityseg"]["python"],
+            "${ENTITYSEG_PYTHON}",
+        )
 
     def test_family_first_profile_runs_identity_then_actual_cad_colour(self) -> None:
         profile = (
@@ -1867,6 +1874,38 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             document["retrieval"]["siglip_top_k"],
         )
         self.assertEqual(document["render"]["camera_fast_search"], "disabled")
+        self.assertTrue(document["sam3"]["entityseg"]["enabled"])
+
+    def test_entityseg_runtime_is_fail_closed_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path, _isaac, _references = self._fixture(root)
+            document = json.loads(config_path.read_text(encoding="utf-8"))
+            entity_python = root / "entityseg-python"
+            entity_python.write_text("#!/bin/sh\n", encoding="utf-8")
+            entity_python.chmod(0o755)
+            cropformer = root / "CropFormer"
+            cropformer.mkdir()
+            entity_config = root / "cropformer.yaml"
+            entity_config.write_text("MODEL: {}\n", encoding="utf-8")
+            entity_checkpoint = root / "cropformer.pth"
+            entity_checkpoint.write_bytes(b"checkpoint")
+            document["sam3"]["entityseg"] = {
+                "enabled": True,
+                "python": str(entity_python),
+                "cropformer_root": str(cropformer),
+                "config": str(entity_config),
+                "checkpoint": str(entity_checkpoint),
+                "minimum_model_score": 0.3,
+            }
+            config_path.write_text(json.dumps(document), encoding="utf-8")
+
+            config = load_visual_material_config(config_path)
+            self.assertTrue(config.entityseg_enabled)
+            self.assertEqual(config.entityseg_python, entity_python.resolve())
+            entity_checkpoint.unlink()
+            with self.assertRaisesRegex(FileNotFoundError, "entityseg.checkpoint"):
+                load_visual_material_config(config_path)
 
     def test_actual_cad_colour_requires_family_first_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

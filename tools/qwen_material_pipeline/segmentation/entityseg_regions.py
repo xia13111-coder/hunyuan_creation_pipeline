@@ -39,6 +39,7 @@ from .sam3_regions import (
     DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS,
     _box_pixels,
     _bounded_shared_camera_alignment,
+    _estimate_view_shared_translation,
     _normalized_shape_agreement,
     _occlusion_aware_amodal_agreement,
 )
@@ -298,6 +299,7 @@ def _select_candidate(
     minimum_area_agreement: float,
     maximum_centroid_distance: float,
     box: Sequence[int] | None = None,
+    view_shared_alignment: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     audited: list[tuple[tuple[float, ...], dict[str, Any], np.ndarray]] = []
     for candidate in candidates:
@@ -321,6 +323,7 @@ def _select_candidate(
                 box=box,
                 width=source_image.shape[1],
                 height=source_image.shape[0],
+                view_shared_alignment=view_shared_alignment,
             )
         aligned_amodal = None
         if amodal is not None:
@@ -448,6 +451,7 @@ def run(
     masks_dir = output_dir / "masks"
     masks_dir.mkdir(parents=True, exist_ok=True)
     source_by_view: dict[str, tuple[Path, np.ndarray]] = {}
+    foreground_by_view: dict[str, np.ndarray] = {}
     for index, row in enumerate(request.get("source_views", [])):
         if not isinstance(row, Mapping) or not isinstance(row.get("id"), str):
             raise EntitySegRegionError(f"source_views[{index}] is malformed")
@@ -457,7 +461,59 @@ def run(
         image = cv2.imread(str(path), cv2.IMREAD_COLOR)
         if image is None:
             raise EntitySegRegionError(f"unable to decode source image: {path}")
-        source_by_view[str(row["id"])] = (path, image)
+        view_id = str(row["id"])
+        source_by_view[view_id] = (path, image)
+        foreground_value = row.get("whole_workpiece_foreground")
+        if foreground_value is not None:
+            foreground_path = _resolve_file(
+                foreground_value,
+                owner=owner,
+                label=f"whole-workpiece foreground {view_id}",
+            )
+            if row.get("whole_workpiece_foreground_sha256") != _sha256_file(
+                foreground_path
+            ):
+                raise EntitySegRegionError(
+                    f"whole-workpiece foreground hash mismatch: {view_id}"
+                )
+            foreground = cv2.imread(str(foreground_path), cv2.IMREAD_GRAYSCALE)
+            if foreground is None or foreground.shape != image.shape[:2]:
+                raise EntitySegRegionError(
+                    f"whole-workpiece foreground shape mismatch: {view_id}"
+                )
+            foreground_by_view[view_id] = foreground >= 128
+
+    cad_seeds_by_view: dict[str, dict[str, np.ndarray]] = {
+        view_id: {} for view_id in source_by_view
+    }
+    for index, raw in enumerate(request.get("regions", [])):
+        if not isinstance(raw, Mapping):
+            raise EntitySegRegionError(f"regions[{index}] is malformed")
+        view_id = str(raw.get("view_id"))
+        part_id = str(raw.get("group_id"))
+        if view_id not in cad_seeds_by_view or not part_id:
+            raise EntitySegRegionError(f"regions[{index}] has invalid identity")
+        seed_doc = raw.get("cad_projection_seed")
+        if not isinstance(seed_doc, Mapping):
+            raise EntitySegRegionError(f"{view_id}/{part_id} has no CAD seed")
+        seed_path = _resolve_file(
+            seed_doc.get("path"), owner=owner, label="CAD projection seed"
+        )
+        if seed_doc.get("sha256") != _sha256_file(seed_path):
+            raise EntitySegRegionError(f"CAD seed hash mismatch: {view_id}/{part_id}")
+        decoded = cv2.imread(str(seed_path), cv2.IMREAD_GRAYSCALE)
+        if decoded is None or decoded.shape != source_by_view[view_id][1].shape[:2]:
+            raise EntitySegRegionError(f"CAD seed shape mismatch: {view_id}/{part_id}")
+        if part_id in cad_seeds_by_view[view_id]:
+            raise EntitySegRegionError(f"duplicate region: {view_id}/{part_id}")
+        cad_seeds_by_view[view_id][part_id] = decoded >= 128
+    shared_alignment_by_view = {
+        view_id: _estimate_view_shared_translation(
+            cad_seeds,
+            foreground_by_view.get(view_id),
+        )
+        for view_id, cad_seeds in cad_seeds_by_view.items()
+    }
 
     predictor = _setup_predictor(
         cropformer_root=cropformer_root,
@@ -559,6 +615,7 @@ def run(
             minimum_area_agreement=minimum_area_agreement,
             maximum_centroid_distance=maximum_centroid_distance,
             box=boxes[0],
+            view_shared_alignment=shared_alignment_by_view[view_id],
         )
         mask_doc: dict[str, Any] | None = None
         if selected is not None:
@@ -575,6 +632,8 @@ def run(
                 "view_id": view_id,
                 "group_id": part_id,
                 "source_image": str(image_path),
+                "source_image_sha256": _sha256_file(image_path),
+                "view_shared_alignment": shared_alignment_by_view[view_id],
                 "cad_projection_seed": {
                     "path": str(seed_path),
                     "sha256": _sha256_file(seed_path),
@@ -647,6 +706,9 @@ def run(
             "shape_authority": "isolated_mesh_amodal_projection",
             "visibility_authority": "whole_assembly_part_id_projection",
             "role": "boundary_candidate_only_cad_part_id_remains_identity_authority",
+            "alignment_model": "one_whole_workpiece_translation_per_view",
+            "per_mesh_pose_change_allowed": False,
+            "part_specific_translation_allowed": False,
         },
         "records": records,
         "summary": {

@@ -75,7 +75,15 @@
     "minimum_model_score": 0.45,
     "minimum_prompt_overlap": 0.25,
     "maximum_image_fraction": 0.8,
-    "minimum_mask_pixels": 32
+    "minimum_mask_pixels": 32,
+    "entityseg": {
+      "enabled": true,
+      "python": "${ENTITYSEG_PYTHON}",
+      "cropformer_root": "${ENTITYSEG_CROPFORMER_ROOT}",
+      "config": "${ENTITYSEG_CONFIG}",
+      "checkpoint": "${ENTITYSEG_CHECKPOINT}",
+      "minimum_model_score": 0.3
+    }
   },
   "retrieval": {
     "python": "${QWEN_PYTHON}",

@@ -92,6 +92,12 @@ class VisualMaterialConfig:
     sam3_minimum_prompt_overlap: float
     sam3_maximum_image_fraction: float
     sam3_minimum_mask_pixels: int
+    entityseg_enabled: bool
+    entityseg_python: Path | None
+    entityseg_cropformer_root: Path | None
+    entityseg_config: Path | None
+    entityseg_checkpoint: Path | None
+    entityseg_minimum_model_score: float
     retrieval_python: Path
     siglip2_model_path: Path
     dinov2_model_path: Path
@@ -400,6 +406,10 @@ def load_visual_material_config(
     )
     mvinverse = require_object(document.get("mvinverse"), "config.mvinverse")
     sam3 = require_object(document.get("sam3"), "config.sam3")
+    entityseg = require_object(
+        sam3.get("entityseg", {}),
+        "config.sam3.entityseg",
+    )
     retrieval = require_object(document.get("retrieval"), "config.retrieval")
     require_keys(
         qwen,
@@ -502,6 +512,21 @@ def load_visual_material_config(
                 "minimum_prompt_overlap",
                 "maximum_image_fraction",
                 "minimum_mask_pixels",
+            }
+        ),
+        optional=frozenset({"entityseg"}),
+    )
+    require_keys(
+        entityseg,
+        label="config.sam3.entityseg",
+        required=frozenset({"enabled"}) if entityseg else frozenset(),
+        optional=frozenset(
+            {
+                "python",
+                "cropformer_root",
+                "config",
+                "checkpoint",
+                "minimum_model_score",
             }
         ),
     )
@@ -881,6 +906,55 @@ def load_visual_material_config(
         sam3_minimum_mask_pixels=require_positive_int(
             sam3.get("minimum_mask_pixels"),
             "config.sam3.minimum_mask_pixels",
+        ),
+        entityseg_enabled=require_bool(
+            entityseg.get("enabled", False),
+            "config.sam3.entityseg.enabled",
+        ),
+        entityseg_python=(
+            resolve_path(
+                entityseg.get("python"),
+                config_dir=config_dir,
+                label="config.sam3.entityseg.python",
+                kind="file",
+                executable=True,
+            )
+            if entityseg.get("enabled") is True
+            else None
+        ),
+        entityseg_cropformer_root=(
+            resolve_path(
+                entityseg.get("cropformer_root"),
+                config_dir=config_dir,
+                label="config.sam3.entityseg.cropformer_root",
+                kind="directory",
+            )
+            if entityseg.get("enabled") is True
+            else None
+        ),
+        entityseg_config=(
+            resolve_path(
+                entityseg.get("config"),
+                config_dir=config_dir,
+                label="config.sam3.entityseg.config",
+                kind="file",
+            )
+            if entityseg.get("enabled") is True
+            else None
+        ),
+        entityseg_checkpoint=(
+            resolve_path(
+                entityseg.get("checkpoint"),
+                config_dir=config_dir,
+                label="config.sam3.entityseg.checkpoint",
+                kind="file",
+            )
+            if entityseg.get("enabled") is True
+            else None
+        ),
+        entityseg_minimum_model_score=require_unit_float(
+            entityseg.get("minimum_model_score", 0.30),
+            "config.sam3.entityseg.minimum_model_score",
         ),
         retrieval_python=resolve_path(
             retrieval.get("python"),

@@ -346,6 +346,75 @@ def configure_runtime() -> dict[str, str | None]:
         os.environ.setdefault("SAM3_REPOSITORY", str(default_sam3_repository))
     if default_sam3_checkpoint is not None:
         os.environ.setdefault("SAM3_CHECKPOINT", str(default_sam3_checkpoint))
+    removable_entityseg_roots = sorted(
+        Path("/media").glob("*/WD_BLACK/model_repos/qqlu_Entity/Entityv2/CropFormer")
+    )
+    default_entityseg_root = first_existing_path(
+        [
+            os.getenv("ENTITYSEG_CROPFORMER_ROOT") or "",
+            *removable_entityseg_roots,
+            visual_material_root / "third_party" / "CropFormer",
+        ]
+    )
+    entityseg_venv_pythons = sorted(
+        Path("/media").glob("*/WD_BLACK/model_repos/entityseg_venv/bin/python")
+    )
+    # Do not resolve this executable symlink.  ``pyvenv.cfg`` and the wrapper
+    # path select the EntitySeg-specific Detectron2/CropFormer site-packages;
+    # resolving it to the base conda interpreter would silently lose them.
+    entityseg_python_candidates = [
+        os.getenv("ENTITYSEG_PYTHON") or "",
+        *entityseg_venv_pythons,
+    ]
+    default_entityseg_python = next(
+        (
+            Path(candidate).expanduser().absolute()
+            for candidate in entityseg_python_candidates
+            if candidate and Path(candidate).expanduser().exists()
+        ),
+        None,
+    )
+    default_entityseg_config = first_existing_path(
+        [
+            os.getenv("ENTITYSEG_CONFIG") or "",
+            *(
+                root
+                / "configs/entityv2/entity_segmentation/"
+                "cropformer_swin_tiny_3x.yaml"
+                for root in removable_entityseg_roots
+            ),
+            (
+                default_entityseg_root
+                / "configs/entityv2/entity_segmentation/"
+                "cropformer_swin_tiny_3x.yaml"
+                if default_entityseg_root is not None
+                else ""
+            ),
+        ]
+    )
+    default_entityseg_checkpoint = first_existing_path(
+        [
+            os.getenv("ENTITYSEG_CHECKPOINT") or "",
+            *Path("/media").glob(
+                "*/WD_BLACK/model_repos/qqlu_Entity/weights/"
+                "CropFormer_swin_tiny_3x_5cea5e.pth"
+            ),
+            visual_material_root
+            / "models/entityseg/CropFormer_swin_tiny_3x_5cea5e.pth",
+        ]
+    )
+    if default_entityseg_python is not None:
+        os.environ.setdefault("ENTITYSEG_PYTHON", str(default_entityseg_python))
+    if default_entityseg_root is not None:
+        os.environ.setdefault(
+            "ENTITYSEG_CROPFORMER_ROOT", str(default_entityseg_root)
+        )
+    if default_entityseg_config is not None:
+        os.environ.setdefault("ENTITYSEG_CONFIG", str(default_entityseg_config))
+    if default_entityseg_checkpoint is not None:
+        os.environ.setdefault(
+            "ENTITYSEG_CHECKPOINT", str(default_entityseg_checkpoint)
+        )
     removable_siglip_models = sorted(
         Path("/media").glob("*/WD_BLACK/qwen_models/siglip2-base-patch16-224")
     )
@@ -459,6 +528,10 @@ def configure_runtime() -> dict[str, str | None]:
         "MVINVERSE_CHECKPOINT": os.getenv("MVINVERSE_CHECKPOINT"),
         "SAM3_REPOSITORY": os.getenv("SAM3_REPOSITORY"),
         "SAM3_CHECKPOINT": os.getenv("SAM3_CHECKPOINT"),
+        "ENTITYSEG_PYTHON": os.getenv("ENTITYSEG_PYTHON"),
+        "ENTITYSEG_CROPFORMER_ROOT": os.getenv("ENTITYSEG_CROPFORMER_ROOT"),
+        "ENTITYSEG_CONFIG": os.getenv("ENTITYSEG_CONFIG"),
+        "ENTITYSEG_CHECKPOINT": os.getenv("ENTITYSEG_CHECKPOINT"),
         "SAM3D_SINGLE_VIEW_ROOT": os.getenv("SAM3D_SINGLE_VIEW_ROOT"),
         "SAM3D_MULTI_VIEW_ROOT": os.getenv("SAM3D_MULTI_VIEW_ROOT"),
         "SAM3D_PIPELINE_CONFIG": os.getenv("SAM3D_PIPELINE_CONFIG"),
@@ -490,6 +563,10 @@ def runtime_summary() -> dict[str, Any]:
         "mvinverse_checkpoint": os.getenv("MVINVERSE_CHECKPOINT"),
         "sam3_repository": os.getenv("SAM3_REPOSITORY"),
         "sam3_checkpoint": os.getenv("SAM3_CHECKPOINT"),
+        "entityseg_python": os.getenv("ENTITYSEG_PYTHON"),
+        "entityseg_cropformer_root": os.getenv("ENTITYSEG_CROPFORMER_ROOT"),
+        "entityseg_config": os.getenv("ENTITYSEG_CONFIG"),
+        "entityseg_checkpoint": os.getenv("ENTITYSEG_CHECKPOINT"),
         "sam3d_single_view_root": os.getenv("SAM3D_SINGLE_VIEW_ROOT"),
         "sam3d_multi_view_root": os.getenv("SAM3D_MULTI_VIEW_ROOT"),
         "sam3d_pipeline_config": os.getenv("SAM3D_PIPELINE_CONFIG"),

@@ -57,8 +57,11 @@ SAM3 页面保存每张照片中已确认的整机前景。正式运行先校验
 一台分析相机。
 
 每个 CAD Part-ID 会独立投影。全局相机先给出可见区域和粗略框；流程随后用同一台封存相机
-把目标 mesh 单独投影成完整的 amodal 形状模板，再用“位置/可见性模板 + 完整 mesh 形状模板”
-共同引导 SAM3。局部贴合不可靠时，流程会使用全局投影或把该零件标为未观测。这些修正只
+把目标 mesh 单独投影成完整的 amodal 形状模板。同一份 CAD 请求共同引导 SAM3 和类无关
+EntitySeg。EntitySeg 只提供边界候选，CAD Part-ID 始终决定零件身份；融合器只有在候选满足
+CAD 可见/完整形状、位置、面积、连通域和图像边缘约束，并且相对 SAM3 确有边界提升时才采用。
+每个视角的所有零件共享同一个整机相机残差，禁止单个 mesh 平移、旋转或缩放。局部贴合
+不可靠时，流程会使用全局投影或把该零件标为未观测。这些修正只
 用于提取照片中的外观信息，不改变 CAD 几何。
 
 材质身份优先主线要求所有已注册参考视角都真实贡献可见且被选中的 Part-ID observation。
@@ -67,7 +70,8 @@ SAM3 页面保存每张照片中已确认的整机前景。正式运行先校验
 
 | 组件 | 作用 |
 | --- | --- |
-| SAM3 | 提供前景和逐零件采样区域。 |
+| SAM3 | 提供整机前景和逐零件语义候选。 |
+| EntitySeg / CropFormer | 提供类无关边界候选；只可在 CAD 安全门内替换或补充 SAM3。 |
 | MVInverse | 估计区域内的基础色、粗糙度和金属度。 |
 | SigLIP2 | 从 NVIDIA `Materials/Base` 检索外观相近的 MDL。 |
 | DINOv2 | 比较局部表面和纹理外观。 |
@@ -104,6 +108,7 @@ SAM3 页面保存每张照片中已确认的整机前景。正式运行先校验
 - Qwen / Qwen3.5：`QWEN_MODEL_PATH`、`QWEN35_MODEL_PATH`；
 - MVInverse：`MVINVERSE_REPOSITORY`、`MVINVERSE_CHECKPOINT`；
 - SAM3：`SAM3_REPOSITORY`、`SAM3_CHECKPOINT`；
+- EntitySeg：`ENTITYSEG_PYTHON`、`ENTITYSEG_CROPFORMER_ROOT`、`ENTITYSEG_CONFIG`、`ENTITYSEG_CHECKPOINT`；
 - SAM3D MoGe / DINOv2：`SAM3D_MOGE_CHECKPOINT`、`SAM3D_DINOV2_REPOSITORY`、`SAM3D_DINOV2_CHECKPOINT`；
 - 材质检索：`SIGLIP2_MODEL_PATH`、`DINOV2_MODEL_PATH`。
 

@@ -199,6 +199,10 @@ class PartIdArtifacts:
     sam3_request: Path
     sam3_dir: Path
     sam3_manifest: Path
+    entityseg_dir: Path
+    entityseg_manifest: Path
+    hybrid_mask_dir: Path
+    hybrid_mask_manifest: Path
     retrieval_request: Path
     retrieval_dir: Path
     retrieval_result: Path
@@ -226,6 +230,14 @@ class PartIdArtifacts:
             sam3_request=analysis / "part_id_sam3_request.json",
             sam3_dir=analysis / "part_id_sam3_regions",
             sam3_manifest=analysis / "part_id_sam3_regions" / "manifest.json",
+            entityseg_dir=analysis / "part_id_entityseg_regions",
+            entityseg_manifest=(
+                analysis / "part_id_entityseg_regions" / "manifest.json"
+            ),
+            hybrid_mask_dir=analysis / "part_id_hybrid_masks",
+            hybrid_mask_manifest=(
+                analysis / "part_id_hybrid_masks" / "manifest.json"
+            ),
             retrieval_request=analysis / "part_id_retrieval_request.json",
             retrieval_dir=retrieval_dir,
             retrieval_result=retrieval_dir / "visual_retrieval.json",

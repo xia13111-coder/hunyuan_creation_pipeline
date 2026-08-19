@@ -37,7 +37,7 @@ Optional verified Qwen3.5/SigLIP2 setup:
 bash tools/qwen_material_pipeline/scripts/setup_qwen35_runtime.sh
 ```
 
-SAM3, MVInverse, DINOv2, NVIDIA materials, and the Base observation bank remain
+SAM3, EntitySeg/CropFormer, MVInverse, DINOv2, NVIDIA materials, and the Base observation bank remain
 separate local dependencies and must pass preflight.
 
 ## Pipeline
@@ -45,7 +45,7 @@ separate local dependencies and must pass preflight.
 ```text
 normalized CAD + confirmed photos
   -> registered RGB/Part-ID evidence
-  -> SAM3/MVInverse/SigLIP2/DINOv2/Qwen3.5
+  -> CAD-constrained SAM3/EntitySeg fusion + MVInverse/SigLIP2/DINOv2/Qwen3.5
   -> Base MDL candidate renders
   -> one assignment for every Part-ID
   -> record the selected MDL, bind it in USD, and validate the result

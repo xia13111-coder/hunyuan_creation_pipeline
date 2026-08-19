@@ -77,8 +77,13 @@ run verifies the image hashes, then estimates one analysis camera per view.
 Each CAD Part-ID is projected separately. The global camera supplies its modal
 visible region and initial box. With that same sealed camera, the workflow also
 projects the target mesh in isolation to obtain its complete amodal shape.
-SAM3 is guided jointly by the location/visibility template and isolated-mesh
-shape template. If local refinement is unreliable, the workflow uses the
+The same CAD request guides both SAM3 and class-agnostic EntitySeg with the
+location/visibility template and isolated-mesh shape template. EntitySeg is a
+boundary candidate only; CAD Part-ID remains the identity authority. Fusion
+accepts it only when CAD shape, location, area, connectivity, and image-edge
+checks pass and it improves on SAM3. Every Part-ID in a view shares one
+whole-workpiece camera residual; no individual mesh may translate, rotate, or
+scale. If local refinement is unreliable, the workflow uses the
 global projection or marks the part as unobserved. These adjustments affect
 evidence extraction only, never CAD geometry.
 
@@ -89,7 +94,8 @@ run instead of silently continuing with a two-view material decision.
 
 | Component | Role |
 | --- | --- |
-| SAM3 | Foreground and per-part sampling masks. |
+| SAM3 | Whole-workpiece foreground and per-part semantic candidates. |
+| EntitySeg / CropFormer | Class-agnostic boundary candidates accepted only inside the CAD safety contract. |
 | MVInverse | Albedo, roughness, and metallic estimates inside accepted masks. |
 | SigLIP2 | Retrieve visually related MDLs from NVIDIA `Materials/Base`. |
 | DINOv2 | Compare local surface and texture appearance. |
@@ -131,6 +137,7 @@ The root `.env` centralizes local models:
 - Qwen / Qwen3.5: `QWEN_MODEL_PATH`, `QWEN35_MODEL_PATH`;
 - MVInverse: `MVINVERSE_REPOSITORY`, `MVINVERSE_CHECKPOINT`;
 - SAM3: `SAM3_REPOSITORY`, `SAM3_CHECKPOINT`;
+- EntitySeg: `ENTITYSEG_PYTHON`, `ENTITYSEG_CROPFORMER_ROOT`, `ENTITYSEG_CONFIG`, `ENTITYSEG_CHECKPOINT`;
 - SAM3D MoGe / DINOv2: `SAM3D_MOGE_CHECKPOINT`,
   `SAM3D_DINOV2_REPOSITORY`, `SAM3D_DINOV2_CHECKPOINT`;
 - material retrieval: `SIGLIP2_MODEL_PATH`, `DINOV2_MODEL_PATH`.

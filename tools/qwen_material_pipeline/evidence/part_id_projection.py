@@ -824,6 +824,196 @@ def _selected_cad_shape_candidate(record: Mapping[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(dict(selected))
 
 
+def _load_part_id_refinement_manifest(
+    value: str | Path | Mapping[str, Any],
+    *,
+    hybrid: bool,
+) -> tuple[
+    dict[str, Any],
+    Path | None,
+    dict[tuple[str, str], dict[str, Any]],
+    dict[tuple[str, str], Mapping[str, Any]],
+]:
+    """Load one sealed local-refinement result without changing CAD identity.
+
+    The hybrid lane accepts EntitySeg only as a boundary candidate selected by
+    the same CAD request and the same per-view whole-workpiece alignment as
+    SAM3.  It never grants either segmenter authority to move one Part-ID.
+    """
+
+    label = "Part-ID SAM3/EntitySeg hybrid manifest" if hybrid else (
+        "Part-ID SAM3 refinement manifest"
+    )
+    refinement, refinement_path = _read_object(value, label)
+    expected_schema = (
+        "qwen-cad-sam3-entityseg-hybrid/v1"
+        if hybrid
+        else "qwen-sam3-region-result/v1"
+    )
+    if refinement.get("schema_version") != expected_schema:
+        raise PartIdProjectionError(f"unsupported {label} schema")
+    unsigned = copy.deepcopy(refinement)
+    integrity = unsigned.pop("integrity", None)
+    if not isinstance(integrity, Mapping) or integrity.get(
+        "result_sha256"
+    ) != _canonical_sha256(unsigned):
+        raise PartIdProjectionError(f"{label} failed its integrity seal")
+
+    policy = refinement.get("policy")
+    if not isinstance(policy, Mapping):
+        raise PartIdProjectionError(f"{label} has no policy")
+    if hybrid:
+        if (
+            policy.get("entityseg_role") != "boundary_candidate_only"
+            or policy.get("per_mesh_pose_change_allowed") is not False
+            or policy.get("part_specific_translation_allowed") is not False
+            or policy.get("alignment_model")
+            != "one_whole_workpiece_translation_per_view"
+        ):
+            raise PartIdProjectionError(
+                "Part-ID hybrid manifest does not enforce CAD identity and "
+                "view-shared alignment"
+            )
+        if refinement_path is None:
+            raise PartIdProjectionError(
+                "in-memory Part-ID hybrid manifest cannot resolve its sealed inputs"
+            )
+        inputs = refinement.get("inputs")
+        if not isinstance(inputs, Mapping):
+            raise PartIdProjectionError("Part-ID hybrid manifest has no inputs")
+        linked_documents: list[dict[str, Any]] = []
+        for input_name in ("sam3_manifest", "entityseg_manifest"):
+            binding = inputs.get(input_name)
+            if not isinstance(binding, Mapping):
+                raise PartIdProjectionError(
+                    f"Part-ID hybrid manifest has no {input_name} binding"
+                )
+            linked_path = _resolve_file(
+                binding.get("path"),
+                owner=refinement_path,
+                label=f"Part-ID hybrid {input_name}",
+            )
+            if binding.get("sha256") != _sha256_file(linked_path):
+                raise PartIdProjectionError(
+                    f"Part-ID hybrid {input_name} file hash mismatch"
+                )
+            linked, _linked_owner = _read_object(linked_path, input_name)
+            if binding.get("document_sha256") != _canonical_sha256(linked):
+                raise PartIdProjectionError(
+                    f"Part-ID hybrid {input_name} document hash mismatch"
+                )
+            linked_documents.append(linked)
+        if (
+            linked_documents[0].get("request")
+            != linked_documents[1].get("request")
+            or refinement.get("request") != linked_documents[0].get("request")
+        ):
+            raise PartIdProjectionError(
+                "Part-ID hybrid inputs do not bind the same CAD request"
+            )
+    elif (
+        policy.get("per_mesh_pose_change_allowed") is not False
+        or policy.get("automatic_shape_point_refinement")
+        != "always_run_same_view_cad_shape_positive_negative_points"
+    ):
+        raise PartIdProjectionError(
+            "Part-ID SAM3 manifest does not enforce view-shared CAD guidance"
+        )
+
+    records = refinement.get("records")
+    if not isinstance(records, list):
+        raise PartIdProjectionError(f"{label} has no records")
+    accepted_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    records_by_identity: dict[tuple[str, str], Mapping[str, Any]] = {}
+    shared_alignment_by_view: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(records):
+        if not isinstance(raw, Mapping):
+            raise PartIdProjectionError(f"{label} record {index} is invalid")
+        identity = (str(raw.get("view_id")), str(raw.get("group_id")))
+        if not identity[0] or not identity[1] or identity in records_by_identity:
+            raise PartIdProjectionError(
+                f"{label} records contain invalid duplicate identities"
+            )
+        records_by_identity[identity] = raw
+        shared = raw.get("view_shared_alignment")
+        if not isinstance(shared, Mapping):
+            raise PartIdProjectionError(
+                f"{label} record {identity} has no view-shared alignment"
+            )
+        translation = shared.get("translation_xy_pixels")
+        if (
+            not isinstance(translation, list)
+            or len(translation) != 2
+            or any(
+                isinstance(component, bool)
+                or not isinstance(component, (int, float))
+                or not math.isfinite(float(component))
+                for component in translation
+            )
+            or shared.get("part_specific_translation_allowed") is not False
+        ):
+            raise PartIdProjectionError(
+                f"{label} record {identity} has malformed shared alignment"
+            )
+        shared_document = copy.deepcopy(dict(shared))
+        prior_shared = shared_alignment_by_view.setdefault(
+            identity[0], shared_document
+        )
+        if prior_shared != shared_document:
+            raise PartIdProjectionError(
+                f"{label} records disagree on shared alignment for {identity[0]}"
+            )
+        if raw.get("accepted") is not True:
+            continue
+        if refinement_path is None:
+            raise PartIdProjectionError(f"in-memory {label} cannot resolve masks")
+        mask_record = raw.get("mask")
+        mask_path = _resolve_file(
+            mask_record.get("path") if isinstance(mask_record, Mapping) else None,
+            owner=refinement_path,
+            label=f"{label} mask {identity[0]}/{identity[1]}",
+        )
+        if not isinstance(mask_record, Mapping) or mask_record.get(
+            "sha256"
+        ) != _sha256_file(mask_path):
+            raise PartIdProjectionError(f"{label} mask hash mismatch for {identity}")
+        seed_record = raw.get("cad_projection_seed")
+        if not isinstance(seed_record, Mapping):
+            raise PartIdProjectionError(
+                f"{label} record {identity} has no sealed CAD seed"
+            )
+        seed_path = _resolve_file(
+            seed_record.get("path"),
+            owner=refinement_path,
+            label=f"{label} CAD seed {identity[0]}/{identity[1]}",
+        )
+        if seed_record.get("sha256") != _sha256_file(seed_path):
+            raise PartIdProjectionError(
+                f"{label} CAD seed hash mismatch for {identity}"
+            )
+        shape_candidate = (
+            copy.deepcopy(dict(raw.get("shape_candidate", {})))
+            if hybrid
+            else _selected_cad_shape_candidate(raw)
+        )
+        if hybrid and (
+            not shape_candidate
+            or raw.get("selected_source") not in {"sam3", "entityseg"}
+        ):
+            raise PartIdProjectionError(
+                f"Part-ID hybrid record {identity} has no selected safe boundary"
+            )
+        accepted_by_identity[identity] = {
+            "mask_path": mask_path,
+            "cad_seed_path": seed_path,
+            "record": raw,
+            "shape_candidate": shape_candidate,
+            "view_shared_alignment": shared_document,
+            "selected_source": raw.get("selected_source") if hybrid else "sam3",
+        }
+    return refinement, refinement_path, accepted_by_identity, records_by_identity
+
+
 def _open_bgr(path: Path, label: str) -> np.ndarray:
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None:
@@ -1653,6 +1843,7 @@ def build_part_id_reference_evidence(
     camera_alignment_acceptance: str | Path | Mapping[str, Any] | None = None,
     mvinverse_ledger: str | Path | Mapping[str, Any] | None = None,
     part_id_sam3_manifest: str | Path | Mapping[str, Any] | None = None,
+    part_id_hybrid_manifest: str | Path | Mapping[str, Any] | None = None,
     minimum_projected_pixels: int = DEFAULT_MINIMUM_PROJECTED_PIXELS,
     minimum_foreground_overlap: float = DEFAULT_MINIMUM_FOREGROUND_OVERLAP,
     minimum_refinement_overlap: float = DEFAULT_MINIMUM_REFINEMENT_OVERLAP,
@@ -1765,117 +1956,40 @@ def build_part_id_reference_evidence(
                 "MVInverse ledger is not a verified successful result"
             )
     mvinverse_by_view = _mvinverse_maps_by_view(ledger, ledger_path)
+    if part_id_sam3_manifest is not None and part_id_hybrid_manifest is not None:
+        raise PartIdProjectionError(
+            "provide either the SAM3 manifest or the SAM3/EntitySeg hybrid "
+            "manifest, not both"
+        )
     refinement: dict[str, Any] | None = None
     refinement_path: Path | None = None
+    refinement_backend: str | None = None
     refinement_by_identity: dict[tuple[str, str], dict[str, Any]] = {}
     refinement_records_by_identity: dict[
         tuple[str, str], Mapping[str, Any]
     ] = {}
-    if part_id_sam3_manifest is not None:
-        refinement, refinement_path = _read_object(
-            part_id_sam3_manifest,
-            "Part-ID SAM3 refinement manifest",
+    if part_id_hybrid_manifest is not None:
+        (
+            refinement,
+            refinement_path,
+            refinement_by_identity,
+            refinement_records_by_identity,
+        ) = _load_part_id_refinement_manifest(
+            part_id_hybrid_manifest,
+            hybrid=True,
         )
-        if refinement.get("schema_version") != "qwen-sam3-region-result/v1":
-            raise PartIdProjectionError(
-                "unsupported Part-ID SAM3 refinement manifest schema"
-            )
-        refinement_unsigned = copy.deepcopy(refinement)
-        refinement_integrity = refinement_unsigned.pop("integrity", None)
-        if not isinstance(refinement_integrity, Mapping) or refinement_integrity.get(
-            "result_sha256"
-        ) != _canonical_sha256(refinement_unsigned):
-            raise PartIdProjectionError(
-                "Part-ID SAM3 refinement manifest failed its integrity seal"
-            )
-        records = refinement.get("records")
-        if not isinstance(records, list):
-            raise PartIdProjectionError(
-                "Part-ID SAM3 refinement manifest has no records"
-            )
-        refinement_policy = refinement.get("policy")
-        if (
-            not isinstance(refinement_policy, Mapping)
-            or refinement_policy.get("per_mesh_pose_change_allowed") is not False
-            or refinement_policy.get("automatic_shape_point_refinement")
-            != "always_run_same_view_cad_shape_positive_negative_points"
-        ):
-            raise PartIdProjectionError(
-                "Part-ID SAM3 manifest does not enforce view-shared CAD guidance"
-            )
-        shared_alignment_by_view: dict[str, dict[str, Any]] = {}
-        for index, raw in enumerate(records):
-            if not isinstance(raw, Mapping):
-                raise PartIdProjectionError(f"Part-ID SAM3 record {index} is invalid")
-            identity = (str(raw.get("view_id")), str(raw.get("group_id")))
-            if (
-                not identity[0]
-                or not identity[1]
-                or identity in refinement_records_by_identity
-            ):
-                raise PartIdProjectionError(
-                    "Part-ID SAM3 records contain invalid duplicate identities"
-                )
-            refinement_records_by_identity[identity] = raw
-            shared = raw.get("view_shared_alignment")
-            if not isinstance(shared, Mapping):
-                raise PartIdProjectionError(
-                    f"Part-ID SAM3 record {identity} has no view-shared alignment"
-                )
-            shared_document = copy.deepcopy(dict(shared))
-            prior_shared = shared_alignment_by_view.setdefault(
-                identity[0], shared_document
-            )
-            if prior_shared != shared_document:
-                raise PartIdProjectionError(
-                    f"Part-ID SAM3 records disagree on shared alignment for {identity[0]}"
-                )
-            if raw.get("accepted") is not True:
-                continue
-            mask_record = raw.get("mask")
-            mask_value = (
-                mask_record.get("path") if isinstance(mask_record, Mapping) else None
-            )
-            if refinement_path is None:
-                raise PartIdProjectionError(
-                    "in-memory Part-ID SAM3 manifest cannot resolve mask paths"
-                )
-            mask_path = _resolve_file(
-                mask_value,
-                owner=refinement_path,
-                label=f"Part-ID SAM3 mask {identity[0]}/{identity[1]}",
-            )
-            expected_sha256 = (
-                mask_record.get("sha256") if isinstance(mask_record, Mapping) else None
-            )
-            if not isinstance(expected_sha256, str) or expected_sha256 != _sha256_file(
-                mask_path
-            ):
-                raise PartIdProjectionError(
-                    f"Part-ID SAM3 mask hash mismatch for {identity}"
-                )
-            seed_record = raw.get("cad_projection_seed")
-            if not isinstance(seed_record, Mapping):
-                raise PartIdProjectionError(
-                    f"Part-ID SAM3 record {identity} has no sealed CAD seed"
-                )
-            seed_path = _resolve_file(
-                seed_record.get("path"),
-                owner=refinement_path,
-                label=f"Part-ID SAM3 CAD seed {identity[0]}/{identity[1]}",
-            )
-            if seed_record.get("sha256") != _sha256_file(seed_path):
-                raise PartIdProjectionError(
-                    f"Part-ID SAM3 CAD seed hash mismatch for {identity}"
-                )
-            shape_candidate = _selected_cad_shape_candidate(raw)
-            refinement_by_identity[identity] = {
-                "mask_path": mask_path,
-                "cad_seed_path": seed_path,
-                "record": raw,
-                "shape_candidate": shape_candidate,
-                "view_shared_alignment": shared_document,
-            }
+        refinement_backend = "sam3_entityseg_hybrid"
+    elif part_id_sam3_manifest is not None:
+        (
+            refinement,
+            refinement_path,
+            refinement_by_identity,
+            refinement_records_by_identity,
+        ) = _load_part_id_refinement_manifest(
+            part_id_sam3_manifest,
+            hybrid=False,
+        )
+        refinement_backend = "sam3"
 
     source_views = manifest.get("source_views")
     if not isinstance(source_views, list) or not source_views:
@@ -2170,16 +2284,16 @@ def build_part_id_reference_evidence(
                         reference["image_path"]
                     ):
                         raise PartIdProjectionError(
-                            f"Part-ID SAM3 source image mismatch for "
+                            f"Part-ID local-refinement source image mismatch for "
                             f"{reference_id}/{part_id}"
                         )
                     refined = _open_mask(
                         refined_record["mask_path"],
-                        f"Part-ID SAM3 mask {reference_id}/{part_id}",
+                        f"Part-ID local-refinement mask {reference_id}/{part_id}",
                     )
                     if refined.shape != reference["foreground"].shape:
                         raise PartIdProjectionError(
-                            f"Part-ID SAM3 mask shape differs for "
+                            f"Part-ID local-refinement mask shape differs for "
                             f"{reference_id}/{part_id}"
                         )
                     refined = cv2.bitwise_and(
@@ -2188,7 +2302,7 @@ def build_part_id_reference_evidence(
                     )
                     sealed_seed = _open_mask(
                         refined_record["cad_seed_path"],
-                        f"Part-ID SAM3 CAD seed {reference_id}/{part_id}",
+                        f"Part-ID local-refinement CAD seed {reference_id}/{part_id}",
                     )
                     if sealed_seed.shape != refined.shape:
                         raise PartIdProjectionError(
@@ -2275,7 +2389,9 @@ def build_part_id_reference_evidence(
                             else refined
                         )
                         boundary_policy = (
-                            "one_pixel_shape_guided_sam3_photo_mask_interior"
+                            "one_pixel_shape_guided_sam3_entityseg_photo_mask_interior"
+                            if refinement_backend == "sam3_entityseg_hybrid"
+                            else "one_pixel_shape_guided_sam3_photo_mask_interior"
                         )
                         refinement_status = "applied_as_photo_instance_mask"
                     else:
@@ -2296,10 +2412,17 @@ def build_part_id_reference_evidence(
                         "applied": refinement_geometry_passed,
                         "status": refinement_status,
                         "authority": (
-                            "sam3_component_bound_to_view_shared_cad_alignment"
+                            (
+                                "sam3_entityseg_boundary_bound_to_view_shared_"
+                                "cad_alignment"
+                                if refinement_backend == "sam3_entityseg_hybrid"
+                                else "sam3_component_bound_to_view_shared_cad_alignment"
+                            )
                             if refinement_geometry_passed
                             else "whole_asset_aligned_cad_part_id_projection"
                         ),
+                        "refinement_backend": refinement_backend,
+                        "selected_source": refined_record["selected_source"],
                         "per_part_geometric_warp_applied": False,
                         "view_shared_alignment": copy.deepcopy(
                             refined_record["view_shared_alignment"]
@@ -2321,7 +2444,11 @@ def build_part_id_reference_evidence(
                         ),
                         "cad_projection_role": "location_and_shape_prior_only",
                         "photo_mask_authority": (
-                            "sam3_shape_selected_local_instance_boundary"
+                            (
+                                "cad_shape_selected_sam3_entityseg_instance_boundary"
+                                if refinement_backend == "sam3_entityseg_hybrid"
+                                else "sam3_shape_selected_local_instance_boundary"
+                            )
                             if refinement_geometry_passed
                             else None
                         ),
@@ -2482,7 +2609,11 @@ def build_part_id_reference_evidence(
                     "isolated_crop": str(isolated_crop_path.resolve(strict=True)),
                     "isolated_crop_sha256": _sha256_file(isolated_crop_path),
                     "correspondence_mode": (
-                        "cad_box_shape_guided_sam3_photo_instance"
+                        (
+                            "cad_box_shape_guided_sam3_entityseg_photo_instance"
+                            if refinement_backend == "sam3_entityseg_hybrid"
+                            else "cad_box_shape_guided_sam3_photo_instance"
+                        )
                         if photo_part_segmentation_applied
                         else "cad_projected_part_id_bounding_box"
                     ),
@@ -2510,8 +2641,13 @@ def build_part_id_reference_evidence(
                         "camera_alignment_evidence_weight"
                     ],
                     "evidence_authority": (
-                        "sam3_shape_selected_local_photo_instance_mask_"
-                        "validated_by_cad_shape_prior"
+                        (
+                            "sam3_entityseg_shape_selected_local_photo_instance_"
+                            "mask_validated_by_cad_shape_prior"
+                            if refinement_backend == "sam3_entityseg_hybrid"
+                            else "sam3_shape_selected_local_photo_instance_mask_"
+                            "validated_by_cad_shape_prior"
+                        )
                         if photo_part_segmentation_applied
                         else "globally_fitted_whole_asset_cad_part_id_"
                         "projection_intersect_human_sam3_foreground"
@@ -2520,7 +2656,11 @@ def build_part_id_reference_evidence(
                         photo_part_segmentation_applied
                     ),
                     "sampling_core_authority": (
-                        "sam3_photo_instance_mask_for_color_and_pbr"
+                        (
+                            "sam3_entityseg_photo_instance_mask_for_color_and_pbr"
+                            if refinement_backend == "sam3_entityseg_hybrid"
+                            else "sam3_photo_instance_mask_for_color_and_pbr"
+                        )
                         if photo_part_segmentation_applied
                         else "renderer_authored_cad_projection_for_color_and_pbr_only"
                     ),
@@ -2629,7 +2769,11 @@ def build_part_id_reference_evidence(
     if refinement is not None:
         input_files.append(
             {
-                "label": "part_id_sam3_refinement_manifest",
+                "label": (
+                    "part_id_sam3_entityseg_hybrid_manifest"
+                    if refinement_backend == "sam3_entityseg_hybrid"
+                    else "part_id_sam3_refinement_manifest"
+                ),
                 "path": (str(refinement_path) if refinement_path is not None else None),
                 "document_sha256": _canonical_sha256(refinement),
             }
@@ -2643,7 +2787,10 @@ def build_part_id_reference_evidence(
             else "whole_workpiece_foreground_only"
         ),
         "part_segmentation_authority": (
-            "shape_guided_sam3_photo_instance_when_valid_otherwise_"
+            "cad_shape_guided_sam3_entityseg_fusion_when_valid_otherwise_"
+            "audited_cad_projection_fallback"
+            if refinement_backend == "sam3_entityseg_hybrid"
+            else "shape_guided_sam3_photo_instance_when_valid_otherwise_"
             "audited_cad_projection_fallback"
             if refinement is not None
             else "renderer_authored_cad_part_id_masks"
@@ -2655,6 +2802,7 @@ def build_part_id_reference_evidence(
             else "cad_projected_part_id_bounding_boxes"
         ),
         "photo_part_segmentation_applied": refinement is not None,
+        "local_refinement_backend": refinement_backend,
         "cross_view_consensus_required": False,
         "unseen_views_cast_vote": False,
         "multi_view_appearance_averaging": False,
@@ -2678,7 +2826,10 @@ def build_part_id_reference_evidence(
             "minimum_registered_precision": registered_precision_floor,
             "minimum_registered_recall": registered_recall_floor,
             "refinement_geometry_authority": (
-                "sealed_sam3_visible_amodal_neighbor_and_view_shared_contract"
+                "sealed_sam3_entityseg_fusion_amodal_cad_support_and_"
+                "view_shared_contract"
+                if refinement_backend == "sam3_entityseg_hybrid"
+                else "sealed_sam3_visible_amodal_neighbor_and_view_shared_contract"
                 if refinement is not None
                 else "not_applicable"
             ),
@@ -2724,6 +2875,34 @@ def build_part_id_reference_evidence(
                 sum(
                     (observation.get("part_id_sam3_refinement") or {}).get("applied")
                     is True
+                    for observation in record["observations"]
+                )
+                for record in materialized_records
+            ),
+            "entityseg_refined_observation_count": sum(
+                sum(
+                    (observation.get("part_id_sam3_refinement") or {}).get(
+                        "applied"
+                    )
+                    is True
+                    and (observation.get("part_id_sam3_refinement") or {}).get(
+                        "selected_source"
+                    )
+                    == "entityseg"
+                    for observation in record["observations"]
+                )
+                for record in materialized_records
+            ),
+            "sam3_selected_observation_count": sum(
+                sum(
+                    (observation.get("part_id_sam3_refinement") or {}).get(
+                        "applied"
+                    )
+                    is True
+                    and (observation.get("part_id_sam3_refinement") or {}).get(
+                        "selected_source"
+                    )
+                    == "sam3"
                     for observation in record["observations"]
                 )
                 for record in materialized_records

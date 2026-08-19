@@ -1893,6 +1893,10 @@ def _run_policy_part_id_stage(
     part_id_sam3_request = part_id_paths.sam3_request
     part_id_sam3_dir = part_id_paths.sam3_dir
     part_id_sam3_manifest = part_id_paths.sam3_manifest
+    part_id_entityseg_dir = part_id_paths.entityseg_dir
+    part_id_entityseg_manifest = part_id_paths.entityseg_manifest
+    part_id_hybrid_mask_dir = part_id_paths.hybrid_mask_dir
+    part_id_hybrid_mask_manifest = part_id_paths.hybrid_mask_manifest
     part_id_retrieval_request = part_id_paths.retrieval_request
     part_id_retrieval_dir = part_id_paths.retrieval_dir
     part_id_retrieval_result = part_id_paths.retrieval_result
@@ -2125,8 +2129,10 @@ def _run_policy_part_id_stage(
         log_message(
             log_cb,
             "Material assignment unit: CAD part_id. Human-confirmed SAM3 masks "
-            "are used only as whole-workpiece foreground; palette G01/G02 "
-            "groups cannot assign or share a material.",
+            "are used only as whole-workpiece foreground; automatic local "
+            "SAM3/EntitySeg masks may refine photo boundaries but CAD remains "
+            "the Part-ID authority. Palette G01/G02 groups cannot assign or "
+            "share a material.",
         )
         for required_path in (
             analysis_dir / "reference_manifest.json",
@@ -2231,6 +2237,71 @@ def _run_policy_part_id_stage(
             command_runner=_command_runner,
             required_files=(part_id_sam3_manifest,),
         )
+        effective_refinement_manifest = part_id_sam3_manifest
+        use_hybrid_refinement = config.entityseg_enabled
+        if use_hybrid_refinement:
+            if any(
+                value is None
+                for value in (
+                    config.entityseg_python,
+                    config.entityseg_cropformer_root,
+                    config.entityseg_config,
+                    config.entityseg_checkpoint,
+                )
+            ):
+                raise RuntimeError(
+                    "EntitySeg fusion is enabled but its runtime is incomplete"
+                )
+            for stale_dir in (part_id_entityseg_dir, part_id_hybrid_mask_dir):
+                if stale_dir.exists() or stale_dir.is_symlink():
+                    archived = unique_path(
+                        analysis_dir
+                        / "recovery_archive"
+                        / f"stale_{stale_dir.name}"
+                    )
+                    archived.parent.mkdir(parents=True, exist_ok=True)
+                    stale_dir.rename(archived)
+            _run_stage(
+                "part_id_entityseg_boundary_candidates",
+                [
+                    str(config.entityseg_python),
+                    "-m",
+                    "qwen_material_pipeline.segmentation.entityseg_regions",
+                    "--request",
+                    str(part_id_sam3_request),
+                    "--cropformer-root",
+                    str(config.entityseg_cropformer_root),
+                    "--config",
+                    str(config.entityseg_config),
+                    "--checkpoint",
+                    str(config.entityseg_checkpoint),
+                    "--output-dir",
+                    str(part_id_entityseg_dir),
+                    "--minimum-model-score",
+                    str(config.entityseg_minimum_model_score),
+                ],
+                log_cb,
+                command_runner=_command_runner,
+                required_files=(part_id_entityseg_manifest,),
+            )
+            _run_stage(
+                "part_id_sam3_entityseg_fusion",
+                [
+                    str(config.sam3_python),
+                    "-m",
+                    "qwen_material_pipeline.segmentation.hybrid_part_masks",
+                    "--sam-manifest",
+                    str(part_id_sam3_manifest),
+                    "--entity-manifest",
+                    str(part_id_entityseg_manifest),
+                    "--output-dir",
+                    str(part_id_hybrid_mask_dir),
+                ],
+                log_cb,
+                command_runner=_command_runner,
+                required_files=(part_id_hybrid_mask_manifest,),
+            )
+            effective_refinement_manifest = part_id_hybrid_mask_manifest
         evidence_document = build_part_id_reference_evidence(
             reference_manifest=analysis_dir / "reference_manifest.json",
             rendered_registry=rendered_registry,
@@ -2243,7 +2314,12 @@ def _run_policy_part_id_stage(
                 else None
             ),
             mvinverse_ledger=mvinverse_ledger,
-            part_id_sam3_manifest=part_id_sam3_manifest,
+            part_id_sam3_manifest=(
+                None if use_hybrid_refinement else effective_refinement_manifest
+            ),
+            part_id_hybrid_manifest=(
+                effective_refinement_manifest if use_hybrid_refinement else None
+            ),
             output_dir=part_id_evidence_dir,
         )
         write_object(part_id_evidence_path, evidence_document)
@@ -2257,10 +2333,13 @@ def _run_policy_part_id_stage(
             log_cb,
             "Two-layer one-to-one Part-ID mapping completed: every coarse box "
             "inherits the rigid whole-asset camera and the single residual shared "
-            "by that view, then automatic local SAM3 refines its photo evidence. "
+            "by that view, then automatic local SAM3/EntitySeg fusion refines "
+            "its photo evidence. "
             "No CAD/USD transform was changed. "
             f"{evidence_document['summary'].get('sam3_refined_observation_count', 0)} "
-            "observations passed local refinement; "
+            "observations passed local refinement ("
+            f"EntitySeg={evidence_document['summary'].get('entityseg_refined_observation_count', 0)}, "
+            f"SAM3={evidence_document['summary'].get('sam3_selected_observation_count', 0)}); "
             f"{evidence_document['summary'].get('global_projection_fallback_observation_count', 0)} "
             "used the audited coarse fallback. "
             f"{evidence_document['summary'].get('chromatic_isolated_observation_count', 0)} "

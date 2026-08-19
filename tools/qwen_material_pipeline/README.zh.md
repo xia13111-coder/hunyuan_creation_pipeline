@@ -30,7 +30,7 @@ qwen-material --help
 bash tools/qwen_material_pipeline/scripts/setup_qwen35_runtime.sh
 ```
 
-SAM3、MVInverse、DINOv2、NVIDIA 材质和 Base 材质观察库是独立本机依赖，必须通过
+SAM3、EntitySeg/CropFormer、MVInverse、DINOv2、NVIDIA 材质和 Base 材质观察库是独立本机依赖，必须通过
 预检。
 
 ## 流程
@@ -38,7 +38,7 @@ SAM3、MVInverse、DINOv2、NVIDIA 材质和 Base 材质观察库是独立本机
 ```text
 归一 CAD + 已确认照片
   -> 对齐 RGB 图并提取 Part-ID 外观信息
-  -> SAM3/MVInverse/SigLIP2/DINOv2/Qwen3.5
+  -> CAD 约束的 SAM3/EntitySeg 融合 + MVInverse/SigLIP2/DINOv2/Qwen3.5
   -> Base MDL 候选渲染
   -> 为每个 Part-ID 生成一条材质分配
   -> 记录最终 MDL、写入 USD 并做视觉验证

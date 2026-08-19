@@ -1,15 +1,28 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
+
+import cv2
 import numpy as np
 import pytest
 
+from qwen_material_pipeline.evidence.part_id_projection import (
+    _load_part_id_refinement_manifest,
+)
 from qwen_material_pipeline.segmentation.hybrid_part_masks import (
+    build_hybrid_masks,
     _connected_component_count,
     _entity_aligned_cad_seed,
     _entity_rejection_reasons,
     _sam_aligned_cad_seed,
     _trim_entity_to_cad_support,
 )
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _safe_metrics() -> dict[str, float | int]:
@@ -174,3 +187,121 @@ def test_hybrid_rejects_entity_alignment_that_changes_one_mesh_pose() -> None:
                 }
             },
         )
+
+
+def test_hybrid_manifest_is_directly_consumable_as_part_id_evidence(
+    tmp_path: Path,
+) -> None:
+    source = np.zeros((48, 64, 3), dtype=np.uint8)
+    source[12:32, 20:40] = 180
+    seed = np.zeros((48, 64), dtype=np.uint8)
+    seed[12:32, 20:40] = 255
+    source_path = tmp_path / "source.png"
+    seed_path = tmp_path / "seed.png"
+    sam_mask_path = tmp_path / "sam.png"
+    assert cv2.imwrite(str(source_path), source)
+    assert cv2.imwrite(str(seed_path), seed)
+    assert cv2.imwrite(str(sam_mask_path), seed)
+    shared = {
+        "translation_xy_pixels": [0.0, 0.0],
+        "maximum_translation_xy_pixels": [4, 4],
+        "estimation_mode": (
+            "whole_workpiece_foreground_to_visible_cad_union_integer_translation"
+        ),
+        "part_specific_translation_allowed": False,
+        "cad_union_pixels": 400,
+    }
+    shape_candidate = {
+        "candidate_index": 0,
+        "accepted": True,
+        "cad_shape_seed_pixels": 400,
+        "cad_shape_iou": 1.0,
+        "cad_shape_area_agreement": 1.0,
+        "cad_shape_location_invariant": True,
+    }
+    sam = {
+        "schema_version": "qwen-sam3-region-result/v1",
+        "request": {"path": str(tmp_path / "request.json"), "sha256": "a" * 64},
+        "policy": {},
+        "records": [
+            {
+                "view_id": "front",
+                "group_id": "P0001",
+                "source_image": str(source_path),
+                "source_image_sha256": _sha256(source_path),
+                "view_shared_alignment": shared,
+                "accepted": True,
+                "mask": {"path": str(sam_mask_path), "sha256": _sha256(sam_mask_path)},
+                "cad_projection_seed": {
+                    "path": str(seed_path),
+                    "sha256": _sha256(seed_path),
+                },
+                "cad_amodal_template": None,
+                "box_audits": [
+                    {
+                        "accepted": True,
+                        "selected_candidate_index": 0,
+                        "shape_point_refinement": {
+                            "accepted": True,
+                            "prompt_audit": {
+                                "translation_xy_pixels": [0.0, 0.0],
+                                "part_local_translation_xy_pixels": [0.0, 0.0],
+                                "part_specific_translation_allowed": False,
+                                "per_mesh_pose_change_allowed": False,
+                            },
+                        },
+                        "candidates": [shape_candidate],
+                    }
+                ],
+            }
+        ],
+    }
+    entity = {
+        "schema_version": "qwen-entityseg-region-result/v1",
+        "request": dict(sam["request"]),
+        "policy": {},
+        "records": [
+            {
+                "view_id": "front",
+                "group_id": "P0001",
+                "source_image": str(source_path),
+                "source_image_sha256": _sha256(source_path),
+                "view_shared_alignment": shared,
+                "accepted": False,
+                "selected_candidate": None,
+                "mask": None,
+                "cad_projection_seed": {
+                    "path": str(seed_path),
+                    "sha256": _sha256(seed_path),
+                },
+                "cad_amodal_template": None,
+            }
+        ],
+    }
+    sam_path = tmp_path / "sam-manifest.json"
+    entity_path = tmp_path / "entity-manifest.json"
+    sam_path.write_text(json.dumps(sam), encoding="utf-8")
+    entity_path.write_text(json.dumps(entity), encoding="utf-8")
+    hybrid_dir = tmp_path / "hybrid"
+
+    result = build_hybrid_masks(
+        sam_manifest_path=sam_path,
+        entity_manifest_path=entity_path,
+        output_dir=hybrid_dir,
+    )
+    manifest_path = hybrid_dir / "manifest.json"
+    loaded, owner, accepted, records = _load_part_id_refinement_manifest(
+        manifest_path,
+        hybrid=True,
+    )
+
+    assert loaded == result
+    assert owner == manifest_path
+    assert set(records) == {("front", "P0001")}
+    selected = accepted[("front", "P0001")]
+    assert selected["selected_source"] == "sam3"
+    assert selected["view_shared_alignment"] == shared
+    assert selected["shape_candidate"]["cad_shape_iou"] == 1.0
+    assert result["records"][0]["cad_projection_seed"]["sha256"] == _sha256(
+        seed_path
+    )

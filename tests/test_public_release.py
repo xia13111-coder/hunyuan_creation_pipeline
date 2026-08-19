@@ -48,6 +48,10 @@ class PublicReleaseTests(unittest.TestCase):
         self.assertNotIn("/home/", serialized)
         self.assertNotIn("/media/", serialized)
         self.assertEqual(document["sam3"]["python"], "${QWEN_PYTHON}")
+        self.assertEqual(
+            document["sam3"]["entityseg"]["python"],
+            "${ENTITYSEG_PYTHON}",
+        )
         self.assertEqual(document["retrieval"]["python"], "${QWEN_PYTHON}")
         self.assertEqual(
             document["retrieval"]["siglip2_model"],

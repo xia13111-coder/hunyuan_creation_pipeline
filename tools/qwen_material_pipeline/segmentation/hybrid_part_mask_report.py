@@ -282,9 +282,9 @@ h1{{margin:.1em 0}}h2{{margin-top:42px}}.lead,.card p{{color:var(--muted)}}.stat
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(590px,1fr));gap:14px}}.card{{padding:12px;overflow:hidden}}.card h3{{margin:0 0 8px}}
 .card img{{display:block;width:100%;height:auto;border-radius:7px}}.card p{{margin:8px 2px 0}}@media(max-width:650px){{main{{padding:14px}}.grid{{grid-template-columns:1fr}}}}
 </style></head><body><main><h1>SAM3 + EntitySeg 辅助分割</h1>
-<p class="lead">红色是整机渲染得到的可见 Part-ID（定位与遮挡先验），黄色是保持同一整机相机和刚体位姿、仅隐藏其他 mesh 后投影出的完整零件形状。绿色和青色分别是 SAM3 与 EntitySeg 候选，紫色才是最终通过双模板约束的结果。只允许整件相机投影后的有界 2D 残差平移，不允许单独移动、旋转或缩放 mesh。</p>
-<div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">Entity 改善 SAM <b>{summary['decision_counts']['entityseg_replaces_sam3_boundary']}</b></div><div class="stat">Entity 补充缺口 <b>{summary['decision_counts']['entityseg_fills_sam3_gap']}</b></div><div class="stat">最终来源：Entity <b>{summary['selected_source_counts']['entityseg']}</b> / SAM <b>{summary['selected_source_counts']['sam3']}</b></div></div>
-<p class="lead">这是边界融合预览，尚未写回正式材质推理输入。点击图片可查看原始像素。</p>
+<p class="lead">红色是整机渲染得到的可见 Part-ID（定位与遮挡先验），黄色是保持同一整机相机和刚体位姿、仅隐藏其他 mesh 后投影出的完整零件形状。绿色和青色分别是 SAM3 与 EntitySeg 候选，紫色才是最终通过双模板约束的结果。每个视角只允许整件工件共享一个有界 2D 相机残差，不允许单独移动、旋转或缩放 mesh。</p>
+<div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">Entity 改善 SAM <b>{summary['decision_counts'].get('entityseg_replaces_sam3_boundary', 0)}</b></div><div class="stat">Entity 补充缺口 <b>{summary['decision_counts'].get('entityseg_fills_sam3_gap', 0)}</b></div><div class="stat">最终来源：Entity <b>{summary['selected_source_counts'].get('entityseg', 0)}</b> / SAM <b>{summary['selected_source_counts'].get('sam3', 0)}</b></div></div>
+<p class="lead">这是正式 Part-ID 材质证据使用的边界融合结果；无安全候选时会回退到已审计的 CAD 投影，不会猜测零件边界。点击图片可查看原始像素。</p>
 <nav>{''.join(f'<a href="#{key}">{value}</a>' for key,value in labels.items())}</nav>{''.join(sections)}</main></body></html>"""
     (output_dir / "index.html").write_text(page, encoding="utf-8")
     result = {"summary": summary, "records": rows}

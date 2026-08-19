@@ -85,6 +85,21 @@ def _resolved_mask_path(root: Path, row: Mapping[str, Any]) -> Path:
     return path.expanduser().resolve(strict=True)
 
 
+def _sam_selected_shape_candidate(row: Mapping[str, Any]) -> dict[str, Any]:
+    for box_audit in row.get("box_audits", []):
+        if not isinstance(box_audit, Mapping) or box_audit.get("accepted") is not True:
+            continue
+        selected_index = box_audit.get("selected_candidate_index")
+        for candidate in box_audit.get("candidates", []):
+            if (
+                isinstance(candidate, Mapping)
+                and candidate.get("candidate_index") == selected_index
+                and candidate.get("accepted") is True
+            ):
+                return dict(candidate)
+    raise EntitySegRegionError("accepted SAM3 region has no selected CAD-shape candidate")
+
+
 def _load_mask(path: Path, expected_shape: tuple[int, int]) -> np.ndarray:
     mask = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
     if mask is None or mask.shape != expected_shape:
@@ -443,8 +458,24 @@ def build_hybrid_masks(
     for key in sorted(sam_records):
         sam_row = sam_records[key]
         entity_row = entity_records[key]
+        sam_shared = sam_row.get("view_shared_alignment")
+        entity_shared = entity_row.get("view_shared_alignment")
+        if (
+            not isinstance(sam_shared, Mapping)
+            or not isinstance(entity_shared, Mapping)
+            or dict(sam_shared) != dict(entity_shared)
+            or sam_shared.get("part_specific_translation_allowed") is not False
+        ):
+            raise EntitySegRegionError(
+                f"SAM3 and EntitySeg do not share one whole-workpiece alignment: {key}"
+            )
         authority = entity_row if entity_row.get("source_image") else sam_row
         source_path = Path(str(authority["source_image"])).expanduser().resolve(strict=True)
+        source_sha256 = _sha256_file(source_path)
+        if sam_row.get("source_image_sha256") != source_sha256 or entity_row.get(
+            "source_image_sha256"
+        ) != source_sha256:
+            raise EntitySegRegionError(f"source image hash mismatch: {key}")
         image = cv2.imread(str(source_path), cv2.IMREAD_COLOR)
         if image is None:
             raise EntitySegRegionError(f"unable to decode source image: {source_path}")
@@ -461,6 +492,17 @@ def build_hybrid_masks(
         entity_aligned_seed, entity_alignment_audit = _entity_aligned_cad_seed(
             seed, entity_row
         )
+        expected_translation = [
+            float(value) for value in sam_shared["translation_xy_pixels"]
+        ]
+        if (
+            sam_alignment_audit.get("translation_xy_pixels") != expected_translation
+            or entity_alignment_audit.get("translation_xy_pixels")
+            != expected_translation
+        ):
+            raise EntitySegRegionError(
+                f"candidate alignment differs from the view-shared alignment: {key}"
+            )
         sam_amodal_doc = sam_row.get("cad_amodal_template")
         entity_amodal_doc = entity_row.get("cad_amodal_template")
         amodal_doc = (
@@ -580,6 +622,16 @@ def build_hybrid_masks(
             decision = "no_safe_candidate"
 
         mask_document: dict[str, Any] | None = None
+        shape_candidate: dict[str, Any] | None = None
+        if selected_source == "entityseg":
+            selected_entity = entity_row.get("selected_candidate")
+            if not isinstance(selected_entity, Mapping):
+                raise EntitySegRegionError(
+                    f"accepted EntitySeg region has no shape candidate: {key}"
+                )
+            shape_candidate = dict(selected_entity)
+        elif selected_source == "sam3":
+            shape_candidate = _sam_selected_shape_candidate(sam_row)
         if final_mask is not None:
             mask_path = masks_dir / f"{key[0]}__{key[1]}.png"
             if not cv2.imwrite(str(mask_path), final_mask.astype(np.uint8) * 255):
@@ -596,6 +648,9 @@ def build_hybrid_masks(
                 "view_id": key[0],
                 "group_id": key[1],
                 "source_image": str(source_path),
+                "source_image_sha256": source_sha256,
+                "view_shared_alignment": dict(sam_shared),
+                "cad_projection_seed": dict(seed_doc),
                 "accepted": final_mask is not None,
                 "selected_source": selected_source,
                 "decision": decision,
@@ -604,6 +659,13 @@ def build_hybrid_masks(
                 "fusion_metrics": metrics,
                 "cad_support_trim": cad_support_trim,
                 "aligned_cad_template": aligned_seed_audit,
+                "shape_candidate": shape_candidate,
+                "fusion_audit": {
+                    "selected_source": selected_source,
+                    "decision": decision,
+                    "fusion_metrics": metrics,
+                    "cad_support_trim": cad_support_trim,
+                },
                 "cad_amodal_template": (
                     {
                         **dict(amodal_doc),
@@ -630,6 +692,7 @@ def build_hybrid_masks(
                 "document_sha256": _canonical_sha256(entity_document),
             },
         },
+        "request": dict(sam_document.get("request", {})),
         "policy": {
             "identity_authority": "registered_cad_part_id_plus_sam3_instance",
             "entityseg_role": "boundary_candidate_only",
@@ -650,6 +713,9 @@ def build_hybrid_masks(
             ),
             "shape_authority": "isolated_mesh_amodal_projection",
             "visibility_authority": "whole_assembly_part_id_projection",
+            "alignment_model": "one_whole_workpiece_translation_per_view",
+            "per_mesh_pose_change_allowed": False,
+            "part_specific_translation_allowed": False,
         },
         "records": records,
         "summary": {
