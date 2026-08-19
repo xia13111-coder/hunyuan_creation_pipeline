@@ -1,0 +1,11 @@
+# Pure-Python runtime layer required by the external CropFormer/Detectron2
+# environment.  Install this file with ENTITYSEG_PYTHON; the CropFormer source,
+# compiled Detectron2 extension, and checkpoint remain external assets.
+#
+# MMCV 1.x still calls yapf.FormatCode(..., verify=True).  YAPF 0.40.2 and
+# newer removed that argument, so this compatibility pin is intentional.
+yapf==0.40.1
+cloudpickle>=2,<4
+black==22.3.0
+platformdirs>=3.5.1,<5
+tomli>=2,<3

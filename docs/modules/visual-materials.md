@@ -152,6 +152,21 @@ a missing or incomplete local path fails clearly. `VISUAL_MATERIAL_ROOT`,
 Weights and NVIDIA assets are not included in the repository. Hunyuan cloud
 APIs are the exception and still require network access when used.
 
+The EntitySeg interpreter is deliberately isolated from user-site packages.
+After installing the external CropFormer/Detectron2 runtime, install the
+pipeline compatibility layer into the same interpreter:
+
+```bash
+"$ENTITYSEG_PYTHON" -m pip install \
+  -r tools/qwen_material_pipeline/requirements-entityseg.txt
+PYTHONNOUSERSITE=1 "$ENTITYSEG_PYTHON" -c \
+  'import black, cloudpickle, mmcv, yapf'
+```
+
+The YAPF pin is required by MMCV 1.x. A successful import only from
+`~/.local` is not sufficient because pipeline subprocesses set
+`PYTHONNOUSERSITE=1` for reproducibility.
+
 | Mode | Use |
 | --- | --- |
 | `live` | Run inference for a new workpiece. |

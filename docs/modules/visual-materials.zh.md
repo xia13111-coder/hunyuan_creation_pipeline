@@ -120,6 +120,19 @@ EntitySeg。最终结果不再从两者中二选一或直接复制任一模型�
 也从 `.env` 读取。模型权重和 NVIDIA 资产不随源码发布。Hunyuan 云 API 是例外，
 使用生成或 ReduceFace 时仍需网络。
 
+EntitySeg 解释器会与用户级 Python 包隔离。安装外部 CropFormer/Detectron2
+运行环境后，必须把主线维护的兼容依赖安装到同一个解释器中：
+
+```bash
+"$ENTITYSEG_PYTHON" -m pip install \
+  -r tools/qwen_material_pipeline/requirements-entityseg.txt
+PYTHONNOUSERSITE=1 "$ENTITYSEG_PYTHON" -c \
+  'import black, cloudpickle, mmcv, yapf'
+```
+
+YAPF 的固定版本用于兼容 MMCV 1.x。仅能从 `~/.local` 导入不算有效安装，
+因为主线子进程会设置 `PYTHONNOUSERSITE=1` 以保证运行可复现。
+
 | 模式 | 用途 |
 | --- | --- |
 | `live` | 对新工件运行完整推理。 |

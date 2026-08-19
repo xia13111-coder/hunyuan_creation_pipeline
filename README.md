@@ -62,6 +62,18 @@ all local model paths there:
 | SAM3D | `SAM3D_SINGLE_VIEW_ROOT`, `SAM3D_MULTI_VIEW_ROOT`, `SAM3D_PIPELINE_CONFIG`, `SAM3D_MOGE_CHECKPOINT`, `SAM3D_DINOV2_REPOSITORY`, `SAM3D_DINOV2_CHECKPOINT` |
 | Material retrieval | `SIGLIP2_MODEL_PATH`, `DINOV2_MODEL_PATH` |
 
+EntitySeg runs in its own CropFormer/Detectron2 environment. Install the
+pipeline-owned compatibility layer into that environment (not into
+`~/.local`) so the isolated child process also works with
+`PYTHONNOUSERSITE=1`:
+
+```bash
+"$ENTITYSEG_PYTHON" -m pip install \
+  -r tools/qwen_material_pipeline/requirements-entityseg.txt
+PYTHONNOUSERSITE=1 "$ENTITYSEG_PYTHON" -c \
+  'import black, cloudpickle, mmcv, yapf'
+```
+
 The runtime fixes `PIPELINE_LOCAL_MODELS_ONLY=1`. Normal local inference does
 not download weights and fails clearly when a path is missing or
 incomplete. Hunyuan generation and ReduceFace are Tencent Cloud APIs, so they
