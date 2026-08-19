@@ -1023,6 +1023,91 @@ class PartIdQwenTests(unittest.TestCase):
         self.assertEqual(audit["summary"]["component_count"], 1)
         self.assertTrue(audit["summary"]["all_components_share_one_exact_mdl"])
 
+    def test_minority_exact_preset_propagates_identity_but_not_colour_lock(
+        self,
+    ) -> None:
+        selections, audit = _apply_component_identity_consensus(
+            selections=[
+                {
+                    "part_id": "P1",
+                    "material_id": "mdl:Plastic_ABS",
+                    "match_type": "EXACT_LIBRARY_MATCH",
+                    "exact_preset_color_gate_passed": True,
+                    "confidence": 0.90,
+                },
+                {
+                    "part_id": "P2",
+                    "material_id": "mdl:Plastic",
+                    "match_type": "CORRESPONDING_MATERIAL",
+                    "exact_preset_color_gate_passed": False,
+                    "confidence": 0.85,
+                },
+                {
+                    "part_id": "P3",
+                    "material_id": "mdl:Paint_Matte",
+                    "match_type": "CORRESPONDING_MATERIAL",
+                    "exact_preset_color_gate_passed": False,
+                    "confidence": 0.85,
+                },
+                {
+                    "part_id": "P4",
+                    "material_id": "mdl:Plastic",
+                    "match_type": "CORRESPONDING_MATERIAL",
+                    "exact_preset_color_gate_passed": False,
+                    "confidence": 0.85,
+                },
+            ],
+            component_members={"AC_GREEN": ["P1", "P2", "P3", "P4"]},
+        )
+
+        self.assertEqual(
+            {row["material_id"] for row in selections}, {"mdl:Plastic_ABS"}
+        )
+        self.assertEqual(
+            {row["match_type"] for row in selections}, {"CORRESPONDING_MATERIAL"}
+        )
+        component = audit["components"][0]
+        self.assertEqual(
+            component["consensus_mode"],
+            "EXACT_IDENTITY_PROPAGATED_COMPONENT_COLOR_UNVERIFIED",
+        )
+        self.assertFalse(component["component_exact_preset_color_validated"])
+        self.assertEqual(
+            component["protected_exact_support"], {"mdl:Plastic_ABS": ["P1"]}
+        )
+        self.assertEqual(
+            audit["summary"]["component_color_calibration_required_count"], 1
+        )
+
+    def test_component_colour_lock_requires_every_member_to_validate_preset(
+        self,
+    ) -> None:
+        selections, audit = _apply_component_identity_consensus(
+            selections=[
+                {
+                    "part_id": part_id,
+                    "material_id": "mdl:Plastic_ABS",
+                    "match_type": "EXACT_LIBRARY_MATCH",
+                    "exact_preset_color_gate_passed": True,
+                    "confidence": confidence,
+                }
+                for part_id, confidence in (("P1", 0.90), ("P2", 0.88))
+            ],
+            component_members={"AC_BLACK": ["P1", "P2"]},
+        )
+
+        self.assertEqual(
+            {row["match_type"] for row in selections}, {"EXACT_LIBRARY_MATCH"}
+        )
+        component = audit["components"][0]
+        self.assertEqual(
+            component["consensus_mode"], "PROTECTED_EXACT_PRESET_PROPAGATED"
+        )
+        self.assertTrue(component["component_exact_preset_color_validated"])
+        self.assertEqual(
+            audit["summary"]["component_exact_preset_color_validated_count"], 1
+        )
+
     def test_final_evidence_expands_only_same_coating_and_assembly_branch(
         self,
     ) -> None:

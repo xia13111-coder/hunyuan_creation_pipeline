@@ -3947,10 +3947,33 @@ def _apply_component_identity_consensus(
             )
             for material_id in protected_exact_ids
         }
+        fully_validated_component_presets = {
+            material_id
+            for material_id in protected_exact_ids
+            if all(
+                str(by_id[part_id].get("material_id")) == material_id
+                and by_id[part_id].get("match_type") == "EXACT_LIBRARY_MATCH"
+                and by_id[part_id].get("exact_preset_color_gate_passed") is True
+                and float(by_id[part_id].get("confidence", 0.0))
+                >= MINIMUM_COMPONENT_EXACT_PRESET_CONFIDENCE
+                for part_id in members
+            )
+        }
         if len(protected_exact_ids) == 1:
             winner = next(iter(protected_exact_ids))
-            consensus_match_type = "EXACT_LIBRARY_MATCH"
-            consensus_mode = "PROTECTED_EXACT_PRESET_PROPAGATED"
+            if winner in fully_validated_component_presets:
+                consensus_match_type = "EXACT_LIBRARY_MATCH"
+                consensus_mode = "PROTECTED_EXACT_PRESET_PROPAGATED"
+            else:
+                # One exact local preset is useful evidence for material
+                # identity, but it cannot certify the colour of a larger
+                # photo component.  Propagate the identity while retaining
+                # corresponding-material status so the shared component is
+                # calibrated from all of its sealed photo observations.
+                consensus_match_type = "CORRESPONDING_MATERIAL"
+                consensus_mode = (
+                    "EXACT_IDENTITY_PROPAGATED_COMPONENT_COLOR_UNVERIFIED"
+                )
             consensus_applied = True
         elif len(protected_exact_ids) > 1 and component_id not in strict_components:
             winner = None
@@ -3992,22 +4015,39 @@ def _apply_component_identity_consensus(
             row["component_id"] = component_id
             row["component_identity_consensus_applied"] = consensus_applied
             if consensus_applied:
+                exact_identity_propagated = consensus_mode in {
+                    "PROTECTED_EXACT_PRESET_PROPAGATED",
+                    "EXACT_IDENTITY_PROPAGATED_COMPONENT_COLOR_UNVERIFIED",
+                }
                 was_protected_source = (
-                    consensus_mode == "PROTECTED_EXACT_PRESET_PROPAGATED"
+                    exact_identity_propagated
                     and part_id in protected_exact_support.get(str(winner), [])
                 )
                 row["material_id"] = winner
                 row["match_type"] = consensus_match_type
-                if consensus_mode == "PROTECTED_EXACT_PRESET_PROPAGATED":
+                if exact_identity_propagated:
                     row["component_exact_preset_source"] = was_protected_source
                     row["component_exact_preset_source_part_ids"] = list(
                         protected_exact_support[str(winner)]
                     )
-                    if not was_protected_source:
-                        row["index_resolution"] = "component_exact_preset_propagation"
+                    if consensus_mode == "PROTECTED_EXACT_PRESET_PROPAGATED":
+                        if not was_protected_source:
+                            row["index_resolution"] = (
+                                "component_exact_preset_propagation"
+                            )
+                            row[
+                                "selection_authority"
+                            ] = "appearance_component_protected_exact_preset"
+                    else:
+                        row["index_resolution"] = (
+                            "component_exact_identity_propagation"
+                        )
                         row[
                             "selection_authority"
-                        ] = "appearance_component_protected_exact_preset"
+                        ] = (
+                            "appearance_component_exact_identity_with_shared_"
+                            "color_calibration"
+                        )
                 elif consensus_mode == "REPEATED_ROLE_JOINT_CONSENSUS":
                     row["index_resolution"] = "repeated_assembly_role_consensus"
                     row[
@@ -4025,6 +4065,14 @@ def _apply_component_identity_consensus(
                 "consensus_mode": consensus_mode,
                 "protected_exact_material_ids": sorted(protected_exact_ids),
                 "protected_exact_support": protected_exact_support,
+                "fully_validated_component_preset_material_ids": sorted(
+                    fully_validated_component_presets
+                ),
+                "component_exact_preset_color_validated": (
+                    winner in fully_validated_component_presets
+                    if winner is not None
+                    else False
+                ),
                 "exact_shared_material_enforced": consensus_applied,
             }
         )
@@ -4046,6 +4094,14 @@ def _apply_component_identity_consensus(
                         }
                     )
                     == 1
+                    for row in audits
+                ),
+                "component_exact_preset_color_validated_count": sum(
+                    row["component_exact_preset_color_validated"] for row in audits
+                ),
+                "component_color_calibration_required_count": sum(
+                    row["consensus_mode"]
+                    == "EXACT_IDENTITY_PROPAGATED_COMPONENT_COLOR_UNVERIFIED"
                     for row in audits
                 ),
             },
