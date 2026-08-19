@@ -8,6 +8,7 @@ import pytest
 
 from asset_pipeline.visual_materials.config import canonical_sha256
 from asset_pipeline.visual_materials.corresponding_color import (
+    corresponding_material_eligibility,
     rebind_part_id_audit_for_corresponding_color,
     validate_corresponding_color_result,
 )
@@ -40,7 +41,7 @@ def _fixture(tmp_path: Path) -> dict[str, Path | dict]:
         "assignments": [
             {
                 "part_id": "P1",
-                "material_id": "mdl:Paint.mdl#Paint",
+                "material_id": "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte",
                 "status": "auto",
                 "provenance": {"assignment_unit": "part_id"},
             },
@@ -65,7 +66,7 @@ def _fixture(tmp_path: Path) -> dict[str, Path | dict]:
             "selections": [
                 {
                     "part_id": "P1",
-                    "material_id": "mdl:Paint.mdl#Paint",
+                    "material_id": "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte",
                     "match_type": "CORRESPONDING_MATERIAL",
                 },
                 {
@@ -273,7 +274,10 @@ def test_part_id_audit_rebinds_only_colour_and_final_plan_hash(tmp_path: Path) -
             "schema_version": "qwen-part-id-material-plan-audit/v1",
             "output_plan_sha256": canonical_sha256(source_plan),
             "parts": [
-                {"part_id": "P1", "material_id": "mdl:Paint.mdl#Paint"},
+                {
+                    "part_id": "P1",
+                    "material_id": "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte",
+                },
                 {"part_id": "P2", "material_id": "mdl:Copper.mdl#Copper"},
             ],
             "summary": {"part_count": 2, "color_parameterized_count": 0},

@@ -10,6 +10,7 @@ from typing import Any
 
 from qwen_material_pipeline.materials.corresponding_material_color import (
     CorrespondingMaterialColorError,
+    reviewed_corresponding_material_partitions,
     source_accepted_color_selection_tiers,
 )
 
@@ -89,13 +90,26 @@ def corresponding_material_part_ids(
 ) -> tuple[str, ...]:
     """Return the sealed Part IDs eligible for the second-stage colour pass."""
 
-    return tuple(
-        sorted(
-            part_id
-            for part_id, tier in _selection_tiers(qwen_choices, source_plan).items()
-            if tier == "CORRESPONDING_MATERIAL"
-        )
+    eligible, _ = corresponding_material_eligibility(
+        qwen_choices=qwen_choices,
+        source_plan=source_plan,
     )
+    return eligible
+
+
+def corresponding_material_eligibility(
+    qwen_choices: Mapping[str, Any],
+    source_plan: Mapping[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return tunable and preset-preserved corresponding Part IDs."""
+
+    try:
+        return reviewed_corresponding_material_partitions(
+            source_plan=source_plan,
+            qwen_choices=qwen_choices,
+        )
+    except CorrespondingMaterialColorError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def validate_corresponding_color_result(
@@ -184,10 +198,13 @@ def validate_corresponding_color_result(
     selected_assignments = _assignments(selected_plan, "colour-selected material plan")
     if set(source_assignments) != set(selected_assignments):
         raise RuntimeError("colour calibration changed the Part-ID exact cover")
-    tiers = _selection_tiers(
-        read_object(qwen_choices_path, "material-identity Qwen choices"),
-        source_plan,
+    qwen_choices = read_object(qwen_choices_path, "material-identity Qwen choices")
+    tiers = _selection_tiers(qwen_choices, source_plan)
+    eligible_corresponding_ids, preserved_corresponding_ids = (
+        corresponding_material_eligibility(qwen_choices, source_plan)
     )
+    eligible_corresponding = set(eligible_corresponding_ids)
+    preserved_corresponding = set(preserved_corresponding_ids)
     if not set(tiers) <= set(source_assignments):
         raise RuntimeError("material selections are outside the identity plan")
     parameterized: set[str] = set()
@@ -205,14 +222,24 @@ def validate_corresponding_color_result(
         if parameters not in (None, {}):
             if not isinstance(parameters, Mapping):
                 raise RuntimeError(f"colour parameters for {part_id} are invalid")
-            if tiers.get(part_id) != "CORRESPONDING_MATERIAL":
+            if part_id not in eligible_corresponding:
                 raise RuntimeError(
-                    f"colour calibration parameterized a non-corresponding Part-ID: {part_id}"
+                    "colour calibration parameterized a non-corresponding or "
+                    "unreviewed-interface Part-ID: "
+                    f"{part_id}"
                 )
             parameterized.add(part_id)
-        elif tiers.get(part_id) == "CORRESPONDING_MATERIAL":
+        elif part_id in eligible_corresponding:
             raise RuntimeError(
                 f"corresponding material {part_id} was not colour calibrated"
+            )
+        elif (
+            part_id in preserved_corresponding
+            and selected_assignment != source_assignment
+        ):
+            raise RuntimeError(
+                f"unsupported corresponding material {part_id} was not preserved "
+                "unchanged"
             )
 
     audit = read_object(selection_audit_path, "colour render-selection audit")
@@ -402,6 +429,7 @@ def rebind_part_id_audit_for_corresponding_color(
 
 __all__ = [
     "CorrespondingColorResult",
+    "corresponding_material_eligibility",
     "corresponding_material_part_ids",
     "rebind_part_id_audit_for_corresponding_color",
     "validate_corresponding_color_result",

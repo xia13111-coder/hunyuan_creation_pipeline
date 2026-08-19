@@ -55,7 +55,7 @@ from .commands import (
     policy_exact_cover_command,
 )
 from .corresponding_color import (
-    corresponding_material_part_ids,
+    corresponding_material_eligibility,
     rebind_part_id_audit_for_corresponding_color,
     validate_corresponding_color_result,
 )
@@ -3175,29 +3175,46 @@ def _run_visual_qa_stage(
 
     corresponding_part_ids: tuple[str, ...] = ()
     if config.corresponding_color_calibration_mode == "adaptive_actual_cad":
-        corresponding_part_ids = corresponding_material_part_ids(
-            read_object(
-                part_id_paths.qwen_result,
-                "material-identity Qwen choices for colour calibration",
-            ),
-            read_object(
-                effective_material_plan,
-                "identity-fixed material plan for colour calibration",
-            ),
+        corresponding_part_ids, preserved_corresponding_part_ids = (
+            corresponding_material_eligibility(
+                read_object(
+                    part_id_paths.qwen_result,
+                    "material-identity Qwen choices for colour calibration",
+                ),
+                read_object(
+                    effective_material_plan,
+                    "identity-fixed material plan for colour calibration",
+                ),
+            )
         )
         if not corresponding_part_ids:
-            log_message(
-                log_cb,
-                "All photo-observed material selections are exact library "
-                "presets; corresponding-material colour calibration is not "
-                "required.",
-            )
+            if preserved_corresponding_part_ids:
+                log_message(
+                    log_cb,
+                    "No corresponding-material assignment exposes a reviewed "
+                    "colour interface; all selected library presets remain "
+                    "unchanged.",
+                )
+            else:
+                log_message(
+                    log_cb,
+                    "All photo-observed material selections are exact library "
+                    "presets; corresponding-material colour calibration is not "
+                    "required.",
+                )
         else:
             log_message(
                 log_cb,
                 "Corresponding-material colour eligibility: "
                 f"{len(corresponding_part_ids)} Part IDs. Exact presets and "
                 "unobserved policy fallbacks remain unchanged.",
+            )
+        if preserved_corresponding_part_ids:
+            log_message(
+                log_cb,
+                f"Preserving {len(preserved_corresponding_part_ids)} "
+                "corresponding-material Part IDs unchanged because their selected "
+                "library MDLs expose no reviewed colour interface.",
             )
     if (
         config.corresponding_color_calibration_mode == "adaptive_actual_cad"

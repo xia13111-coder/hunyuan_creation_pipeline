@@ -179,6 +179,69 @@ def source_accepted_color_selection_tiers(
     return tiers, tuple(sorted(rejected_ids))
 
 
+def _reviewed_corresponding_material_eligibility(
+    *,
+    source_plan: Mapping[str, Any],
+    qwen_choices: Mapping[str, Any],
+) -> tuple[dict[str, str], tuple[str, ...], set[str], set[str]]:
+    """Partition accepted corresponding assignments by tunable MDL interface.
+
+    A corresponding material is an identity decision, not proof that the MDL
+    exposes a colour input that this pipeline is allowed to author.  Keep this
+    partition next to the plan builder so orchestration and authoring use one
+    capability decision instead of discovering unsupported interfaces only
+    after the colour workflow has started.
+    """
+
+    tiers, source_rejected_ids = source_accepted_color_selection_tiers(
+        source_plan=source_plan,
+        qwen_choices=qwen_choices,
+    )
+    assignments = _unique_by_part(source_plan.get("assignments"), "assignments")
+    corresponding_ids = {
+        part_id
+        for part_id, tier in tiers.items()
+        if tier == CORRESPONDING_MATERIAL
+    }
+    eligible_ids: set[str] = set()
+    preserved_ids: set[str] = set()
+    for part_id in corresponding_ids:
+        assignment = assignments.get(part_id)
+        if assignment is None:
+            raise CorrespondingMaterialColorError(
+                f"corresponding Part ID {part_id} is missing from the source plan"
+            )
+        material_id = assignment.get("material_id")
+        if not isinstance(material_id, str) or not material_id:
+            raise CorrespondingMaterialColorError(
+                f"corresponding Part ID {part_id} has no selected material"
+            )
+        if tuning_profile_for_material(material_id) is None:
+            preserved_ids.add(part_id)
+        else:
+            eligible_ids.add(part_id)
+    if eligible_ids & preserved_ids or eligible_ids | preserved_ids != corresponding_ids:
+        raise CorrespondingMaterialColorError(
+            "reviewed colour-interface eligibility did not exactly partition "
+            "corresponding materials"
+        )
+    return tiers, source_rejected_ids, eligible_ids, preserved_ids
+
+
+def reviewed_corresponding_material_partitions(
+    *,
+    source_plan: Mapping[str, Any],
+    qwen_choices: Mapping[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return (colour-tunable, preserved-library-preset) corresponding IDs."""
+
+    _, _, eligible_ids, preserved_ids = _reviewed_corresponding_material_eligibility(
+        source_plan=source_plan,
+        qwen_choices=qwen_choices,
+    )
+    return tuple(sorted(eligible_ids)), tuple(sorted(preserved_ids))
+
+
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise CorrespondingMaterialColorError(f"{label} must be an object")
@@ -409,11 +472,14 @@ def build_corresponding_material_color_plan(
     if not selections:
         raise CorrespondingMaterialColorError("Qwen choices contain no selections")
 
-    effective_match_types, source_rejected_ids = (
-        source_accepted_color_selection_tiers(
-            source_plan=source_plan,
-            qwen_choices=qwen_choices,
-        )
+    (
+        effective_match_types,
+        source_rejected_ids,
+        eligible_corresponding_ids,
+        unreviewed_corresponding_ids,
+    ) = _reviewed_corresponding_material_eligibility(
+        source_plan=source_plan,
+        qwen_choices=qwen_choices,
     )
 
     consensus = _mapping(
@@ -480,13 +546,18 @@ def build_corresponding_material_color_plan(
         for part_id, match_type in effective_match_types.items()
         if match_type == EXACT_LIBRARY_MATCH
     }
-    corresponding_ids = {
+    all_corresponding_ids = {
         part_id
         for part_id, match_type in effective_match_types.items()
         if match_type == CORRESPONDING_MATERIAL
     }
-    if not corresponding_ids:
+    corresponding_ids = set(eligible_corresponding_ids)
+    if not all_corresponding_ids:
         raise CorrespondingMaterialColorError("there are no corresponding materials")
+    if not corresponding_ids:
+        raise CorrespondingMaterialColorError(
+            "there are no corresponding materials with a reviewed colour interface"
+        )
 
     evidence_by_id = {
         part_id: _color_evidence(evidence[part_id], part_id)
@@ -609,6 +680,12 @@ def build_corresponding_material_color_plan(
             raise CorrespondingMaterialColorError(
                 f"exact library match {part_id} was unexpectedly parameterized"
             )
+    for part_id in unreviewed_corresponding_ids:
+        if output_assignments[part_id] != assignments[part_id]:
+            raise CorrespondingMaterialColorError(
+                f"corresponding material {part_id} without a reviewed colour "
+                "interface was not preserved unchanged"
+            )
     if any(
         assignment.get("material_id") != assignments[part_id].get("material_id")
         for part_id, assignment in output_assignments.items()
@@ -632,6 +709,9 @@ def build_corresponding_material_color_plan(
         "part_id_evidence_sha256": canonical_sha256(part_id_evidence),
         "exact_library_matches_preserved": len(exact_ids),
         "corresponding_materials_parameterized": len(corresponding_ids),
+        "corresponding_materials_preserved_without_reviewed_colour_interface": (
+            len(unreviewed_corresponding_ids)
+        ),
         "source_rejected_selections_excluded": len(source_rejected_ids),
         "colour_scope_count": len(scope_audits),
         **gain_contract,
@@ -651,6 +731,7 @@ def build_corresponding_material_color_plan(
             "preserve_match_type": EXACT_LIBRARY_MATCH,
             "selected_mdl_identity_immutable": True,
             "reviewed_colour_interfaces_only": True,
+            "unreviewed_colour_interfaces_preserved_unchanged": True,
             "same_photo_material_component_shares_colour": True,
             "source_rejected_qwen_selections_excluded": True,
             "absolute_photo_luminance_preserved_before_render_calibration": True,
@@ -661,8 +742,11 @@ def build_corresponding_material_color_plan(
             "input_selection_count": len(selections),
             "source_rejected_selection_count": len(source_rejected_ids),
             "exact_library_match_count": len(exact_ids),
-            "corresponding_material_count": len(corresponding_ids),
+            "corresponding_material_count": len(all_corresponding_ids),
             "parameterized_part_count": len(corresponding_ids),
+            "unreviewed_colour_interface_preserved_count": len(
+                unreviewed_corresponding_ids
+            ),
             "colour_scope_count": len(scope_audits),
             "shared_component_scope_count": sum(
                 scope["scope_id"].startswith("COMPONENT:") for scope in scope_audits
@@ -673,6 +757,9 @@ def build_corresponding_material_color_plan(
             "material_identity_change_count": 0,
         },
         "source_rejected_part_ids": list(source_rejected_ids),
+        "unreviewed_colour_interface_preserved_part_ids": sorted(
+            unreviewed_corresponding_ids
+        ),
         "scopes": scope_audits,
     }
     audit = {

@@ -12,7 +12,9 @@ The default configuration is `configs/pipeline/manual_part_id_materials.json`.
 It predicts material identity before colour, selects an NVIDIA
 `Materials/Base` entry per CAD Part-ID, preserves exact presets, and runs
 identity-preserving actual-CAD colour calibration only for corresponding
-materials.
+materials whose MDLs expose reviewed colour interfaces. Corresponding library
+materials without a reviewed interface keep their selected native preset
+unchanged instead of receiving guessed parameters.
 
 This package handles reference-image evidence, camera registration, Part-ID
 mapping, material retrieval, USD binding, and validation. CAD conversion and the

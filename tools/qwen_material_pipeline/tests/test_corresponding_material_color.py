@@ -7,6 +7,7 @@ import pytest
 from qwen_material_pipeline.materials.corresponding_material_color import (
     CorrespondingMaterialColorError,
     build_corresponding_material_color_plan,
+    reviewed_corresponding_material_partitions,
 )
 from qwen_material_pipeline.usd.material_common import canonical_sha256
 
@@ -14,6 +15,7 @@ from qwen_material_pipeline.usd.material_common import canonical_sha256
 PAINT = "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte"
 METAL = "mdl:Metals/Aluminum_Anodized.mdl#Aluminum_Anodized"
 EXACT = "mdl:Metals/Steel_Stainless.mdl#Steel_Stainless"
+ACRYLIC = "mdl:Plastics/Plastic_Acrylic.mdl#Plastic_Acrylic"
 
 
 def _seal(value: dict) -> dict:
@@ -164,11 +166,68 @@ def test_colors_only_corresponding_and_preserves_material_ids() -> None:
         "exact_library_match_count": 1,
         "corresponding_material_count": 3,
         "parameterized_part_count": 3,
+        "unreviewed_colour_interface_preserved_count": 0,
         "colour_scope_count": 2,
         "shared_component_scope_count": 1,
         "independent_scope_count": 1,
         "material_identity_change_count": 0,
     }
+
+
+def test_preserves_corresponding_material_without_reviewed_colour_interface() -> None:
+    source, choices, evidence = _documents()
+    source_p2 = next(row for row in source["assignments"] if row["part_id"] == "P2")
+    choice_p2 = next(row for row in choices["selections"] if row["part_id"] == "P2")
+    source_p2["material_id"] = ACRYLIC
+    choice_p2["material_id"] = ACRYLIC
+    choices = _seal({key: value for key, value in choices.items() if key != "integrity"})
+
+    eligible, preserved = reviewed_corresponding_material_partitions(
+        source_plan=source,
+        qwen_choices=choices,
+    )
+    output, audit = build_corresponding_material_color_plan(
+        source_plan=source,
+        qwen_choices=choices,
+        part_id_evidence=evidence,
+    )
+
+    assert eligible == ("P3", "P4")
+    assert preserved == ("P2",)
+    assert _by_id(output)["P2"] == _by_id(source)["P2"]
+    assert _by_id(output)["P3"]["parameters"]
+    assert _by_id(output)["P4"]["parameters"]
+    assert audit["summary"]["corresponding_material_count"] == 3
+    assert audit["summary"]["parameterized_part_count"] == 2
+    assert audit["summary"]["unreviewed_colour_interface_preserved_count"] == 1
+    assert audit["unreviewed_colour_interface_preserved_part_ids"] == ["P2"]
+    assert (
+        audit["policy"]["unreviewed_colour_interfaces_preserved_unchanged"]
+        is True
+    )
+
+
+def test_all_unreviewed_corresponding_materials_are_ineligible_as_whole_scopes() -> None:
+    source, choices, _ = _documents()
+    for part_id in ("P2", "P3", "P4"):
+        next(
+            row for row in source["assignments"] if row["part_id"] == part_id
+        )["material_id"] = ACRYLIC
+        next(
+            row for row in choices["selections"] if row["part_id"] == part_id
+        )["material_id"] = ACRYLIC
+    choices["component_identity_consensus"]["components"][0][
+        "selected_material_id"
+    ] = ACRYLIC
+    choices = _seal({key: value for key, value in choices.items() if key != "integrity"})
+
+    eligible, preserved = reviewed_corresponding_material_partitions(
+        source_plan=source,
+        qwen_choices=choices,
+    )
+
+    assert eligible == ()
+    assert preserved == ("P2", "P3", "P4")
 
 
 def test_excludes_only_a_fully_bound_source_rejected_qwen_selection() -> None:
