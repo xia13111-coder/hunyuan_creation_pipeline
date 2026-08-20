@@ -4114,6 +4114,18 @@ def _apply_component_identity_consensus(
             consensus_match_type = "CORRESPONDING_MATERIAL"
             consensus_mode = "AMBIGUOUS_COMPONENT_COMMON_RANKING_FALLBACK"
             consensus_applied = True
+        winner_vote_count = (
+            votes.get(winner, (0, 0.0))[0] if winner is not None else 0
+        )
+        winner_vote_support = (
+            sorted(
+                part_id
+                for part_id in members
+                if before[part_id] == winner
+            )
+            if winner is not None
+            else []
+        )
         for part_id in members:
             row = by_id[part_id]
             row["pre_component_consensus_material_id"] = row["material_id"]
@@ -4177,12 +4189,14 @@ def _apply_component_identity_consensus(
                 "member_material_ids_before_consensus": before,
                 "selected_material_id": winner,
                 "match_type": consensus_match_type,
-                "vote_count": votes[winner][0] if winner is not None else 0,
+                "vote_count": winner_vote_count,
                 "vote_fraction": (
-                    votes[winner][0] / len(members)
-                    if winner is not None and winner in votes
-                    else 0.0
+                    winner_vote_count / len(members) if winner is not None else 0.0
                 ),
+                "winner_was_preconsensus_member_selection": (
+                    winner in votes if winner is not None else False
+                ),
+                "winner_vote_support_part_ids": winner_vote_support,
                 "member_count": len(members),
                 "strict_majority_required": True,
                 "strict_majority_observed": strict_majority,

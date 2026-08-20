@@ -1310,6 +1310,43 @@ class PartIdQwenTests(unittest.TestCase):
             "UNREVIEWED_EXACT_PRESET_COMMON_RANKING_FALLBACK",
         )
 
+    def test_common_ranked_fallback_need_not_have_a_preconsensus_vote(self) -> None:
+        acrylic = "mdl:Plastics/Plastic_Acrylic.mdl#Plastic_Acrylic"
+        matte = "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte"
+        satin = "mdl:Miscellaneous/Paint_Satin.mdl#Paint_Satin"
+        selections, audit = _apply_component_identity_consensus(
+            selections=[
+                {
+                    "part_id": "P1",
+                    "material_id": acrylic,
+                    "match_type": "EXACT_LIBRARY_MATCH",
+                    "confidence": 0.90,
+                },
+                {
+                    "part_id": "P2",
+                    "material_id": matte,
+                    "match_type": "CORRESPONDING_MATERIAL",
+                    "confidence": 0.82,
+                },
+            ],
+            component_members={"AC_1": ["P1", "P2"]},
+            ranked_material_ids_by_part={
+                "P1": [satin, matte],
+                "P2": [satin, matte],
+            },
+        )
+
+        self.assertEqual({row["material_id"] for row in selections}, {satin})
+        component = audit["components"][0]
+        self.assertEqual(
+            component["consensus_mode"],
+            "UNREVIEWED_EXACT_PRESET_COMMON_RANKING_FALLBACK",
+        )
+        self.assertEqual(component["vote_count"], 0)
+        self.assertEqual(component["vote_fraction"], 0.0)
+        self.assertFalse(component["winner_was_preconsensus_member_selection"])
+        self.assertEqual(component["winner_vote_support_part_ids"], [])
+
     def test_final_evidence_expands_only_same_coating_and_assembly_branch(
         self,
     ) -> None:
