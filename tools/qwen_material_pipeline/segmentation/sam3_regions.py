@@ -15,6 +15,7 @@ import inspect
 import json
 import math
 from pathlib import Path
+import random
 import subprocess
 import sys
 from typing import Any, Mapping, Sequence
@@ -75,10 +76,28 @@ CROSS_GROUP_ARBITRATION_SCHEMA_VERSION = (
 )
 PROGRESS_PREFIX = "@@ASSET_PROGRESS "
 PROGRESS_SCHEMA_VERSION = "asset-pipeline-progress/v1"
+DEFAULT_INFERENCE_SEED = 0
 
 
 class Sam3RegionError(ValueError):
     """Raised when the SAM3 request or output violates the frozen contract."""
+
+
+def _seed_inference(seed: int) -> None:
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise Sam3RegionError("inference seed must be a non-negative integer")
+    random.seed(seed)
+    import numpy as np
+    import torch
+
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
 
 
 def _emit_progress(
@@ -2163,6 +2182,7 @@ def run(
     minimum_prompt_overlap: float,
     maximum_image_fraction: float,
     minimum_mask_pixels: int,
+    seed: int = DEFAULT_INFERENCE_SEED,
 ) -> dict[str, Any]:
     import numpy as np
     from PIL import Image, ImageOps
@@ -2180,6 +2200,7 @@ def run(
         raise Sam3RegionError(f"SAM3 checkpoint is not a file: {checkpoint}")
     if device not in {"cuda", "cpu"}:
         raise Sam3RegionError("device must be 'cuda' or 'cpu'")
+    _seed_inference(seed)
 
     sys.path.insert(0, str(repository))
     try:
@@ -2741,6 +2762,8 @@ def run(
             ),
         },
     }
+    unsigned["policy"]["inference_seed"] = seed
+    unsigned["policy"]["deterministic_algorithms"] = True
     result = {
         **unsigned,
         "integrity": {"result_sha256": _canonical_sha256(unsigned)},
@@ -2776,6 +2799,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--minimum-mask-pixels", type=int, default=DEFAULT_MINIMUM_MASK_PIXELS
     )
+    parser.add_argument("--seed", type=int, default=DEFAULT_INFERENCE_SEED)
     return parser
 
 
@@ -2802,6 +2826,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         minimum_prompt_overlap=minimum_prompt_overlap,
         maximum_image_fraction=maximum_image_fraction,
         minimum_mask_pixels=minimum_mask_pixels,
+        seed=args.seed,
     )
     print(
         json.dumps(

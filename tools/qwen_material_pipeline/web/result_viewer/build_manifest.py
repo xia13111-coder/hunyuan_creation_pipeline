@@ -241,7 +241,10 @@ def _locate_quality_report(
     if (
         final_selected_color_audit is not None
         and final_selected_color_audit.get("schema_version")
-        == "qwen-corresponding-material-color-render-selection-audit/v1"
+        in {
+            "qwen-corresponding-material-color-render-selection-audit/v1",
+            "qwen-corresponding-material-color-render-selection-audit/v2",
+        }
         and final_selected_color_audit.get("status") == "PASS"
     ):
         accepted_final_selected_color_report = (

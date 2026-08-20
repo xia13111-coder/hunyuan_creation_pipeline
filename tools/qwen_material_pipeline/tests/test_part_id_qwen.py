@@ -293,6 +293,70 @@ class _TwoStageCorrespondingRunner:
         )
 
 
+class _TwoPartCorrespondingRunner:
+    model_identity = {"backend": "fake", "fingerprint": "singleton-batch-test"}
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def generate_with_metadata(self, _payload: object) -> _Generation:
+        self.calls += 1
+        if self.calls == 1:
+            return _Generation(
+                json.dumps(
+                    {
+                        "schema_version": MATERIAL_FAMILY_PREDICTION_BATCH_SCHEMA_VERSION,
+                        "predictions": [
+                            {
+                                "part_id": part_id,
+                                "physical_substrate": "metal",
+                                "material_species": "unknown",
+                                "surface_treatment": "unknown",
+                                "optical_behavior": "opaque",
+                                "surface_finish": "matte",
+                                "substrate_confidence": 0.94,
+                                "species_confidence": 0.25,
+                                "treatment_confidence": 0.35,
+                            }
+                            for part_id in ("P0001", "P0002")
+                        ],
+                    }
+                )
+            )
+        if self.calls == 2:
+            return _Generation(
+                json.dumps(
+                    {
+                        "schema_version": MATERIAL_IDENTITY_SELECTION_BATCH_SCHEMA_VERSION,
+                        "selections": [
+                            {
+                                "part_id": part_id,
+                                "candidate_index": 1,
+                                "match_type": "CORRESPONDING_MATERIAL",
+                                "confidence": 0.80,
+                            }
+                            for part_id in ("P0001", "P0002")
+                        ],
+                    }
+                )
+            )
+        part_id = "P0001" if self.calls == 3 else "P0002"
+        return _Generation(
+            json.dumps(
+                {
+                    "schema_version": BATCH_SCHEMA_VERSION,
+                    "selections": [
+                        {
+                            "part_id": part_id,
+                            "candidate_index": 1,
+                            "confidence": 0.82,
+                        }
+                    ],
+                }
+            )
+        )
+
+
 class PartIdQwenTests(unittest.TestCase):
     @staticmethod
     def _surface_semantics(
@@ -551,9 +615,9 @@ class PartIdQwenTests(unittest.TestCase):
             Image.fromarray(np.full((24, 24, 3), (18, 20, 22), dtype=np.uint8)).save(
                 crop
             )
-            generic = "mdl:Aluminum_Anodized.mdl#Aluminum_Anodized"
-            black = "mdl:Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
-            blue = "mdl:Aluminum_Anodized_Blue.mdl#Aluminum_Anodized_Blue"
+            generic = "mdl:Metals/Aluminum_Anodized.mdl#Aluminum_Anodized"
+            black = "mdl:Metals/Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
+            blue = "mdl:Metals/Aluminum_Anodized_Blue.mdl#Aluminum_Anodized_Blue"
             semantics = self._surface_semantics(
                 "metal",
                 "anodized",
@@ -629,9 +693,9 @@ class PartIdQwenTests(unittest.TestCase):
             Image.fromarray(np.full((24, 24, 3), (18, 20, 22), dtype=np.uint8)).save(
                 crop
             )
-            generic = "mdl:Aluminum_Anodized.mdl#Aluminum_Anodized"
-            black = "mdl:Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
-            blue = "mdl:Aluminum_Anodized_Blue.mdl#Aluminum_Anodized_Blue"
+            generic = "mdl:Metals/Aluminum_Anodized.mdl#Aluminum_Anodized"
+            black = "mdl:Metals/Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
+            blue = "mdl:Metals/Aluminum_Anodized_Blue.mdl#Aluminum_Anodized_Blue"
             semantics = self._surface_semantics("metal", "anodized", finish="matte")
             runner = _TwoStageCorrespondingRunner()
             result = run_part_id_qwen_rerank(
@@ -701,6 +765,79 @@ class PartIdQwenTests(unittest.TestCase):
         self.assertIn("Color is forbidden evidence", fallback_prompt)
         self.assertNotIn(black, fallback_prompt)
         self.assertNotIn(blue, fallback_prompt)
+
+    def test_corresponding_material_pass_is_singleton_per_part_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            parts = []
+            groups = []
+            generic = "mdl:Metals/Aluminum_Anodized.mdl#Aluminum_Anodized"
+            black = "mdl:Metals/Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black"
+            semantics = self._surface_semantics("metal", "anodized", finish="matte")
+            for part_id in ("P0001", "P0002"):
+                crop = root / f"{part_id}.png"
+                Image.fromarray(np.full((24, 24, 3), 90, dtype=np.uint8)).save(crop)
+                parts.append(
+                    {
+                        "part_id": part_id,
+                        "status": "observed",
+                        "descriptor": {"surface_class": "conductor"},
+                        "observations": [
+                            {
+                                "view_id": "front",
+                                "crop": str(crop),
+                                "selected_for_material_inference": True,
+                            }
+                        ],
+                    }
+                )
+                groups.append(
+                    {
+                        "group_id": part_id,
+                        "fused_ranking": [
+                            {"rank": 1, "material_id": black},
+                            {"rank": 2, "material_id": generic},
+                        ],
+                    }
+                )
+            runner = _TwoPartCorrespondingRunner()
+            result = run_part_id_qwen_rerank(
+                evidence={
+                    "schema_version": "qwen-part-id-reference-evidence/v1",
+                    "integrity": {"document_sha256": "evidence"},
+                    "parts": parts,
+                },
+                retrieval={"groups": groups},
+                catalog={
+                    "materials": [
+                        {
+                            "material_id": material_id,
+                            "family": "metal",
+                            "finishes": ["matte"],
+                            "surface_semantics": semantics,
+                        }
+                        for material_id in (generic, black)
+                    ]
+                },
+                runner=runner,
+                model="fake",
+                output_dir=root / "qwen",
+                batch_size=2,
+                candidate_count=2,
+                require_material_family_prediction=True,
+            )
+
+        corresponding_batches = [
+            row for row in result["batches"] if row["stage"] == "corresponding_material"
+        ]
+        self.assertEqual(runner.calls, 4)
+        self.assertEqual(len(corresponding_batches), 2)
+        self.assertTrue(all(row["batch_size"] == 1 for row in corresponding_batches))
+        self.assertEqual(
+            [row["part_ids"] for row in corresponding_batches],
+            [["P0001"], ["P0002"]],
+        )
+        self.assertEqual(set(result["choices"].values()), {generic})
 
     def test_identity_filter_rejects_rubber_and_veneer_misfiled_as_plastic(
         self,
@@ -799,6 +936,33 @@ class PartIdQwenTests(unittest.TestCase):
         )
         self.assertEqual([row["original_retrieval_rank"] for row in shortlist], [1, 2])
         self.assertTrue(all(row["color_evidence_used"] is False for row in shortlist))
+
+    def test_identity_shortlist_reserves_reviewed_same_family_colour_interface(
+        self,
+    ) -> None:
+        acrylic = "mdl:Plastics/Plastic_Acrylic.mdl#Plastic_Acrylic"
+        plastic = "mdl:Plastics/Plastic.mdl#Plastic"
+        rows = [
+            {
+                "material_id": material_id,
+                "rank": rank,
+                "catalog_surface_semantics": {"surface_treatment": "bare"},
+                "predicted_finish_match": False,
+                "identity_match_tier": "corresponding_material_fallback",
+                "generic_identity_material_id": material_id,
+            }
+            for rank, material_id in enumerate((acrylic, plastic), start=1)
+        ]
+
+        shortlist = _identity_shortlist(rows, candidate_count=2)
+
+        self.assertEqual(
+            [row["material_id"] for row in shortlist],
+            [acrylic, plastic],
+        )
+        tunable = {row["material_id"]: row["color_tunable"] for row in shortlist}
+        self.assertFalse(tunable[acrylic])
+        self.assertTrue(tunable[plastic])
 
     def test_full_catalog_pbr_fingerprint_can_authorize_unique_exact_match(
         self,
@@ -1106,6 +1270,44 @@ class PartIdQwenTests(unittest.TestCase):
         self.assertTrue(component["component_exact_preset_color_validated"])
         self.assertEqual(
             audit["summary"]["component_exact_preset_color_validated_count"], 1
+        )
+
+    def test_unreviewed_exact_component_identity_falls_back_to_common_tunable_mdl(
+        self,
+    ) -> None:
+        acrylic = "mdl:Plastics/Plastic_Acrylic.mdl#Plastic_Acrylic"
+        paint = "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte"
+        selections, audit = _apply_component_identity_consensus(
+            selections=[
+                {
+                    "part_id": "P1",
+                    "material_id": acrylic,
+                    "match_type": "EXACT_LIBRARY_MATCH",
+                    "confidence": 0.90,
+                },
+                {
+                    "part_id": "P2",
+                    "material_id": paint,
+                    "match_type": "CORRESPONDING_MATERIAL",
+                    "confidence": 0.82,
+                },
+                {
+                    "part_id": "P3",
+                    "material_id": paint,
+                    "match_type": "CORRESPONDING_MATERIAL",
+                    "confidence": 0.81,
+                },
+            ],
+            component_members={"AC_1": ["P1", "P2", "P3"]},
+            ranked_material_ids_by_part={
+                part_id: [paint] for part_id in ("P1", "P2", "P3")
+            },
+        )
+
+        self.assertEqual({row["material_id"] for row in selections}, {paint})
+        self.assertEqual(
+            audit["components"][0]["consensus_mode"],
+            "UNREVIEWED_EXACT_PRESET_COMMON_RANKING_FALLBACK",
         )
 
     def test_final_evidence_expands_only_same_coating_and_assembly_branch(
@@ -1554,12 +1756,16 @@ class PartIdQwenTests(unittest.TestCase):
             ],
             component_members={"AC_1": ["P1", "P2", "P3", "P4"]},
             strict_consensus_component_ids={"AC_1"},
+            ranked_material_ids_by_part={
+                part_id: ["mdl:Plastic", "mdl:Vinyl"]
+                for part_id in ("P1", "P2", "P3", "P4")
+            },
         )
 
         self.assertEqual({row["material_id"] for row in selections}, {"mdl:Plastic"})
         self.assertEqual(
             audit["components"][0]["consensus_mode"],
-            "REPEATED_ROLE_JOINT_CONSENSUS",
+            "AMBIGUOUS_EXACT_PRESETS_COMMON_RANKING_FALLBACK",
         )
         self.assertTrue(audit["summary"]["all_components_share_one_exact_mdl"])
 
@@ -1607,9 +1813,9 @@ class PartIdQwenTests(unittest.TestCase):
             root = Path(temporary)
             part_rows = []
             retrieval_groups = []
-            matte = "mdl:Paint_Matte.mdl#Paint_Matte"
-            satin = "mdl:Paint_Satin.mdl#Paint_Satin"
-            rubber = "mdl:Rubber_Textured.mdl#Rubber_Textured"
+            matte = "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte"
+            satin = "mdl:Miscellaneous/Paint_Satin.mdl#Paint_Satin"
+            rubber = "mdl:Plastics/Rubber_Textured.mdl#Rubber_Textured"
             for index, part_id in enumerate(("P0001", "P0002"), start=1):
                 crop = root / f"{part_id}.png"
                 Image.fromarray(

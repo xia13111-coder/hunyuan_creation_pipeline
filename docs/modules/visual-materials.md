@@ -89,6 +89,9 @@ whole-workpiece camera residual; no individual mesh may translate, rotate, or
 scale. If local refinement is unreliable, the workflow uses the
 global projection or marks the part as unobserved. These adjustments affect
 evidence extraction only, never CAD geometry.
+Production SAM3 and EntitySeg entry points use one fixed inference seed and seal
+that seed together with request and model hashes. A retry with identical inputs
+therefore cannot silently change Part-ID evidence through random initialization.
 
 The identity-first path requires every registered reference view to contribute
 real visible and selected Part-ID observations. It checks both per-part rows and
@@ -108,6 +111,17 @@ run instead of silently continuing with a two-view material decision.
 
 Models only rank catalog entries; they do not directly edit USD bindings.
 
+Material identity and colour are separate stages. A colour-confirmed exact
+library preset is retained directly. Otherwise each Part ID receives an
+independent, colour-blind corresponding-material decision whose shortlist must
+contain a physically compatible MDL with a reviewed colour interface. A
+component vote is authoritative only with a strict majority; ties and weak
+consensus are resolved from the intersection of independently ranked member
+candidates, and an empty intersection fails closed. After identity is fixed,
+actual-CAD renders select reviewed colour parameters and enforce local quality
+for both the component and every sufficiently visible member, so small defects
+cannot disappear inside a whole-view average.
+
 ## Assignment and validation rules
 
 - Every Mesh receives exactly one applicable visual-material assignment.
@@ -116,8 +130,9 @@ Models only rank catalog entries; they do not directly edit USD bindings.
   workflow does not invent photo evidence.
 - Duplicate, incomplete, or review-only assignments stop the run before the
   material is applied.
-- Once the winning MDL is recorded, its color, roughness, metallic value,
-  textures, and normals are not modified.
+- Once the winning MDL is recorded, its identity cannot change. Only a
+  corresponding-material assignment may author reviewed colour inputs; exact
+  presets, roughness, metallic value, textures, and normals remain unchanged.
 - The USD after material assignment is rendered against usable references.
   After dependency collection, the delivered USD is reopened and checked
   again. A failed check stops the pipeline and reports the corresponding stage.

@@ -37,7 +37,7 @@ from ..materials.corresponding_material_color import (
 from ..usd.material_common import canonical_sha256
 
 
-SCHEMA_VERSION = "qwen-corresponding-material-color-workflow/v2"
+SCHEMA_VERSION = "qwen-corresponding-material-color-workflow/v3"
 
 
 class CorrespondingMaterialColorWorkflowError(RuntimeError):
@@ -552,6 +552,7 @@ def run_corresponding_material_color_workflow(
             "material_identity_mutation_allowed": False,
             "same_component_shares_material_and_colour": True,
             "actual_cad_render_selection": True,
+            "local_part_scope_quality_gate": True,
             "optimization_mode": optimization_mode,
             "explicit_linear_intensity_gains": (
                 None if calibrated_gains is None else list(calibrated_gains)

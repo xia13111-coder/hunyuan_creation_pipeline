@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import math
+import random
 import sys
 import types
 from collections import Counter
@@ -50,10 +51,27 @@ DEFAULT_MINIMUM_MODEL_SCORE = 0.30
 DEFAULT_MINIMUM_MASK_PIXELS = 16
 DEFAULT_MAXIMUM_CANDIDATES_PER_SOURCE = 12
 DEFAULT_MAXIMUM_CAD_CENTROID_DISTANCE = 0.15
+DEFAULT_INFERENCE_SEED = 0
 
 
 class EntitySegRegionError(ValueError):
     """Raised when EntitySeg inference or its CAD binding is invalid."""
+
+
+def _seed_inference(seed: int) -> None:
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise EntitySegRegionError("inference seed must be a non-negative integer")
+    random.seed(seed)
+    np.random.seed(seed)
+    import torch
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
 
 
 def _sha256_file(path: Path) -> str:
@@ -200,6 +218,7 @@ def _setup_predictor(
     cropformer_root: Path,
     config_path: Path,
     checkpoint_path: Path,
+    seed: int,
 ) -> Any:
     root = cropformer_root.expanduser().resolve(strict=True)
     demo_root = root / "demo_cropformer"
@@ -241,6 +260,7 @@ def _setup_predictor(
     add_maskformer2_config(cfg)
     cfg.merge_from_file(str(config_path.expanduser().resolve(strict=True)))
     cfg.MODEL.WEIGHTS = str(checkpoint_path.expanduser().resolve(strict=True))
+    cfg.SEED = seed
     cfg.freeze()
     return VisualizationDemo(cfg)
 
@@ -443,6 +463,7 @@ def run(
     minimum_area_agreement: float = DEFAULT_MINIMUM_CAD_SHAPE_AREA_AGREEMENT,
     maximum_centroid_distance: float = DEFAULT_MAXIMUM_CAD_CENTROID_DISTANCE,
     local_context_fraction: float = 0.12,
+    seed: int = DEFAULT_INFERENCE_SEED,
 ) -> dict[str, Any]:
     request_path = request_path.expanduser().resolve(strict=True)
     request = _read_object(request_path, "EntitySeg request")
@@ -450,6 +471,7 @@ def run(
     output_dir = output_dir.expanduser().resolve()
     masks_dir = output_dir / "masks"
     masks_dir.mkdir(parents=True, exist_ok=True)
+    _seed_inference(seed)
     source_by_view: dict[str, tuple[Path, np.ndarray]] = {}
     foreground_by_view: dict[str, np.ndarray] = {}
     for index, row in enumerate(request.get("source_views", [])):
@@ -519,6 +541,7 @@ def run(
         cropformer_root=cropformer_root,
         config_path=config_path,
         checkpoint_path=checkpoint_path,
+        seed=seed,
     )
     full_candidates: dict[str, list[dict[str, Any]]] = {}
     for view_id, (_path, image) in source_by_view.items():
@@ -709,6 +732,8 @@ def run(
             "alignment_model": "one_whole_workpiece_translation_per_view",
             "per_mesh_pose_change_allowed": False,
             "part_specific_translation_allowed": False,
+            "inference_seed": seed,
+            "deterministic_algorithms": True,
         },
         "records": records,
         "summary": {
@@ -753,6 +778,7 @@ def _parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_MAXIMUM_CAD_CENTROID_DISTANCE,
     )
+    parser.add_argument("--seed", type=int, default=DEFAULT_INFERENCE_SEED)
     return parser
 
 
@@ -769,6 +795,7 @@ def main() -> int:
         minimum_area_agreement=args.minimum_area_agreement,
         maximum_centroid_distance=args.maximum_centroid_distance,
         local_context_fraction=args.local_context_fraction,
+        seed=args.seed,
     )
     return 0
 

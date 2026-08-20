@@ -2240,6 +2240,8 @@ def _run_policy_part_id_stage(
                 str(config.sam3_maximum_image_fraction),
                 "--minimum-mask-pixels",
                 str(config.sam3_minimum_mask_pixels),
+                "--seed",
+                "0",
             ],
             log_cb,
             command_runner=_command_runner,
@@ -2285,6 +2287,8 @@ def _run_policy_part_id_stage(
                     str(part_id_entityseg_dir),
                     "--minimum-model-score",
                     str(config.entityseg_minimum_model_score),
+                    "--seed",
+                    "0",
                 ],
                 log_cb,
                 command_runner=_command_runner,
@@ -3297,6 +3301,15 @@ def _run_visual_qa_stage(
                 "unobserved policy fallbacks remain unchanged.",
             )
         if preserved_corresponding_part_ids:
+            if config.material_prediction_mode == "catalog_family_first":
+                raise RuntimeError(
+                    "Corresponding-material selection escaped the reviewed colour "
+                    "interface contract for Part IDs: "
+                    + ", ".join(preserved_corresponding_part_ids)
+                    + ". The material-identity stage must choose a physically "
+                    "compatible, colour-tunable library material instead of "
+                    "silently preserving an uncalibrated preset."
+                )
             log_message(
                 log_cb,
                 f"Preserving {len(preserved_corresponding_part_ids)} "

@@ -1392,6 +1392,7 @@ def _identity_shortlist(
         ),
     )
     generic_by_treatment = []
+    reviewed_tunable_by_treatment = []
     for _treatment, rows in sorted(buckets.items()):
         generic_rows = [
             row
@@ -1421,6 +1422,29 @@ def _identity_shortlist(
                 ),
             )
         )
+        tunable_rows = [
+            row
+            for row in generic_rows
+            if tuning_profile_for_material(str(row["material_id"])) is not None
+        ]
+        if tunable_rows:
+            reviewed_tunable_by_treatment.append(
+                min(
+                    tunable_rows,
+                    key=lambda row: (
+                        0 if row.get("predicted_finish_match") is True else 1,
+                        (
+                            float(row["physical_pbr_mean_error"])
+                            if isinstance(
+                                row.get("physical_pbr_mean_error"), (int, float)
+                            )
+                            else float("inf")
+                        ),
+                        int(row.get("rank", 1_000_000)),
+                        str(row["material_id"]),
+                    ),
+                )
+            )
     selected: list[Mapping[str, Any]] = []
     selected_ids: set[str] = set()
 
@@ -1439,11 +1463,26 @@ def _identity_shortlist(
                 "physical catalog set"
             )
         add(row)
+    tunable_reserve = min(
+        sum(
+            str(row["material_id"]) not in selected_ids
+            for row in reviewed_tunable_by_treatment
+        ),
+        candidate_count - len(selected),
+    )
     exact_budget = min(
         len(exact_preset_order),
         max(1, candidate_count // 2) if candidate_count > 1 else 0,
     )
     for row in exact_preset_order[:exact_budget]:
+        if len(selected) >= candidate_count - tunable_reserve:
+            break
+        add(row)
+    # Reserve a reviewed same-identity colour interface before filling the
+    # remaining bounded slots.  An exact authored preset may still win, but a
+    # CORRESPONDING_MATERIAL decision must always have a physically compatible
+    # candidate that can actually be calibrated from the reference images.
+    for row in reviewed_tunable_by_treatment:
         add(row)
     for row in generic_by_treatment:
         add(row)
@@ -1461,7 +1500,9 @@ def _identity_shortlist(
                 "color_similarity": None,
                 "hue_similarity": None,
                 "color_delta_e": None,
-                "color_tunable": False,
+                "color_tunable": (
+                    tuning_profile_for_material(str(raw["material_id"])) is not None
+                ),
                 "color_gate_passed": None,
                 "texture_similarity": None,
                 "texture_gradient_energy": None,
@@ -3897,6 +3938,7 @@ def _apply_component_identity_consensus(
     selections: Sequence[Mapping[str, Any]],
     component_members: Mapping[str, Sequence[str]],
     strict_consensus_component_ids: set[str] | None = None,
+    ranked_material_ids_by_part: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     strict_components = set(strict_consensus_component_ids or set())
     if not strict_components <= set(component_members):
@@ -3909,6 +3951,52 @@ def _apply_component_identity_consensus(
         if isinstance(row, Mapping) and isinstance(row.get("part_id"), str)
     }
     audits: list[dict[str, Any]] = []
+
+    def common_ranked_fallback(
+        component_id: str,
+        members: Sequence[str],
+    ) -> str:
+        if ranked_material_ids_by_part is None:
+            raise PartIdQwenError(
+                f"appearance component {component_id} has no strict majority and "
+                "no independently ranked common-material fallback"
+            )
+        rankings: dict[str, list[str]] = {}
+        for part_id in members:
+            raw = ranked_material_ids_by_part.get(part_id)
+            if (
+                not isinstance(raw, Sequence)
+                or isinstance(raw, (str, bytes))
+                or not raw
+            ):
+                raise PartIdQwenError(
+                    f"appearance component {component_id} has no independently "
+                    f"ranked fallback for {part_id}"
+                )
+            ranking = [str(material_id) for material_id in raw]
+            if len(ranking) != len(set(ranking)):
+                raise PartIdQwenError(
+                    f"appearance component {component_id} has a duplicate ranked "
+                    f"material for {part_id}"
+                )
+            rankings[part_id] = ranking
+        common = set(rankings[members[0]])
+        for part_id in members[1:]:
+            common &= set(rankings[part_id])
+        if not common:
+            raise PartIdQwenError(
+                f"appearance component {component_id} has no common reviewed "
+                "corresponding-material candidate across all members"
+            )
+        return min(
+            common,
+            key=lambda material_id: (
+                sum(rankings[part_id].index(material_id) for part_id in members),
+                max(rankings[part_id].index(material_id) for part_id in members),
+                material_id,
+            ),
+        )
+
     for component_id, members in sorted(component_members.items()):
         if not set(members) <= set(by_id):
             raise PartIdQwenError(
@@ -3959,11 +4047,33 @@ def _apply_component_identity_consensus(
                 for part_id in members
             )
         }
+        vote_winner = min(
+            votes,
+            key=lambda material_id: (
+                -votes[material_id][0],
+                -votes[material_id][1],
+                material_id,
+            ),
+        )
+        strict_majority = votes[vote_winner][0] * 2 > len(members)
         if len(protected_exact_ids) == 1:
             winner = next(iter(protected_exact_ids))
             if winner in fully_validated_component_presets:
                 consensus_match_type = "EXACT_LIBRARY_MATCH"
                 consensus_mode = "PROTECTED_EXACT_PRESET_PROPAGATED"
+            elif (
+                ranked_material_ids_by_part is not None
+                and tuning_profile_for_material(winner) is None
+            ):
+                # A local exact-preset observation can establish identity, but
+                # it cannot become a shared corresponding material when the MDL
+                # exposes no reviewed colour input.  Resolve that ambiguity from
+                # the members' independent, physically compatible rankings.
+                winner = common_ranked_fallback(component_id, members)
+                consensus_match_type = "CORRESPONDING_MATERIAL"
+                consensus_mode = (
+                    "UNREVIEWED_EXACT_PRESET_COMMON_RANKING_FALLBACK"
+                )
             else:
                 # One exact local preset is useful evidence for material
                 # identity, but it cannot certify the colour of a larger
@@ -3980,15 +4090,8 @@ def _apply_component_identity_consensus(
             consensus_match_type = None
             consensus_mode = "CONFLICTING_EXACT_PRESETS_PRESERVED"
             consensus_applied = False
-        elif len(protected_exact_ids) > 1:
-            winner = min(
-                votes,
-                key=lambda material_id: (
-                    -votes[material_id][0],
-                    -votes[material_id][1],
-                    material_id,
-                ),
-            )
+        elif len(protected_exact_ids) > 1 and strict_majority:
+            winner = vote_winner
             consensus_match_type = (
                 "EXACT_LIBRARY_MATCH"
                 if winner in protected_exact_ids
@@ -3996,17 +4099,20 @@ def _apply_component_identity_consensus(
             )
             consensus_mode = "REPEATED_ROLE_JOINT_CONSENSUS"
             consensus_applied = True
-        else:
-            winner = min(
-                votes,
-                key=lambda material_id: (
-                    -votes[material_id][0],
-                    -votes[material_id][1],
-                    material_id,
-                ),
-            )
+        elif len(protected_exact_ids) > 1:
+            winner = common_ranked_fallback(component_id, members)
+            consensus_match_type = "CORRESPONDING_MATERIAL"
+            consensus_mode = "AMBIGUOUS_EXACT_PRESETS_COMMON_RANKING_FALLBACK"
+            consensus_applied = True
+        elif strict_majority:
+            winner = vote_winner
             consensus_match_type = "CORRESPONDING_MATERIAL"
             consensus_mode = "GENERIC_CORRESPONDING_CONSENSUS"
+            consensus_applied = True
+        else:
+            winner = common_ranked_fallback(component_id, members)
+            consensus_match_type = "CORRESPONDING_MATERIAL"
+            consensus_mode = "AMBIGUOUS_COMPONENT_COMMON_RANKING_FALLBACK"
             consensus_applied = True
         for part_id in members:
             row = by_id[part_id]
@@ -4053,6 +4159,17 @@ def _apply_component_identity_consensus(
                     row[
                         "selection_authority"
                     ] = "repeated_assembly_role_joint_consensus"
+                elif consensus_mode in {
+                    "AMBIGUOUS_EXACT_PRESETS_COMMON_RANKING_FALLBACK",
+                    "AMBIGUOUS_COMPONENT_COMMON_RANKING_FALLBACK",
+                    "UNREVIEWED_EXACT_PRESET_COMMON_RANKING_FALLBACK",
+                }:
+                    row["index_resolution"] = (
+                        "component_independent_common_ranking_fallback"
+                    )
+                    row["selection_authority"] = (
+                        "appearance_component_member_independent_rank_consensus"
+                    )
         audits.append(
             {
                 "component_id": component_id,
@@ -4061,7 +4178,14 @@ def _apply_component_identity_consensus(
                 "selected_material_id": winner,
                 "match_type": consensus_match_type,
                 "vote_count": votes[winner][0] if winner is not None else 0,
+                "vote_fraction": (
+                    votes[winner][0] / len(members)
+                    if winner is not None and winner in votes
+                    else 0.0
+                ),
                 "member_count": len(members),
+                "strict_majority_required": True,
+                "strict_majority_observed": strict_majority,
                 "consensus_mode": consensus_mode,
                 "protected_exact_material_ids": sorted(protected_exact_ids),
                 "protected_exact_support": protected_exact_support,
@@ -4079,7 +4203,7 @@ def _apply_component_identity_consensus(
     return (
         [by_id[str(row["part_id"])] for row in selections],
         {
-            "schema_version": "qwen-component-material-identity-consensus/v2",
+            "schema_version": "qwen-component-material-identity-consensus/v3",
             "components": audits,
             "summary": {
                 "component_count": len(audits),
@@ -4405,6 +4529,7 @@ def run_part_id_qwen_rerank(
     direct_selections: list[dict[str, Any]] = []
     direct_assignment_audits: list[dict[str, Any]] = []
     gate_audits: list[dict[str, Any]] = []
+    consensus_ranked_material_ids_by_part: dict[str, list[str]] = {}
     for part_id in sorted(part_by_id):
         part = part_by_id[part_id]
         selected_observations = [
@@ -4612,6 +4737,12 @@ def run_part_id_qwen_rerank(
             "material_prediction": prediction,
             "exact_preset_evidence_eligible": exact_preset_evidence_eligible,
         }
+        consensus_ranked_material_ids_by_part[part_id] = [
+            str(candidate["material_id"])
+            for candidate in candidates
+            if candidate.get("specific_library_preset") is not True
+            and tuning_profile_for_material(str(candidate["material_id"])) is not None
+        ]
         if direct_match is None:
             jobs.append(job)
         else:
@@ -4752,12 +4883,14 @@ def run_part_id_qwen_rerank(
         stage: str,
         require_match_type: bool,
         corresponding_only: bool,
+        stage_batch_size: int | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         stage_selections: list[dict[str, Any]] = []
         stage_audits: list[dict[str, Any]] = []
+        effective_batch_size = stage_batch_size or batch_size
         stage_batches = [
-            stage_jobs[index : index + batch_size]
-            for index in range(0, len(stage_jobs), batch_size)
+            stage_jobs[index : index + effective_batch_size]
+            for index in range(0, len(stage_jobs), effective_batch_size)
         ]
         for batch_index, batch in enumerate(stage_batches, start=1):
             final_error: Exception | None = None
@@ -4811,6 +4944,7 @@ def run_part_id_qwen_rerank(
                         "stage": stage,
                         "batch_index": batch_index,
                         "attempt": attempt,
+                        "batch_size": effective_batch_size,
                         "part_ids": [str(item["part_id"]) for item in batch],
                         "parse_audit": str(audit_path),
                     }
@@ -4858,6 +4992,9 @@ def run_part_id_qwen_rerank(
             generic_candidates: list[dict[str, Any]] = []
             for candidate in source_job["candidates"]:
                 if candidate.get("specific_library_preset") is True:
+                    continue
+                material_id = str(candidate["material_id"])
+                if tuning_profile_for_material(material_id) is None:
                     continue
                 sanitized = {
                     key: value
@@ -4917,6 +5054,11 @@ def run_part_id_qwen_rerank(
             stage="corresponding_material",
             require_match_type=False,
             corresponding_only=True,
+            # Material identity for one Part ID must not change merely because
+            # unrelated parts happened to share a VLM batch.  The exact-preset
+            # pass may use throughput batching; this ambiguous grayscale pass
+            # is deliberately independent per Part ID.
+            stage_batch_size=1,
         )
         for row in corresponding_qwen_selections:
             part_id = str(row["part_id"])
@@ -4942,6 +5084,7 @@ def run_part_id_qwen_rerank(
             selections=selections,
             component_members=component_members,
             strict_consensus_component_ids=strict_consensus_component_ids,
+            ranked_material_ids_by_part=consensus_ranked_material_ids_by_part,
         )
         selective_regression = {
             "schema_version": SELECTIVE_REGRESSION_SCHEMA_VERSION,

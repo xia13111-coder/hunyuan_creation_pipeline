@@ -100,7 +100,7 @@ def _fixture(tmp_path: Path) -> dict[str, Path | dict]:
     selection_audit_document = _sealed(
         {
             "schema_version": (
-                "qwen-corresponding-material-color-render-selection-audit/v1"
+                "qwen-corresponding-material-color-render-selection-audit/v2"
             ),
             "status": "PASS",
             "source_plan_sha256": canonical_sha256(source_plan_document),
@@ -109,12 +109,14 @@ def _fixture(tmp_path: Path) -> dict[str, Path | dict]:
                 "colour_scope_count": 1,
                 "parameterized_part_count": 1,
                 "material_identity_change_count": 0,
+                "local_quality_gate_status": "PASS",
             },
             "selections": [
                 {
                     "scope_id": "PART:P1",
                     "member_part_ids": ["P1"],
                     "selected_candidate_id": "iteration_01",
+                    "local_quality_gate": {"status": "PASS"},
                 }
             ],
         }
@@ -164,13 +166,14 @@ def _fixture(tmp_path: Path) -> dict[str, Path | dict]:
     manifest = _write(
         result / "workflow_manifest.json",
         {
-            "schema_version": "qwen-corresponding-material-color-workflow/v2",
+            "schema_version": "qwen-corresponding-material-color-workflow/v3",
             "workflow_state": "COMPLETE",
             "quality_status": "PASS",
             "policy": {
                 "material_identity_mutation_allowed": False,
                 "same_component_shares_material_and_colour": True,
                 "actual_cad_render_selection": True,
+                "local_part_scope_quality_gate": True,
                 "optimization_mode": "adaptive_per_scope",
             },
             "inputs": {

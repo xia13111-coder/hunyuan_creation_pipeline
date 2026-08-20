@@ -108,6 +108,90 @@ def test_selects_actual_render_gain_per_scope_and_preserves_mdl_ids(
     assert audit["summary"]["material_identity_change_count"] == 0
 
 
+def test_rejects_winning_component_when_a_scorable_member_is_still_wrong(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source_plan()
+    candidates = [_candidate(source, "gain_1", 1.0), _candidate(source, "gain_2", 2.0)]
+
+    monkeypatch.setattr(
+        selection,
+        "score_part_id_render",
+        lambda **_kwargs: {
+            "part_id": "P2",
+            "comparison_pixel_count": 64,
+            "appearance_score": 0.90,
+        },
+    )
+    monkeypatch.setattr(
+        selection,
+        "score_component_render",
+        lambda **_kwargs: {
+            "comparison_pixel_count": 80,
+            "appearance_score": 0.72,
+            "member_scores": [
+                {
+                    "part_id": "P3",
+                    "comparison_pixel_count": 20,
+                    "appearance_score": 0.20,
+                },
+                {
+                    "part_id": "P4",
+                    "comparison_pixel_count": 60,
+                    "appearance_score": 0.89,
+                },
+            ],
+        },
+    )
+
+    with pytest.raises(
+        selection.CorrespondingMaterialColorSelectionError,
+        match="component_member_below_floor:P3",
+    ):
+        selection.select_render_calibrated_color_plan(
+            source_plan=source,
+            candidates=candidates,
+            part_id_evidence={},
+            spatial_mapping_report={},
+        )
+
+
+def test_rejects_winning_scope_below_absolute_local_quality_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source_plan()
+    candidates = [_candidate(source, "gain_1", 1.0), _candidate(source, "gain_2", 2.0)]
+    monkeypatch.setattr(
+        selection,
+        "score_part_id_render",
+        lambda **_kwargs: {
+            "part_id": "P2",
+            "comparison_pixel_count": 64,
+            "appearance_score": 0.90,
+        },
+    )
+    monkeypatch.setattr(
+        selection,
+        "score_component_render",
+        lambda **_kwargs: {
+            "comparison_pixel_count": 80,
+            "appearance_score": 0.49,
+            "member_scores": [],
+        },
+    )
+
+    with pytest.raises(
+        selection.CorrespondingMaterialColorSelectionError,
+        match="scope_appearance_below_floor",
+    ):
+        selection.select_render_calibrated_color_plan(
+            source_plan=source,
+            candidates=candidates,
+            part_id_evidence={},
+            spatial_mapping_report={},
+        )
+
+
 def _write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")

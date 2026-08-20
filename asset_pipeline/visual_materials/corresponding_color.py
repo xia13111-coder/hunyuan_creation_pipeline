@@ -18,9 +18,9 @@ from .config import canonical_sha256, read_object
 from .references import sha256_file
 
 
-WORKFLOW_SCHEMA_VERSION = "qwen-corresponding-material-color-workflow/v2"
+WORKFLOW_SCHEMA_VERSION = "qwen-corresponding-material-color-workflow/v3"
 SELECTION_AUDIT_SCHEMA_VERSION = (
-    "qwen-corresponding-material-color-render-selection-audit/v1"
+    "qwen-corresponding-material-color-render-selection-audit/v2"
 )
 
 
@@ -148,6 +148,7 @@ def validate_corresponding_color_result(
         or policy.get("material_identity_mutation_allowed") is not False
         or policy.get("same_component_shares_material_and_colour") is not True
         or policy.get("actual_cad_render_selection") is not True
+        or policy.get("local_part_scope_quality_gate") is not True
         or policy.get("optimization_mode") != "adaptive_per_scope"
     ):
         raise RuntimeError(
@@ -257,8 +258,21 @@ def validate_corresponding_color_result(
         not isinstance(summary, Mapping)
         or summary.get("parameterized_part_count") != len(parameterized)
         or summary.get("material_identity_change_count") != 0
+        or summary.get("local_quality_gate_status") != "PASS"
     ):
         raise RuntimeError("colour render-selection summary is inconsistent")
+    selections = audit.get("selections")
+    if (
+        not isinstance(selections, list)
+        or len(selections) != summary.get("colour_scope_count")
+        or any(
+            not isinstance(row, Mapping)
+            or not isinstance(row.get("local_quality_gate"), Mapping)
+            or row["local_quality_gate"].get("status") != "PASS"
+            for row in selections
+        )
+    ):
+        raise RuntimeError("colour render-selection local quality gate is incomplete")
 
     apply_report = read_object(apply_report_path, "colour-selected apply report")
     applied_count = apply_report.get("applied_count")

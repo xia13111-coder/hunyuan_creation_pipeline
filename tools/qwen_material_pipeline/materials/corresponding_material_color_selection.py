@@ -32,7 +32,11 @@ from ..usd.material_common import canonical_sha256
 
 
 SCHEMA_VERSION = "qwen-corresponding-material-color-render-selection/v1"
-AUDIT_SCHEMA_VERSION = "qwen-corresponding-material-color-render-selection-audit/v1"
+AUDIT_SCHEMA_VERSION = "qwen-corresponding-material-color-render-selection-audit/v2"
+MINIMUM_SCORABLE_SCOPE_PIXELS = 32
+MINIMUM_SCOPE_APPEARANCE_SCORE = 0.50
+MINIMUM_SCORABLE_COMPONENT_MEMBER_PIXELS = 16
+MINIMUM_COMPONENT_MEMBER_APPEARANCE_SCORE = 0.35
 
 
 class CorrespondingMaterialColorSelectionError(ValueError):
@@ -48,6 +52,92 @@ class Candidate:
     rendered_registry: Mapping[str, Any]
     paths: Mapping[str, str]
     hashes: Mapping[str, str]
+
+
+def _local_quality_gate(
+    *, scope_id: str, score: Mapping[str, Any]
+) -> dict[str, Any]:
+    raw_pixels = score.get("comparison_pixel_count", 0)
+    raw_appearance = score.get("appearance_score")
+    if (
+        isinstance(raw_pixels, bool)
+        or not isinstance(raw_pixels, int)
+        or raw_pixels < 0
+        or isinstance(raw_appearance, bool)
+        or not isinstance(raw_appearance, (int, float))
+        or not math.isfinite(float(raw_appearance))
+    ):
+        raise CorrespondingMaterialColorSelectionError(
+            f"winning scope {scope_id} has malformed local quality evidence"
+        )
+    failures: list[str] = []
+    if (
+        raw_pixels >= MINIMUM_SCORABLE_SCOPE_PIXELS
+        and float(raw_appearance) < MINIMUM_SCOPE_APPEARANCE_SCORE
+    ):
+        failures.append("scope_appearance_below_floor")
+    member_records: list[dict[str, Any]] = []
+    raw_members = score.get("member_scores", [])
+    if not isinstance(raw_members, list):
+        raise CorrespondingMaterialColorSelectionError(
+            f"winning scope {scope_id} has malformed member scores"
+        )
+    for index, raw_member in enumerate(raw_members):
+        member = _mapping(raw_member, f"{scope_id}.member_scores[{index}]")
+        part_id = _text(member.get("part_id"), f"{scope_id}.member part_id")
+        member_pixels = member.get("comparison_pixel_count", 0)
+        member_appearance = member.get("appearance_score")
+        if (
+            isinstance(member_pixels, bool)
+            or not isinstance(member_pixels, int)
+            or member_pixels < 0
+            or isinstance(member_appearance, bool)
+            or not isinstance(member_appearance, (int, float))
+            or not math.isfinite(float(member_appearance))
+        ):
+            raise CorrespondingMaterialColorSelectionError(
+                f"winning scope {scope_id} has malformed quality for {part_id}"
+            )
+        passed = (
+            member_pixels < MINIMUM_SCORABLE_COMPONENT_MEMBER_PIXELS
+            or float(member_appearance)
+            >= MINIMUM_COMPONENT_MEMBER_APPEARANCE_SCORE
+        )
+        if not passed:
+            failures.append(f"component_member_below_floor:{part_id}")
+        member_records.append(
+            {
+                "part_id": part_id,
+                "comparison_pixel_count": member_pixels,
+                "appearance_score": float(member_appearance),
+                "evaluated": (
+                    member_pixels >= MINIMUM_SCORABLE_COMPONENT_MEMBER_PIXELS
+                ),
+                "passed": passed,
+            }
+        )
+    gate = {
+        "status": "PASS" if not failures else "FAIL",
+        "comparison_pixel_count": raw_pixels,
+        "appearance_score": float(raw_appearance),
+        "scope_evaluated": raw_pixels >= MINIMUM_SCORABLE_SCOPE_PIXELS,
+        "minimum_scorable_scope_pixels": MINIMUM_SCORABLE_SCOPE_PIXELS,
+        "minimum_scope_appearance_score": MINIMUM_SCOPE_APPEARANCE_SCORE,
+        "minimum_scorable_component_member_pixels": (
+            MINIMUM_SCORABLE_COMPONENT_MEMBER_PIXELS
+        ),
+        "minimum_component_member_appearance_score": (
+            MINIMUM_COMPONENT_MEMBER_APPEARANCE_SCORE
+        ),
+        "member_scores": member_records,
+        "failure_reasons": failures,
+    }
+    if failures:
+        raise CorrespondingMaterialColorSelectionError(
+            f"winning scope {scope_id} failed local actual-CAD quality: "
+            + ", ".join(failures)
+        )
+    return gate
 
 
 def _mapping(value: Any, label: str) -> Mapping[str, Any]:
@@ -341,6 +431,10 @@ def select_render_calibrated_color_plan(
             ),
         )
         winner_id = str(winner["candidate_id"])
+        local_quality_gate = _local_quality_gate(
+            scope_id=scope_id,
+            score=_mapping(winner["score"], f"{scope_id}.winning score"),
+        )
         selected_gain_counts[str(winner["linear_intensity_gain"])] = (
             selected_gain_counts.get(str(winner["linear_intensity_gain"]), 0) + 1
         )
@@ -376,6 +470,7 @@ def select_render_calibrated_color_plan(
                 "selected_candidate_id": winner_id,
                 "selected_linear_intensity_gain": winner["linear_intensity_gain"],
                 "selected_appearance_score": winner["score"]["appearance_score"],
+                "local_quality_gate": local_quality_gate,
                 "candidates": scores,
             }
         )
@@ -420,6 +515,15 @@ def select_render_calibrated_color_plan(
             "colour_scope_count": len(reference_scopes),
             "parameterized_part_count": len(parameterized_ids),
             "material_identity_change_count": 0,
+            "local_quality_gate_status": "PASS",
+            "minimum_scorable_scope_pixels": MINIMUM_SCORABLE_SCOPE_PIXELS,
+            "minimum_scope_appearance_score": MINIMUM_SCOPE_APPEARANCE_SCORE,
+            "minimum_scorable_component_member_pixels": (
+                MINIMUM_SCORABLE_COMPONENT_MEMBER_PIXELS
+            ),
+            "minimum_component_member_appearance_score": (
+                MINIMUM_COMPONENT_MEMBER_APPEARANCE_SCORE
+            ),
             "selected_gain_scope_counts": selected_gain_counts,
         },
         "selections": selection_records,
