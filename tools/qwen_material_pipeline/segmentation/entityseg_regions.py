@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import random
 import sys
 import types
@@ -63,6 +64,9 @@ def _seed_inference(seed: int) -> None:
         raise EntitySegRegionError("inference seed must be a non-negative integer")
     random.seed(seed)
     np.random.seed(seed)
+    # CUDA >= 10.2 requires this workspace contract before torch initializes
+    # cuBLAS if deterministic matrix operations are requested.
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     import torch
 
     torch.manual_seed(seed)
@@ -465,13 +469,14 @@ def run(
     local_context_fraction: float = 0.12,
     seed: int = DEFAULT_INFERENCE_SEED,
 ) -> dict[str, Any]:
+    inference_seed = seed
     request_path = request_path.expanduser().resolve(strict=True)
     request = _read_object(request_path, "EntitySeg request")
     owner = request_path.parent
     output_dir = output_dir.expanduser().resolve()
     masks_dir = output_dir / "masks"
     masks_dir.mkdir(parents=True, exist_ok=True)
-    _seed_inference(seed)
+    _seed_inference(inference_seed)
     source_by_view: dict[str, tuple[Path, np.ndarray]] = {}
     foreground_by_view: dict[str, np.ndarray] = {}
     for index, row in enumerate(request.get("source_views", [])):
@@ -541,7 +546,7 @@ def run(
         cropformer_root=cropformer_root,
         config_path=config_path,
         checkpoint_path=checkpoint_path,
-        seed=seed,
+        seed=inference_seed,
     )
     full_candidates: dict[str, list[dict[str, Any]]] = {}
     for view_id, (_path, image) in source_by_view.items():
@@ -572,10 +577,10 @@ def run(
         )
         if seed_doc.get("sha256") != _sha256_file(seed_path):
             raise EntitySegRegionError(f"CAD seed hash mismatch: {view_id}/{part_id}")
-        seed = cv2.imread(str(seed_path), cv2.IMREAD_GRAYSCALE)
-        if seed is None:
+        cad_seed = cv2.imread(str(seed_path), cv2.IMREAD_GRAYSCALE)
+        if cad_seed is None:
             raise EntitySegRegionError(f"unable to decode CAD seed: {seed_path}")
-        seed = seed >= 128
+        cad_seed = cad_seed >= 128
         amodal_doc = raw.get("cad_amodal_template")
         amodal: np.ndarray | None = None
         amodal_path: Path | None = None
@@ -608,7 +613,7 @@ def run(
                 )
             amodal = decoded >= 128
         image_path, image = source_by_view[view_id]
-        if seed.shape != image.shape[:2]:
+        if cad_seed.shape != image.shape[:2]:
             raise EntitySegRegionError(f"CAD seed shape mismatch: {view_id}/{part_id}")
         if amodal is not None and amodal.shape != image.shape[:2]:
             raise EntitySegRegionError(
@@ -631,7 +636,7 @@ def run(
         )
         selected, audits = _select_candidate(
             [*local_candidates, *full_candidates[view_id]],
-            seed=seed,
+            seed=cad_seed,
             amodal=amodal,
             source_image=image,
             minimum_shape_iou=minimum_shape_iou,
@@ -660,7 +665,7 @@ def run(
                 "cad_projection_seed": {
                     "path": str(seed_path),
                     "sha256": _sha256_file(seed_path),
-                    "mask_pixels": int(np.count_nonzero(seed)),
+                    "mask_pixels": int(np.count_nonzero(cad_seed)),
                 },
                 "cad_amodal_template": (
                     {
@@ -732,7 +737,7 @@ def run(
             "alignment_model": "one_whole_workpiece_translation_per_view",
             "per_mesh_pose_change_allowed": False,
             "part_specific_translation_allowed": False,
-            "inference_seed": seed,
+            "inference_seed": inference_seed,
             "deterministic_algorithms": True,
         },
         "records": records,

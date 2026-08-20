@@ -1,13 +1,84 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
+
+import cv2
 import numpy as np
 import pytest
 
+import qwen_material_pipeline.segmentation.entityseg_regions as entityseg_regions
 from qwen_material_pipeline.segmentation.entityseg_regions import (
     _cad_location_agreement,
     _expanded_crop,
     _select_candidate,
 )
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_run_keeps_inference_seed_separate_from_cad_mask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_path = tmp_path / "front.png"
+    seed_path = tmp_path / "front__P0001.png"
+    source = np.zeros((32, 40, 3), dtype=np.uint8)
+    cad_seed = np.zeros((32, 40), dtype=np.uint8)
+    cad_seed[8:24, 10:30] = 255
+    assert cv2.imwrite(str(source_path), source)
+    assert cv2.imwrite(str(seed_path), cad_seed)
+    request = {
+        "source_views": [
+            {
+                "id": "front",
+                "image": str(source_path),
+                "image_sha256": _sha256_file(source_path),
+            }
+        ],
+        "regions": [
+            {
+                "view_id": "front",
+                "group_id": "P0001",
+                "boxes": [[250, 250, 750, 750]],
+                "cad_projection_seed": {
+                    "path": str(seed_path),
+                    "sha256": _sha256_file(seed_path),
+                },
+            }
+        ],
+    }
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    repository = tmp_path / "cropformer"
+    repository.mkdir()
+    config = tmp_path / "config.yaml"
+    checkpoint = tmp_path / "checkpoint.pth"
+    config.write_text("MODEL: {}\n", encoding="utf-8")
+    checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(entityseg_regions, "_seed_inference", lambda _seed: None)
+    monkeypatch.setattr(entityseg_regions, "_setup_predictor", lambda **_kw: object())
+    monkeypatch.setattr(
+        entityseg_regions,
+        "_prediction_candidates",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = entityseg_regions.run(
+        request_path=request_path,
+        cropformer_root=repository,
+        config_path=config,
+        checkpoint_path=checkpoint,
+        output_dir=tmp_path / "output",
+        seed=7,
+    )
+
+    assert result["policy"]["inference_seed"] == 7
+    assert isinstance(result["policy"]["inference_seed"], int)
+    persisted = json.loads((tmp_path / "output" / "manifest.json").read_text())
+    assert persisted["policy"]["inference_seed"] == 7
 
 
 def test_expanded_crop_is_resolution_bounded() -> None:
