@@ -397,6 +397,34 @@ def test_legacy_v2_manifest_without_new_replay_fields_can_resume(
     )
 
 
+def test_sam3_manifest_policy_binds_the_shared_inference_seed(
+    tmp_path: Path,
+) -> None:
+    fixture = _interactive_manifest_fixture(tmp_path, ordered=False)
+    manifest, manifest_path, request_path, repository, checkpoint = fixture
+
+    assert manifest["policy"]["inference_seed"] == 0
+    assert manifest["policy"]["deterministic_algorithms"] is True
+    _validate_interactive_fixture(
+        manifest,
+        manifest_path=manifest_path,
+        request_path=request_path,
+        repository=repository,
+        checkpoint=checkpoint,
+    )
+
+    tampered = copy.deepcopy(manifest)
+    tampered["policy"]["inference_seed"] = 1
+    with pytest.raises(ValueError, match="policy does not match"):
+        _validate_interactive_fixture(
+            tampered,
+            manifest_path=manifest_path,
+            request_path=request_path,
+            repository=repository,
+            checkpoint=checkpoint,
+        )
+
+
 def test_ordered_v3_manifest_validates_exact_event_replay(tmp_path: Path) -> None:
     fixture = _interactive_manifest_fixture(tmp_path, ordered=True)
     manifest, manifest_path, request_path, repository, checkpoint = fixture

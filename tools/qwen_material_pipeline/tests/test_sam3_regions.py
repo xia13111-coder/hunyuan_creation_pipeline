@@ -1062,6 +1062,8 @@ def test_result_policy_binds_automatic_cad_shape_refinement() -> None:
     assert policy["automatic_shape_point_refinement"] == (
         "always_run_same_view_cad_shape_positive_negative_points"
     )
+    assert policy["inference_seed"] == 0
+    assert policy["deterministic_algorithms"] is True
     assert "human_point_replay_policy" not in policy
 
 

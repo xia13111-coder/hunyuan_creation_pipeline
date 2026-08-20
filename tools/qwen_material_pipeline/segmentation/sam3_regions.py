@@ -2041,6 +2041,7 @@ def result_policy(
     human_interactive_requested: bool,
     automatic_shape_interactive_requested: bool,
     ordered_interaction_requested: bool,
+    inference_seed: int = DEFAULT_INFERENCE_SEED,
 ) -> dict[str, Any]:
     """Build the single producer/validator SAM3 result policy contract."""
 
@@ -2049,6 +2050,8 @@ def result_policy(
         "minimum_prompt_overlap": minimum_prompt_overlap,
         "maximum_image_fraction": maximum_image_fraction,
         "minimum_mask_pixels": minimum_mask_pixels,
+        "inference_seed": inference_seed,
+        "deterministic_algorithms": True,
         "minimum_cad_shape_seed_pixels": DEFAULT_MINIMUM_CAD_SHAPE_SEED_PIXELS,
         "minimum_cad_shape_iou": DEFAULT_MINIMUM_CAD_SHAPE_IOU,
         "minimum_cad_shape_area_agreement": (
@@ -2735,6 +2738,7 @@ def run(
             automatic_shape_interactive_requested
         ),
         ordered_interaction_requested=ordered_interaction_requested,
+        inference_seed=seed,
     )
     unsigned: dict[str, Any] = {
         "schema_version": RESULT_SCHEMA_VERSION,
@@ -2762,8 +2766,6 @@ def run(
             ),
         },
     }
-    unsigned["policy"]["inference_seed"] = seed
-    unsigned["policy"]["deterministic_algorithms"] = True
     result = {
         **unsigned,
         "integrity": {"result_sha256": _canonical_sha256(unsigned)},

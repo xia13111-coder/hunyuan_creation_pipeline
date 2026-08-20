@@ -110,6 +110,7 @@ from qwen_material_pipeline.retrieval.visual_materials import (
 )
 from qwen_material_pipeline.segmentation.sam3_regions import (
     CROSS_GROUP_NEAR_DUPLICATE_IOU,
+    DEFAULT_INFERENCE_SEED as SAM3_DEFAULT_INFERENCE_SEED,
     result_policy as sam3_result_policy,
 )
 from qwen_material_pipeline.segmentation.human_foreground import (
@@ -4482,6 +4483,7 @@ def _validate_sam3_manifest(
     minimum_prompt_overlap: float,
     maximum_image_fraction: float,
     minimum_mask_pixels: int,
+    inference_seed: int = SAM3_DEFAULT_INFERENCE_SEED,
 ) -> dict[tuple[str, str], Path]:
     if manifest.get("schema_version") != SAM3_RESULT_SCHEMA_VERSION:
         raise ValueError("SAM3 result uses an unsupported schema")
@@ -4581,6 +4583,7 @@ def _validate_sam3_manifest(
             expected_automatic_shape_interactivity
         ),
         ordered_interaction_requested=expected_ordered_interactivity,
+        inference_seed=inference_seed,
     )
     if manifest.get("policy") != expected_policy:
         raise ValueError("SAM3 result policy does not match the current request")
