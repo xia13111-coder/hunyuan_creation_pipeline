@@ -106,9 +106,11 @@ def test_selects_actual_render_gain_per_scope_and_preserves_mdl_ids(
         "2.0": 1,
     }
     assert audit["summary"]["material_identity_change_count"] == 0
+    assert audit["status"] == "PASS"
+    assert audit["summary"]["local_quality_review_scope_count"] == 0
 
 
-def test_rejects_winning_component_when_a_scorable_member_is_still_wrong(
+def test_retains_best_component_for_review_when_a_scorable_member_is_still_wrong(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source_plan()
@@ -144,19 +146,28 @@ def test_rejects_winning_component_when_a_scorable_member_is_still_wrong(
         },
     )
 
-    with pytest.raises(
-        selection.CorrespondingMaterialColorSelectionError,
-        match="component_member_below_floor:P3",
-    ):
-        selection.select_render_calibrated_color_plan(
-            source_plan=source,
-            candidates=candidates,
-            part_id_evidence={},
-            spatial_mapping_report={},
-        )
+    output, audit = selection.select_render_calibrated_color_plan(
+        source_plan=source,
+        candidates=candidates,
+        part_id_evidence={},
+        spatial_mapping_report={},
+    )
+    assignments = {row["part_id"]: row for row in output["assignments"]}
+    assert assignments["P3"]["parameters"] == {"diffuse_tint": [0.1] * 3}
+    assert assignments["P4"]["parameters"] == {"diffuse_tint": [0.1] * 3}
+    assert audit["status"] == "REVIEW"
+    assert audit["summary"]["local_quality_review_scope_ids"] == ["COMPONENT:C1"]
+    assert audit["summary"]["local_quality_review_part_ids"] == ["P3", "P4"]
+    component = next(
+        row for row in audit["selections"] if row["scope_id"] == "COMPONENT:C1"
+    )
+    assert component["local_quality_gate"]["status"] == "FAIL"
+    assert component["local_quality_gate"]["failure_reasons"] == [
+        "component_member_below_floor:P3"
+    ]
 
 
-def test_rejects_winning_scope_below_absolute_local_quality_floor(
+def test_retains_best_scope_for_review_below_absolute_local_quality_floor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = _source_plan()
@@ -180,9 +191,43 @@ def test_rejects_winning_scope_below_absolute_local_quality_floor(
         },
     )
 
+    output, audit = selection.select_render_calibrated_color_plan(
+        source_plan=source,
+        candidates=candidates,
+        part_id_evidence={},
+        spatial_mapping_report={},
+    )
+    assignments = {row["part_id"]: row for row in output["assignments"]}
+    assert assignments["P3"]["parameters"] == {"diffuse_tint": [0.1] * 3}
+    assert audit["status"] == "REVIEW"
+    assert audit["summary"]["local_quality_pass_scope_count"] == 1
+    assert audit["summary"]["local_quality_review_scope_count"] == 1
+    component = next(
+        row for row in audit["selections"] if row["scope_id"] == "COMPONENT:C1"
+    )
+    assert component["local_quality_gate"]["failure_reasons"] == [
+        "scope_appearance_below_floor"
+    ]
+
+
+def test_malformed_winning_quality_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source_plan()
+    candidates = [_candidate(source, "gain_1", 1.0), _candidate(source, "gain_2", 2.0)]
+    monkeypatch.setattr(
+        selection,
+        "score_part_id_render",
+        lambda **_kwargs: {"appearance_score": float("nan")},
+    )
+    monkeypatch.setattr(
+        selection,
+        "score_component_render",
+        lambda **_kwargs: {"appearance_score": 0.9},
+    )
     with pytest.raises(
         selection.CorrespondingMaterialColorSelectionError,
-        match="scope_appearance_below_floor",
+        match="malformed local quality evidence",
     ):
         selection.select_render_calibrated_color_plan(
             source_plan=source,

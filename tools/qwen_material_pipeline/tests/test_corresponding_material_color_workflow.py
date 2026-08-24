@@ -152,7 +152,7 @@ def test_saved_workflow_runs_candidates_final_render_and_absolute_qa(
 
     def fake_select(arguments: list[str]) -> int:
         _write_json(Path(_argument(arguments, "--output-plan")), {"assignments": []})
-        _write_json(Path(_argument(arguments, "--audit")), {"status": "PASS"})
+        _write_json(Path(_argument(arguments, "--audit")), {"status": "REVIEW"})
         assert arguments.count("--candidate-dir") == 2
         assert _argument(arguments, "--minimum-candidate-count") == "2"
         return 0
@@ -174,6 +174,10 @@ def test_saved_workflow_runs_candidates_final_render_and_absolute_qa(
         command_runner=_fake_runner(commands, ["front", "iso"]),
     )
     assert manifest["workflow_state"] == "COMPLETE"
+    assert manifest["local_quality_status"] == "REVIEW"
+    assert manifest["policy"]["local_quality_rejection_behavior"] == (
+        "retain_best_rendered_candidate_and_continue_with_review"
+    )
     assert manifest["policy"]["optimization_mode"] == "fixed_grid"
     assert len(manifest["candidates"]) == 2
     assert manifest["adaptive_controller_rounds"] == []

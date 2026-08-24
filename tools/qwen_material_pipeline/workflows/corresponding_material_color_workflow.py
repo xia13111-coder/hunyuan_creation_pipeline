@@ -553,6 +553,9 @@ def run_corresponding_material_color_workflow(
             "same_component_shares_material_and_colour": True,
             "actual_cad_render_selection": True,
             "local_part_scope_quality_gate": True,
+            "local_quality_rejection_behavior": (
+                "retain_best_rendered_candidate_and_continue_with_review"
+            ),
             "optimization_mode": optimization_mode,
             "explicit_linear_intensity_gains": (
                 None if calibrated_gains is None else list(calibrated_gains)
@@ -764,6 +767,20 @@ def run_corresponding_material_color_workflow(
             raise CorrespondingMaterialColorWorkflowError(
                 "render-calibrated colour selector returned non-zero"
             )
+        selection_audit_document = _read_object(final_audit)
+        local_quality_status = selection_audit_document.get("status")
+        if local_quality_status not in {"PASS", "REVIEW"}:
+            raise CorrespondingMaterialColorWorkflowError(
+                "render-calibrated colour selector returned an invalid local "
+                "quality status"
+            )
+        if local_quality_status == "REVIEW":
+            print(
+                "Local colour quality remains below floor for one or more scopes; "
+                "retaining the best actual-CAD candidates and continuing with "
+                "explicit REVIEW status.",
+                flush=True,
+            )
         final_render = _render_plan(
             directory=final_dir,
             plan=final_plan,
@@ -818,6 +835,7 @@ def run_corresponding_material_color_workflow(
             {
                 "workflow_state": "COMPLETE",
                 "quality_status": aggregate.get("status"),
+                "local_quality_status": local_quality_status,
                 "candidates": candidate_records,
                 "adaptive_controller_rounds": controller_rounds,
                 "adaptive_completion": adaptive_completion,

@@ -120,7 +120,11 @@ consensus are resolved from the intersection of independently ranked member
 candidates, and an empty intersection fails closed. After identity is fixed,
 actual-CAD renders select reviewed colour parameters and enforce local quality
 for both the component and every sufficiently visible member, so small defects
-cannot disappear inside a whole-view average.
+cannot disappear inside a whole-view average. If every rendered colour
+candidate remains below that local quality floor, the best measured candidate
+is still applied and rendered, while the affected scope is recorded as
+`REVIEW`. This is a generic best-available fallback for every Part-ID and
+component; it does not contain asset-specific exceptions.
 
 ## Assignment and validation rules
 
@@ -133,6 +137,10 @@ cannot disappear inside a whole-view average.
 - Once the winning MDL is recorded, its identity cannot change. Only a
   corresponding-material assignment may author reviewed colour inputs; exact
   presets, roughness, metallic value, textures, and normals remain unchanged.
+- A local colour-quality rejection does not discard the result or stop the
+  stage. It retains the best actual-CAD candidate and propagates explicit
+  review scope/Part-ID records. Malformed evidence, identity changes, broken
+  hashes, and incomplete Part-ID coverage still fail closed.
 - The USD after material assignment is rendered against usable references.
   After dependency collection, the delivered USD is reopened and checked
   again. A failed check stops the pipeline and reports the corresponding stage.

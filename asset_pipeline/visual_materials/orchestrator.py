@@ -3425,8 +3425,11 @@ def _run_visual_qa_stage(
             log_cb,
             "Automatic corresponding-material colour calibration completed: "
             f"iterations={len(color_result.manifest.get('candidates', []))}; "
-            "MDL identity changes=0. The main all-view QA will now independently "
-            "re-evaluate the selected actual-CAD render.",
+            "MDL identity changes=0; "
+            f"local_quality={color_result.selection_audit.get('status')}. "
+            "Below-floor scopes retain their best rendered candidate for review. "
+            "The main all-view QA will now independently re-evaluate the selected "
+            "actual-CAD render.",
         )
 
     spatial_report_path = analysis_dir / "spatial_mapping_report.json"

@@ -57,6 +57,13 @@ class Candidate:
 def _local_quality_gate(
     *, scope_id: str, score: Mapping[str, Any]
 ) -> dict[str, Any]:
+    """Audit local appearance without turning a quality miss into data loss.
+
+    Malformed or unbound evidence remains a hard error.  A well-formed actual-
+    CAD result below the appearance floor is instead returned as ``FAIL`` so
+    the selector can retain the best measured candidate, mark it for review,
+    and still produce the complete asset needed by whole-view QA.
+    """
     raw_pixels = score.get("comparison_pixel_count", 0)
     raw_appearance = score.get("appearance_score")
     if (
@@ -132,11 +139,6 @@ def _local_quality_gate(
         "member_scores": member_records,
         "failure_reasons": failures,
     }
-    if failures:
-        raise CorrespondingMaterialColorSelectionError(
-            f"winning scope {scope_id} failed local actual-CAD quality: "
-            + ", ".join(failures)
-        )
     return gate
 
 
@@ -391,6 +393,8 @@ def select_render_calibrated_color_plan(
     selection_records: list[dict[str, Any]] = []
     selected_gain_counts: dict[str, int] = {}
     parameterized_ids: set[str] = set()
+    review_scope_ids: list[str] = []
+    review_part_ids: set[str] = set()
     for scope_id in sorted(reference_scopes):
         scope = reference_scopes[scope_id]
         members = sorted(
@@ -435,6 +439,9 @@ def select_render_calibrated_color_plan(
             scope_id=scope_id,
             score=_mapping(winner["score"], f"{scope_id}.winning score"),
         )
+        if local_quality_gate["status"] != "PASS":
+            review_scope_ids.append(scope_id)
+            review_part_ids.update(members)
         selected_gain_counts[str(winner["linear_intensity_gain"])] = (
             selected_gain_counts.get(str(winner["linear_intensity_gain"]), 0) + 1
         )
@@ -458,6 +465,10 @@ def select_render_calibrated_color_plan(
                 "selected_candidate_id": winner_id,
                 "linear_intensity_gain": winner["linear_intensity_gain"],
                 "material_id_unchanged": True,
+                "local_quality_gate_status": local_quality_gate["status"],
+                "best_available_result_retained": (
+                    local_quality_gate["status"] != "PASS"
+                ),
             }
             output_assignments[part_id]["provenance"] = provenance
             parameterized_ids.add(part_id)
@@ -500,11 +511,16 @@ def select_render_calibrated_color_plan(
         "parameterized_part_count": len(parameterized_ids),
         "material_identity_changes": 0,
         "selection_authority": "registered_actual_cad_part_scope_appearance_score",
+        "quality_rejection_behavior": (
+            "retain_best_rendered_candidate_and_continue_with_review"
+        ),
+        "review_required_scope_ids": sorted(review_scope_ids),
     }
     output["provenance"] = provenance
+    local_quality_status = "REVIEW" if review_scope_ids else "PASS"
     audit_unsigned = {
         "schema_version": AUDIT_SCHEMA_VERSION,
-        "status": "PASS",
+        "status": local_quality_status,
         "source_plan_sha256": canonical_sha256(source_plan),
         "output_plan_sha256": canonical_sha256(output),
         "part_id_evidence_sha256": canonical_sha256(part_id_evidence),
@@ -515,7 +531,17 @@ def select_render_calibrated_color_plan(
             "colour_scope_count": len(reference_scopes),
             "parameterized_part_count": len(parameterized_ids),
             "material_identity_change_count": 0,
-            "local_quality_gate_status": "PASS",
+            "local_quality_gate_status": local_quality_status,
+            "local_quality_pass_scope_count": (
+                len(reference_scopes) - len(review_scope_ids)
+            ),
+            "local_quality_review_scope_count": len(review_scope_ids),
+            "local_quality_review_part_count": len(review_part_ids),
+            "local_quality_review_scope_ids": sorted(review_scope_ids),
+            "local_quality_review_part_ids": sorted(review_part_ids),
+            "quality_rejection_behavior": (
+                "retain_best_rendered_candidate_and_continue_with_review"
+            ),
             "minimum_scorable_scope_pixels": MINIMUM_SCORABLE_SCOPE_PIXELS,
             "minimum_scope_appearance_score": MINIMUM_SCOPE_APPEARANCE_SCORE,
             "minimum_scorable_component_member_pixels": (

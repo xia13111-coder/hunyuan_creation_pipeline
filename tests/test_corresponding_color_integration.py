@@ -110,13 +110,37 @@ def _fixture(tmp_path: Path) -> dict[str, Path | dict]:
                 "parameterized_part_count": 1,
                 "material_identity_change_count": 0,
                 "local_quality_gate_status": "PASS",
+                "local_quality_pass_scope_count": 1,
+                "local_quality_review_scope_count": 0,
+                "local_quality_review_part_count": 0,
+                "local_quality_review_scope_ids": [],
+                "local_quality_review_part_ids": [],
+                "quality_rejection_behavior": (
+                    "retain_best_rendered_candidate_and_continue_with_review"
+                ),
+                "minimum_scorable_scope_pixels": 32,
+                "minimum_scope_appearance_score": 0.5,
+                "minimum_scorable_component_member_pixels": 16,
+                "minimum_component_member_appearance_score": 0.35,
             },
             "selections": [
                 {
                     "scope_id": "PART:P1",
                     "member_part_ids": ["P1"],
                     "selected_candidate_id": "iteration_01",
-                    "local_quality_gate": {"status": "PASS"},
+                    "selected_appearance_score": 0.9,
+                    "local_quality_gate": {
+                        "status": "PASS",
+                        "comparison_pixel_count": 64,
+                        "appearance_score": 0.9,
+                        "scope_evaluated": True,
+                        "minimum_scorable_scope_pixels": 32,
+                        "minimum_scope_appearance_score": 0.5,
+                        "minimum_scorable_component_member_pixels": 16,
+                        "minimum_component_member_appearance_score": 0.35,
+                        "member_scores": [],
+                        "failure_reasons": [],
+                    },
                 }
             ],
         }
@@ -169,11 +193,15 @@ def _fixture(tmp_path: Path) -> dict[str, Path | dict]:
             "schema_version": "qwen-corresponding-material-color-workflow/v3",
             "workflow_state": "COMPLETE",
             "quality_status": "PASS",
+            "local_quality_status": "PASS",
             "policy": {
                 "material_identity_mutation_allowed": False,
                 "same_component_shares_material_and_colour": True,
                 "actual_cad_render_selection": True,
                 "local_part_scope_quality_gate": True,
+                "local_quality_rejection_behavior": (
+                    "retain_best_rendered_candidate_and_continue_with_review"
+                ),
                 "optimization_mode": "adaptive_per_scope",
             },
             "inputs": {
@@ -207,6 +235,31 @@ def _fixture(tmp_path: Path) -> dict[str, Path | dict]:
     }
 
 
+def _review_selection_audit(document: dict, *, appearance: float) -> dict:
+    audit = copy.deepcopy(document)
+    audit.pop("integrity")
+    audit["status"] = "REVIEW"
+    audit["summary"].update(
+        {
+            "local_quality_gate_status": "REVIEW",
+            "local_quality_pass_scope_count": 0,
+            "local_quality_review_scope_count": 1,
+            "local_quality_review_part_count": 1,
+            "local_quality_review_scope_ids": ["PART:P1"],
+            "local_quality_review_part_ids": ["P1"],
+        }
+    )
+    audit["selections"][0]["selected_appearance_score"] = appearance
+    audit["selections"][0]["local_quality_gate"].update(
+        {
+            "status": "FAIL",
+            "appearance_score": appearance,
+            "failure_reasons": ["scope_appearance_below_floor"],
+        }
+    )
+    return _sealed(audit)
+
+
 def test_mainline_validator_accepts_same_identity_corresponding_colour(
     tmp_path: Path,
 ) -> None:
@@ -234,6 +287,86 @@ def test_mainline_validator_accepts_same_identity_corresponding_colour(
     )
     assert result.applied_count == 2
     assert result.selected_plan["assignments"][1].get("parameters") is None
+
+
+def test_mainline_validator_accepts_best_available_local_review(
+    tmp_path: Path,
+) -> None:
+    paths = _fixture(tmp_path)
+    audit = _review_selection_audit(
+        paths["selection_audit_document"], appearance=0.4
+    )
+    _write(paths["selection_audit"], audit)
+    manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+    manifest["local_quality_status"] = "REVIEW"
+    manifest["outputs"]["selection_audit"]["sha256"] = sha256_file(
+        paths["selection_audit"]
+    )
+    _write(paths["manifest"], manifest)
+
+    result = validate_corresponding_color_result(
+        manifest_path=paths["manifest"],
+        source_plan_path=paths["source_plan"],
+        qwen_choices_path=paths["qwen_choices"],
+        part_id_evidence_path=paths["part_id_evidence"],
+        spatial_mapping_report_path=paths["spatial_mapping_report"],
+        asset_usd_path=paths["asset_usd"],
+        catalog_path=paths["catalog"],
+        registry_path=paths["registry"],
+        material_root_path=paths["material_root"],
+        view_specs_path=paths["view_specs"],
+        reference_manifest_path=paths["reference_manifest"],
+        isaac_python_path=paths["isaac_python"],
+        selected_plan_path=paths["selected_plan"],
+        selection_audit_path=paths["selection_audit"],
+        look_usd_path=paths["look_usd"],
+        apply_report_path=paths["apply_report"],
+        registry_output_path=paths["registry_output"],
+        rendered_registry_path=paths["rendered_registry"],
+        quality_report_path=paths["quality_report"],
+    )
+    assert result.selection_audit["status"] == "REVIEW"
+    assert result.selected_plan["assignments"][0]["parameters"]
+
+
+def test_mainline_validator_rejects_forged_local_review_decision(
+    tmp_path: Path,
+) -> None:
+    paths = _fixture(tmp_path)
+    # The reported appearance is above the fixed floor, so a coherent status/hash
+    # rewrite must still be rejected by the mainline replay.
+    audit = _review_selection_audit(
+        paths["selection_audit_document"], appearance=0.9
+    )
+    _write(paths["selection_audit"], audit)
+    manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+    manifest["local_quality_status"] = "REVIEW"
+    manifest["outputs"]["selection_audit"]["sha256"] = sha256_file(
+        paths["selection_audit"]
+    )
+    _write(paths["manifest"], manifest)
+    with pytest.raises(RuntimeError, match="quality decision changed"):
+        validate_corresponding_color_result(
+            manifest_path=paths["manifest"],
+            source_plan_path=paths["source_plan"],
+            qwen_choices_path=paths["qwen_choices"],
+            part_id_evidence_path=paths["part_id_evidence"],
+            spatial_mapping_report_path=paths["spatial_mapping_report"],
+            asset_usd_path=paths["asset_usd"],
+            catalog_path=paths["catalog"],
+            registry_path=paths["registry"],
+            material_root_path=paths["material_root"],
+            view_specs_path=paths["view_specs"],
+            reference_manifest_path=paths["reference_manifest"],
+            isaac_python_path=paths["isaac_python"],
+            selected_plan_path=paths["selected_plan"],
+            selection_audit_path=paths["selection_audit"],
+            look_usd_path=paths["look_usd"],
+            apply_report_path=paths["apply_report"],
+            registry_output_path=paths["registry_output"],
+            rendered_registry_path=paths["rendered_registry"],
+            quality_report_path=paths["quality_report"],
+        )
 
 
 def test_mainline_validator_rejects_parameter_on_exact_preset(tmp_path: Path) -> None:
@@ -296,3 +429,47 @@ def test_part_id_audit_rebinds_only_colour_and_final_plan_hash(tmp_path: Path) -
     assert rebound["summary"]["color_parameterized_count"] == 1
     assert "corresponding_material_color_calibration" in rebound["parts"][0]
     assert "corresponding_material_color_calibration" not in rebound["parts"][1]
+
+
+def test_part_id_audit_rebinds_best_available_review_without_losing_result(
+    tmp_path: Path,
+) -> None:
+    paths = _fixture(tmp_path)
+    source_plan = paths["source_plan_document"]
+    final_plan = paths["selected_plan_document"]
+    source_audit = _sealed(
+        {
+            "schema_version": "qwen-part-id-material-plan-audit/v1",
+            "output_plan_sha256": canonical_sha256(source_plan),
+            "parts": [
+                {
+                    "part_id": "P1",
+                    "material_id": "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte",
+                },
+                {"part_id": "P2", "material_id": "mdl:Copper.mdl#Copper"},
+            ],
+            "summary": {"part_count": 2, "color_parameterized_count": 0},
+        }
+    )
+    selection_audit = _review_selection_audit(
+        paths["selection_audit_document"], appearance=0.4
+    )
+    rebound = rebind_part_id_audit_for_corresponding_color(
+        source_audit=source_audit,
+        source_plan=source_plan,
+        final_plan=final_plan,
+        selection_audit=selection_audit,
+    )
+    binding = rebound["corresponding_material_color_calibration"]
+    assert binding["local_quality_status"] == "REVIEW"
+    assert binding["review_required_scope_ids"] == ["PART:P1"]
+    assert binding["review_required_part_ids"] == ["P1"]
+    assert rebound["parts"][0]["mdl_color_parameterization"] == {
+        "status": "render_calibrated_corresponding_material",
+        "material_id": "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte",
+        "selected_candidate_id": "iteration_01",
+        "parameters_applied": True,
+        "scope_id": "PART:P1",
+        "local_quality_gate_status": "FAIL",
+        "best_available_result_retained": True,
+    }
