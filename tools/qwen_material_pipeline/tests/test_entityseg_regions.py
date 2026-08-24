@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
+import types
 from pathlib import Path
 
 import cv2
@@ -12,6 +14,7 @@ import qwen_material_pipeline.segmentation.entityseg_regions as entityseg_region
 from qwen_material_pipeline.segmentation.entityseg_regions import (
     _cad_location_agreement,
     _expanded_crop,
+    _prediction_candidates,
     _select_candidate,
 )
 
@@ -59,7 +62,13 @@ def test_run_keeps_inference_seed_separate_from_cad_mask(
     config.write_text("MODEL: {}\n", encoding="utf-8")
     checkpoint.write_bytes(b"checkpoint")
     monkeypatch.setattr(entityseg_regions, "_seed_inference", lambda _seed: None)
-    monkeypatch.setattr(entityseg_regions, "_setup_predictor", lambda **_kw: object())
+    setup_calls: list[dict[str, object]] = []
+
+    def setup_predictor(**kwargs: object) -> object:
+        setup_calls.append(kwargs)
+        return object()
+
+    monkeypatch.setattr(entityseg_regions, "_setup_predictor", setup_predictor)
     monkeypatch.setattr(
         entityseg_regions,
         "_prediction_candidates",
@@ -77,8 +86,125 @@ def test_run_keeps_inference_seed_separate_from_cad_mask(
 
     assert result["policy"]["inference_seed"] == 7
     assert isinstance(result["policy"]["inference_seed"], int)
+    assert result["policy"]["inference_short_edge"] == 800
+    assert result["policy"]["crop_sample_count"] == 4
+    assert setup_calls == [
+        {
+            "cropformer_root": repository,
+            "config_path": config,
+            "checkpoint_path": checkpoint,
+            "seed": 7,
+            "inference_short_edge": 800,
+        }
+    ]
     persisted = json.loads((tmp_path / "output" / "manifest.json").read_text())
     assert persisted["policy"]["inference_seed"] == 7
+    assert persisted["policy"]["inference_short_edge"] == 800
+    assert persisted["policy"]["crop_sample_count"] == 4
+
+
+def test_inference_short_edge_parser_preserves_the_audited_default() -> None:
+    parser = entityseg_regions._parser()
+    common = [
+        "--request",
+        "request.json",
+        "--cropformer-root",
+        "cropformer",
+        "--config",
+        "config.yaml",
+        "--checkpoint",
+        "checkpoint.pth",
+        "--output-dir",
+        "output",
+    ]
+
+    assert parser.parse_args(common).inference_short_edge == 800
+    assert (
+        parser.parse_args([*common, "--inference-short-edge", "512"])
+        .inference_short_edge
+        == 512
+    )
+
+
+def test_seed_inference_enables_expandable_cuda_segments_before_torch_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+    fake_cuda = types.SimpleNamespace(
+        is_available=lambda: True,
+        manual_seed_all=lambda seed: calls.append(("cuda_seed", seed)),
+    )
+    fake_cudnn = types.SimpleNamespace(benchmark=True, deterministic=False)
+    fake_torch = types.SimpleNamespace(
+        cuda=fake_cuda,
+        backends=types.SimpleNamespace(cudnn=fake_cudnn),
+        manual_seed=lambda seed: calls.append(("cpu_seed", seed)),
+        use_deterministic_algorithms=lambda enabled, warn_only: calls.append(
+            ("deterministic", (enabled, warn_only))
+        ),
+    )
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    entityseg_regions._seed_inference(9)
+
+    assert (
+        entityseg_regions.os.environ["PYTORCH_CUDA_ALLOC_CONF"]
+        == "expandable_segments:True"
+    )
+    assert ("cpu_seed", 9) in calls
+    assert ("cuda_seed", 9) in calls
+    assert fake_cudnn.benchmark is False
+    assert fake_cudnn.deterministic is True
+
+
+def test_prediction_candidates_release_cuda_outputs_after_cpu_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty_cache_calls: list[bool] = []
+
+    class FakeTensor:
+        def __init__(self, value: np.ndarray) -> None:
+            self.value = value
+
+        def detach(self) -> FakeTensor:
+            return self
+
+        def to(self, _device: str) -> FakeTensor:
+            return self
+
+        def float(self) -> FakeTensor:
+            return self
+
+        def numpy(self) -> np.ndarray:
+            return self.value
+
+    instances = types.SimpleNamespace(
+        pred_masks=FakeTensor(np.ones((1, 4, 5), dtype=np.uint8)),
+        scores=FakeTensor(np.asarray([0.9], dtype=np.float32)),
+    )
+    predictor = types.SimpleNamespace(
+        run_on_image=lambda _image: {"instances": instances}
+    )
+    fake_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(
+            is_available=lambda: True,
+            empty_cache=lambda: empty_cache_calls.append(True),
+        )
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    candidates = _prediction_candidates(
+        predictor,
+        np.zeros((4, 5, 3), dtype=np.uint8),
+        source="test",
+        full_shape=(4, 5),
+        minimum_score=0.3,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["mask"].shape == (4, 5)
+    assert empty_cache_calls == [True]
 
 
 def test_expanded_crop_is_resolution_bounded() -> None:

@@ -53,6 +53,8 @@ DEFAULT_MINIMUM_MASK_PIXELS = 16
 DEFAULT_MAXIMUM_CANDIDATES_PER_SOURCE = 12
 DEFAULT_MAXIMUM_CAD_CENTROID_DISTANCE = 0.15
 DEFAULT_INFERENCE_SEED = 0
+DEFAULT_INFERENCE_SHORT_EDGE = 800
+DEFAULT_CROP_SAMPLE_COUNT = 4
 
 
 class EntitySegRegionError(ValueError):
@@ -67,6 +69,11 @@ def _seed_inference(seed: int) -> None:
     # CUDA >= 10.2 requires this workspace contract before torch initializes
     # cuBLAS if deterministic matrix operations are requested.
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    # CropFormer produces several high-resolution feature pyramids per input.
+    # Let PyTorch grow CUDA segments instead of reserving several mutually
+    # unusable blocks; this is especially important when Isaac/desktop clients
+    # share the GPU with this isolated inference process.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     import torch
 
     torch.manual_seed(seed)
@@ -223,7 +230,16 @@ def _setup_predictor(
     config_path: Path,
     checkpoint_path: Path,
     seed: int,
+    inference_short_edge: int,
 ) -> Any:
+    if (
+        isinstance(inference_short_edge, bool)
+        or not isinstance(inference_short_edge, int)
+        or inference_short_edge < 256
+    ):
+        raise EntitySegRegionError(
+            "CropFormer inference short edge must be an integer of at least 256 pixels"
+        )
     root = cropformer_root.expanduser().resolve(strict=True)
     demo_root = root / "demo_cropformer"
     for path in (str(demo_root), str(root)):
@@ -265,6 +281,11 @@ def _setup_predictor(
     cfg.merge_from_file(str(config_path.expanduser().resolve(strict=True)))
     cfg.MODEL.WEIGHTS = str(checkpoint_path.expanduser().resolve(strict=True))
     cfg.SEED = seed
+    # Pin and audit CropFormer's native inference resolution.  CUDA memory is
+    # controlled by expandable allocator segments and immediate output release,
+    # not by silently degrading the model's spatial resolution or crop coverage.
+    cfg.INPUT.MIN_SIZE_TEST = inference_short_edge
+    cfg.ENTITY.CROP_SAMPLE_NUM_TEST = DEFAULT_CROP_SAMPLE_COUNT
     cfg.freeze()
     return VisualizationDemo(cfg)
 
@@ -284,6 +305,20 @@ def _prediction_candidates(
         raise EntitySegRegionError("CropFormer output has no instance masks")
     masks = instances.pred_masks.detach().to("cpu").numpy()
     scores = instances.scores.detach().float().to("cpu").numpy().reshape(-1)
+    # Nothing below needs a CUDA tensor.  Release the prediction graph/output
+    # before retaining CPU masks for later CAD-shape comparison so hundreds of
+    # local crops cannot accumulate allocator reservations.
+    del instances
+    del predictions
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except (ImportError, RuntimeError):
+        # CPU-only tests and already-failed CUDA runtimes do not need cache
+        # maintenance; candidate validation below remains fail-closed.
+        pass
     if masks.ndim != 3 or len(masks) != len(scores):
         raise EntitySegRegionError("CropFormer mask and score arrays are incompatible")
     full_height, full_width = full_shape
@@ -468,6 +503,7 @@ def run(
     maximum_centroid_distance: float = DEFAULT_MAXIMUM_CAD_CENTROID_DISTANCE,
     local_context_fraction: float = 0.12,
     seed: int = DEFAULT_INFERENCE_SEED,
+    inference_short_edge: int = DEFAULT_INFERENCE_SHORT_EDGE,
 ) -> dict[str, Any]:
     inference_seed = seed
     request_path = request_path.expanduser().resolve(strict=True)
@@ -547,6 +583,7 @@ def run(
         config_path=config_path,
         checkpoint_path=checkpoint_path,
         seed=inference_seed,
+        inference_short_edge=inference_short_edge,
     )
     full_candidates: dict[str, list[dict[str, Any]]] = {}
     for view_id, (_path, image) in source_by_view.items():
@@ -738,6 +775,8 @@ def run(
             "per_mesh_pose_change_allowed": False,
             "part_specific_translation_allowed": False,
             "inference_seed": inference_seed,
+            "inference_short_edge": inference_short_edge,
+            "crop_sample_count": DEFAULT_CROP_SAMPLE_COUNT,
             "deterministic_algorithms": True,
         },
         "records": records,
@@ -784,6 +823,15 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAXIMUM_CAD_CENTROID_DISTANCE,
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_INFERENCE_SEED)
+    parser.add_argument(
+        "--inference-short-edge",
+        type=int,
+        default=DEFAULT_INFERENCE_SHORT_EDGE,
+        help=(
+            "CropFormer resize short edge; 800 preserves the audited upstream "
+            "inference profile and native four-crop fusion"
+        ),
+    )
     return parser
 
 
@@ -801,6 +849,7 @@ def main() -> int:
         maximum_centroid_distance=args.maximum_centroid_distance,
         local_context_fraction=args.local_context_fraction,
         seed=args.seed,
+        inference_short_edge=args.inference_short_edge,
     )
     return 0
 
