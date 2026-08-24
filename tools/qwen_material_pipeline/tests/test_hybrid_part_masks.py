@@ -17,6 +17,7 @@ from qwen_material_pipeline.segmentation.hybrid_part_masks import (
     _connected_component_count,
     _entity_aligned_cad_seed,
     _entity_rejection_reasons,
+    _full_resolution_similarity_fallback,
     _iterative_shape_guided_refinement,
     _model_domain_shape_references,
     _part_color,
@@ -320,6 +321,8 @@ def test_model_domain_reference_keeps_shape_on_model_image(tmp_path: Path) -> No
     red, green, blue = _part_color("P0001")
     part_ids[6:18, 5:15] = (blue, green, red)
     part_ids[22:26, 30:36] = (blue, green, red)
+    red_2, green_2, blue_2 = _part_color("P0002")
+    part_ids[8:20, 22:28] = (blue_2, green_2, red_2)
     complete = np.zeros((32, 40), dtype=np.uint8)
     complete[5:19, 4:16] = 255
     complete[21:27, 29:37] = 255
@@ -345,6 +348,7 @@ def test_model_domain_reference_keeps_shape_on_model_image(tmp_path: Path) -> No
                     "part_ids": str(part_ids_path),
                     "visible_parts": [
                         {"part_id": "P0001", "pixels": 144},
+                        {"part_id": "P0002", "pixels": 72},
                     ],
                 }
             ]
@@ -403,6 +407,24 @@ def test_model_domain_reference_keeps_shape_on_model_image(tmp_path: Path) -> No
     assert reference["audit"]["model_selected_component_indices"] == [1]
     assert np.count_nonzero(reference["display_visible_shape"]) == 120
     assert len(reference["visible_shape"]) == 1
+    assert np.count_nonzero(reference["assembly_neighbor_context"]) > 0
+    assert reference["audit"]["assembly_context_role"] == (
+        "preserve_target_position_relative_to_other_visible_cad_parts"
+    )
+
+
+def test_tiny_model_mask_registration_fallback_stays_full_resolution() -> None:
+    source = np.zeros((512, 512), dtype=bool)
+    source[240:242, 300:308] = True
+    target = np.zeros((443, 582), dtype=bool)
+    target[210:213, 355:366] = True
+
+    registered, audit = _full_resolution_similarity_fallback(source, target)
+
+    assert np.count_nonzero(registered) > 0
+    assert audit["method"] == "full_resolution_tiny_mask_similarity_fallback"
+    assert audit["downsampling_applied"] is False
+    assert np.asarray(audit["affine_2x3"]).shape == (2, 3)
 
 
 def test_hybrid_replays_sam_shared_camera_template_translation() -> None:

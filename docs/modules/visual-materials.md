@@ -89,6 +89,20 @@ whole-workpiece camera residual; no individual mesh may translate, rotate, or
 scale. If local refinement is unreliable, the workflow uses the
 global projection or marks the part as unobserved. These adjustments affect
 evidence extraction only, never CAD geometry.
+The target Part-ID also retains its coordinates and neighbour relationships in
+the full-assembly CAD render. The sealed assembly projection first registers
+the model-image target shape as a photograph-space proposal. A bounding-box-
+scaled similarity search then compares photograph edges, SAM3/EntitySeg
+support, and model shape while preventing entry into the scale-eroded interior
+of neighbouring CAD parts. A proposal replaces the baseline only when photo
+edges and model shape do not regress and candidate support remains above the
+original CAD-location floor. If fast registration erases a tiny part during
+downsampling, a full-resolution centroid, principal-axis, and area fallback is
+used; proposal failure falls back to the audited baseline instead of aborting
+the batch.
+When occlusion splits one Part-ID into several visible components, individual
+components may aid scoring, but the final proposal must retain the union of all
+CAD components associated with the current observation.
 Production SAM3 and EntitySeg entry points use one fixed inference seed and seal
 that seed together with request and model hashes. A retry with identical inputs
 therefore cannot silently change Part-ID evidence through random initialization.
@@ -102,7 +116,7 @@ run instead of silently continuing with a two-view material decision.
 | --- | --- |
 | SAM3 | Whole-workpiece foreground and per-part initialization candidates. |
 | EntitySeg / CropFormer | Class-agnostic initialization candidates accepted only inside the CAD safety contract. |
-| Iterative boundary optimizer | Combines isolated shape, assembled visibility, prior masks, and current-image edges; it never moves an individual mesh. |
+| Iterative boundary optimizer | Combines model-image target shape, assembly-relative neighbour position, visibility, prior masks, and image edges; it transforms only 2-D proposals and never moves an individual mesh. |
 | MVInverse | Albedo, roughness, and metallic estimates inside accepted masks. |
 | SigLIP2 | Retrieve visually related MDLs from NVIDIA `Materials/Base`. |
 | DINOv2 | Compare local surface and texture appearance. |

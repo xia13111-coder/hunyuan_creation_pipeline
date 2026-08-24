@@ -152,11 +152,48 @@ def _locally_registered_template(
     )
 
 
+def _model_shape_photo_proposal(
+    model_shape: np.ndarray,
+    row: Mapping[str, Any],
+    expected_shape: tuple[int, int],
+) -> tuple[np.ndarray, bool]:
+    iterative = row.get("iterative_refinement")
+    audit = (
+        iterative.get("model_domain_photo_registration")
+        if isinstance(iterative, Mapping)
+        else None
+    )
+    affine = (
+        audit.get("model_to_photo_affine_2x3") if isinstance(audit, Mapping) else None
+    )
+    if (
+        not isinstance(affine, list)
+        or len(affine) != 2
+        or any(not isinstance(value, list) or len(value) != 3 for value in affine)
+    ):
+        return np.zeros(expected_shape, dtype=bool), False
+    matrix = np.asarray(affine, dtype=np.float32)
+    proposal = (
+        cv2.warpAffine(
+            model_shape.astype(np.uint8),
+            matrix,
+            (expected_shape[1], expected_shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        > 0
+    )
+    return proposal, bool(audit.get("accepted") is True)
+
+
 def _tile(
     *,
     source: np.ndarray,
     model_source: np.ndarray,
     model_amodal: np.ndarray,
+    model_photo_proposal: np.ndarray,
+    model_photo_proposal_accepted: bool,
     seed: np.ndarray,
     amodal: np.ndarray,
     sam: np.ndarray,
@@ -166,7 +203,7 @@ def _tile(
     entity_accepted: bool,
     selected_source: str,
 ) -> np.ndarray:
-    union = seed | sam | entity | hybrid
+    union = seed | model_photo_proposal | sam | entity | hybrid
     ys, xs = np.where(union)
     pad = 20
     left = max(0, int(xs.min()) - pad)
@@ -224,6 +261,15 @@ def _tile(
         )
     )
     definitions = (
+        (
+            (
+                "MODEL SHAPE: registered"
+                if model_photo_proposal_accepted
+                else "MODEL SHAPE: proposal rejected"
+            ),
+            model_photo_proposal,
+            (0, 255, 255),
+        ),
         ("REFERENCE: CAD mask registered", seed, (0, 0, 255)),
         ("SAM3" if sam_accepted else "SAM3 rejected", sam, (0, 255, 0)),
         (
@@ -411,6 +457,46 @@ def build_report(
         sam_mask = _record_mask(sam_root, sam_row, source.shape[:2])
         entity_mask = _record_mask(entity_root, entity_row, source.shape[:2])
         final_mask = _record_mask(hybrid_root, final_row, source.shape[:2])
+        model_proposal_shape = model_amodal
+        iterative = final_row.get("iterative_refinement")
+        model_registration = (
+            iterative.get("model_domain_photo_registration")
+            if isinstance(iterative, Mapping)
+            else None
+        )
+        variant_index = (
+            model_registration.get("variant_index")
+            if isinstance(model_registration, Mapping)
+            else None
+        )
+        variant_documents = (
+            model_reference.get("model_shape_variant_masks")
+            if isinstance(model_reference, Mapping)
+            else None
+        )
+        if isinstance(variant_index, int) and isinstance(variant_documents, list):
+            variant_document = next(
+                (
+                    document
+                    for document in variant_documents
+                    if isinstance(document, Mapping)
+                    and document.get("variant_index") == variant_index
+                ),
+                None,
+            )
+            if isinstance(variant_document, Mapping):
+                model_proposal_shape = _document_mask(
+                    variant_document,
+                    label=f"selected model-space shape variant {key}",
+                )
+        (
+            model_photo_proposal,
+            model_photo_proposal_accepted,
+        ) = _model_shape_photo_proposal(
+            model_proposal_shape,
+            final_row,
+            source.shape[:2],
+        )
         decision = str(final_row["decision"])
         asset_name = f"{decision}__{key[0]}__{key[1]}.png"
         asset_path = assets_dir / asset_name
@@ -418,6 +504,8 @@ def build_report(
             source=source,
             model_source=model_source,
             model_amodal=model_amodal,
+            model_photo_proposal=model_photo_proposal,
+            model_photo_proposal_accepted=model_photo_proposal_accepted,
             seed=seed,
             amodal=amodal,
             sam=sam_mask,
@@ -495,6 +583,21 @@ def build_report(
                 )
             refinement = row.get("iterative_refinement")
             if isinstance(refinement, Mapping):
+                model_registration = refinement.get("model_domain_photo_registration")
+                if isinstance(model_registration, Mapping):
+                    model_translation = model_registration.get(
+                        "local_translation_xy_pixels", [0, 0]
+                    )
+                    model_status = (
+                        "采用" if model_registration.get("accepted") is True else "未采用"
+                    )
+                    details.append(
+                        "模型图零件形状→参考图自动配准 "
+                        f"{float(model_registration.get('local_uniform_scale', 1.0)):.3f}× / "
+                        f"{float(model_registration.get('local_rotation_degrees', 0.0)):+.2f}° / "
+                        f"({int(model_translation[0]):+d}, {int(model_translation[1]):+d}) px；"
+                        f"整机邻件位置约束{model_status}"
+                    )
                 local_registration = refinement.get(
                     "reference_space_local_registration"
                 )
@@ -566,7 +669,7 @@ h1{{margin:.1em 0}}h2{{margin-top:42px}}.lead,.card p{{color:var(--muted)}}.stat
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(590px,1fr));gap:14px}}.card{{padding:12px;overflow:hidden}}.card h3{{margin:0 0 8px}}
 .card img{{display:block;width:100%;height:auto;border-radius:7px}}.card p{{margin:8px 2px 0}}@media(max-width:650px){{main{{padding:14px}}.grid{{grid-template-columns:1fr}}}}
 </style></head><body><main><h1>SAM3 + EntitySeg 辅助分割</h1>
-<p class="lead">第一栏是在 CAD 模型渲染图上高亮目标 Part-ID：保持整件相机和刚体位姿不变，目标形状完全来自模型，不把它画到参考照片上。第二栏是参考图平面中的 CAD 分割模板：从整件相机投影出发，只允许按零件尺度自动界定的小范围二维平移/旋转贴合照片边缘；它不修改 USD、相机或任何 mesh 变换。绿色和青色是参考图上的 SAM3 与 EntitySeg 候选；紫色不是二选一，而是利用模型侧形状、二维注册后的可见性约束和照片边缘逐轮优化出的结果。</p>
+<p class="lead">第一栏是在 CAD 整机渲染图上高亮目标 Part-ID，显示它相对其他零件的真实位置。第二栏把该模型形状通过整机位置锚点自动注册到参考图；第三栏是整机 CAD 的可见投影。模型形状只允许在由当前零件尺度自动确定的小范围内校正，并以周围 CAD 零件作为禁入约束，不修改 USD、相机或任何 mesh 变换。绿色和青色是 SAM3 与 EntitySeg 候选；紫色是综合模型形状、整机相对位置、候选与照片边缘优化出的结果。</p>
 <div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">联合候选迭代 <b>{summary['decision_counts'].get('iterative_refinement_from_sam3_entityseg', 0)}</b></div><div class="stat">单候选 + mesh 迭代 <b>{summary['decision_counts'].get('iterative_refinement_from_sam3', 0) + summary['decision_counts'].get('iterative_refinement_from_entityseg', 0)}</b></div><div class="stat">最终边界：迭代优化 <b>{summary['selected_source_counts'].get('shape_guided_iterative', 0)}</b></div></div>
 <p class="lead">这是正式 Part-ID 材质证据使用的边界融合结果；无安全候选时会回退到已审计的 CAD 投影，不会猜测零件边界。点击图片可查看原始像素。</p>
 <nav>{''.join(f'<a href="#{key}">{value}</a>' for key,value in labels.items())}</nav>{''.join(sections)}</main></body></html>"""

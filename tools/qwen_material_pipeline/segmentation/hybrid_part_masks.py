@@ -15,11 +15,15 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
+from ..evidence.part_id_projection import (
+    PartIdProjectionError,
+    _register_similarity_mask,
+)
 from .entityseg_regions import EntitySegRegionError, _boundary_metrics
 from .sam3_regions import _normalized_shape_agreement
 
 
-SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v4"
+SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v5"
 LEGACY_SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v2"
 MAXIMUM_ENTITY_TO_CAD_AREA_RATIO = 1.85
 MINIMUM_ENTITY_CAD_DIRECT_IOU = 0.50
@@ -201,7 +205,7 @@ def _model_domain_shape_references(
         if isinstance(row, Mapping) and isinstance(row.get("view_id"), str)
     }
     references: dict[tuple[str, str], dict[str, Any]] = {}
-    decoded_views: dict[str, tuple[Path, str, np.ndarray, Path, str]] = {}
+    decoded_views: dict[str, tuple[Path, str, np.ndarray, np.ndarray, Path, str]] = {}
     for key in sorted(records):
         row = records[key]
         raw_document = row.get("raw_amodal_mask")
@@ -233,10 +237,22 @@ def _model_domain_shape_references(
                 raise EntitySegRegionError(
                     f"CAD model RGB/Part-ID dimensions differ: {render_view_id}"
                 )
+            colours, counts = np.unique(
+                part_ids_image.reshape(-1, 3), axis=0, return_counts=True
+            )
+            background_colour = colours[int(np.argmax(counts))]
+            assembly_visible_shape = np.any(
+                part_ids_image != background_colour.reshape(1, 1, 3), axis=2
+            )
+            if not np.any(assembly_visible_shape):
+                raise EntitySegRegionError(
+                    f"CAD model assembly context is empty: {render_view_id}"
+                )
             decoded_views[str(render_view_id)] = (
                 part_ids_path,
                 part_ids_sha256,
                 part_ids_image,
+                assembly_visible_shape,
                 model_image_path,
                 model_image_sha256,
             )
@@ -244,6 +260,7 @@ def _model_domain_shape_references(
             part_ids_path,
             part_ids_sha256,
             part_ids_image,
+            assembly_visible_shape,
             model_image_path,
             model_image_sha256,
         ) = decoded_views[str(render_view_id)]
@@ -340,6 +357,84 @@ def _model_domain_shape_references(
                 f"no CAD-model-image component corresponds to the local observation: {key}"
             )
         local_visible_shape = np.isin(component_labels, selected_components)
+        rotated_assembly = np.rot90(
+            assembly_visible_shape.astype(np.uint8), quarter_turns % 4
+        ).copy()
+        normalized_assembly = cv2.warpAffine(
+            rotated_assembly,
+            bbox_affine,
+            (reference_modal.shape[1], reference_modal.shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        reference_assembly = (
+            cv2.warpAffine(
+                normalized_assembly,
+                ecc_warp,
+                (reference_modal.shape[1], reference_modal.shape[0]),
+                flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+            > 0
+        )
+        rotated_target = np.rot90(
+            visible_shape.astype(np.uint8), quarter_turns % 4
+        ).copy()
+        normalized_target = cv2.warpAffine(
+            rotated_target,
+            bbox_affine,
+            (reference_modal.shape[1], reference_modal.shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        reference_target = (
+            cv2.warpAffine(
+                normalized_target,
+                ecc_warp,
+                (reference_modal.shape[1], reference_modal.shape[0]),
+                flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+            > 0
+        )
+        target_y, target_x = np.where(reference_target)
+        target_short_extent = (
+            min(
+                int(target_x.max() - target_x.min() + 1),
+                int(target_y.max() - target_y.min() + 1),
+            )
+            if len(target_x)
+            else 1
+        )
+        separation_radius = max(
+            1,
+            int(round(MAXIMUM_CAD_SUPPORT_RADIUS_FRACTION * target_short_extent)),
+        )
+        target_exclusion = (
+            cv2.dilate(
+                reference_target.astype(np.uint8),
+                cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE,
+                    (2 * separation_radius + 1, 2 * separation_radius + 1),
+                ),
+            )
+            > 0
+        )
+        assembly_neighbor_context = reference_assembly & ~target_exclusion
+        assembly_neighbor_context = (
+            cv2.erode(
+                assembly_neighbor_context.astype(np.uint8),
+                cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE,
+                    (2 * separation_radius + 1, 2 * separation_radius + 1),
+                ),
+            )
+            > 0
+        )
         comparison_variants = [np.rot90(local_visible_shape, quarter_turns % 4).copy()]
         for component_index in selected_components:
             component_variant = np.rot90(
@@ -354,6 +449,7 @@ def _model_domain_shape_references(
             "visible_shape": comparison_variants,
             "display_visible_shape": local_visible_shape,
             "complete_shape": np.rot90(complete_shape, quarter_turns % 4).copy(),
+            "assembly_neighbor_context": assembly_neighbor_context,
             "audit": {
                 "coordinate_domain": "cad_model_render_image",
                 "comparison_mode": (
@@ -380,6 +476,16 @@ def _model_domain_shape_references(
                 "component_association_role": (
                     "identify_local_model_image_shape_only_not_photo_boundary"
                 ),
+                "assembly_context_role": (
+                    "preserve_target_position_relative_to_other_visible_cad_parts"
+                ),
+                "assembly_visible_pixels_in_reference_domain": int(
+                    np.count_nonzero(reference_assembly)
+                ),
+                "assembly_neighbor_context_pixels": int(
+                    np.count_nonzero(assembly_neighbor_context)
+                ),
+                "target_neighbor_separation_radius_pixels": separation_radius,
                 "model_complete_part_pixels": int(np.count_nonzero(complete_shape)),
                 "model_visible_precision_against_complete": visible_precision,
                 "raw_complete_shape": {
@@ -958,6 +1064,404 @@ def _register_visible_template_to_photo(
     )
 
 
+def _full_resolution_similarity_fallback(
+    source: np.ndarray,
+    target: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Map tiny masks without downsampling either coordinate domain."""
+
+    source_selected = np.asarray(source, dtype=bool)
+    target_selected = np.asarray(target, dtype=bool)
+    source_y, source_x = np.where(source_selected)
+    target_y, target_x = np.where(target_selected)
+    if not len(source_x) or not len(target_x):
+        raise EntitySegRegionError(
+            "tiny-mask similarity fallback received an empty mask"
+        )
+
+    def centroid_and_axis(
+        xs: np.ndarray, ys: np.ndarray
+    ) -> tuple[tuple[float, float], float]:
+        centroid = (float(xs.mean()), float(ys.mean()))
+        centered = np.column_stack((xs - centroid[0], ys - centroid[1]))
+        covariance = centered.T @ centered / max(len(centered), 1)
+        values, vectors = np.linalg.eigh(covariance)
+        axis = vectors[:, int(np.argmax(values))]
+        angle = float(np.degrees(np.arctan2(axis[1], axis[0])))
+        return centroid, angle
+
+    source_centroid, source_angle = centroid_and_axis(source_x, source_y)
+    target_centroid, target_angle = centroid_and_axis(target_x, target_y)
+    area_scale = math.sqrt(float(len(target_x)) / float(len(source_x)))
+    rotations = {
+        0.0,
+        target_angle - source_angle,
+        source_angle - target_angle,
+        target_angle - source_angle + 180.0,
+        target_angle - source_angle - 180.0,
+    }
+    scales = {
+        float(np.clip(area_scale * multiplier, 0.35, 3.0))
+        for multiplier in (0.85, 1.0, 1.15)
+    }
+    audited: list[tuple[tuple[float, float, float], np.ndarray, np.ndarray]] = []
+    for scale in sorted(scales):
+        for rotation in sorted(rotations):
+            matrix = cv2.getRotationMatrix2D(source_centroid, rotation, scale)
+            matrix[0, 2] += target_centroid[0] - source_centroid[0]
+            matrix[1, 2] += target_centroid[1] - source_centroid[1]
+            warped = (
+                cv2.warpAffine(
+                    source_selected.astype(np.uint8),
+                    matrix,
+                    (target_selected.shape[1], target_selected.shape[0]),
+                    flags=cv2.INTER_NEAREST,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0,
+                )
+                > 0
+            )
+            intersection = int(np.count_nonzero(warped & target_selected))
+            union = int(np.count_nonzero(warped | target_selected))
+            iou = intersection / max(union, 1)
+            audited.append(
+                (
+                    (iou, -abs(scale - area_scale), -abs(rotation)),
+                    warped,
+                    matrix,
+                )
+            )
+    audited.sort(key=lambda item: item[0], reverse=True)
+    _key, registered, matrix = audited[0]
+    return registered.astype(np.uint8) * 255, {
+        "method": "full_resolution_tiny_mask_similarity_fallback",
+        "affine_2x3": [[float(value) for value in row] for row in matrix],
+        "iou": float(audited[0][0][0]),
+        "source_pixels": int(len(source_x)),
+        "target_pixels": int(len(target_x)),
+        "downsampling_applied": False,
+    }
+
+
+def _register_model_shape_to_photo(
+    *,
+    image: np.ndarray,
+    visible_seed: np.ndarray,
+    model_shape_variants: list[np.ndarray],
+    candidate_masks: list[np.ndarray],
+    assembly_neighbor_context: np.ndarray | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Register the model-image Part-ID shape as a photo-space proposal only."""
+
+    visible = np.asarray(visible_seed, dtype=bool)
+    variants = [np.asarray(value, dtype=bool) for value in model_shape_variants]
+    candidates = [np.asarray(value, dtype=bool) for value in candidate_masks]
+    neighbor_context = (
+        np.asarray(assembly_neighbor_context, dtype=bool)
+        if assembly_neighbor_context is not None
+        else np.zeros_like(visible)
+    )
+    if (
+        visible.shape != image.shape[:2]
+        or not np.any(visible)
+        or not variants
+        or any(value.ndim != 2 or not np.any(value) for value in variants)
+        or not candidates
+        or any(
+            value.shape != visible.shape or not np.any(value) for value in candidates
+        )
+        or neighbor_context.shape != visible.shape
+    ):
+        raise EntitySegRegionError("model-shape photo registration inputs are invalid")
+
+    candidate_union = np.logical_or.reduce(candidates)
+    edge_field = _normalized_image_gradient(image)
+    audited: list[
+        tuple[tuple[float, float, float, int], np.ndarray, dict[str, Any]]
+    ] = []
+    # Variant zero is the union of every model-image component associated with
+    # the local observation. Component-only variants remain scoring aids; a
+    # final proposal must not drop another visible piece of the same Part-ID.
+    for variant_index, variant in enumerate(variants[:1]):
+        try:
+            mapped_raw, base_registration = _register_similarity_mask(
+                variant.astype(np.uint8) * 255,
+                visible.astype(np.uint8) * 255,
+            )
+        except PartIdProjectionError:
+            mapped_raw, base_registration = _full_resolution_similarity_fallback(
+                variant,
+                visible,
+            )
+        mapped = mapped_raw > 0
+        ys, xs = np.where(mapped)
+        if not len(xs):
+            continue
+        width = int(xs.max() - xs.min() + 1)
+        height = int(ys.max() - ys.min() + 1)
+        diagonal = float(np.hypot(width, height))
+        short_extent = max(1, min(width, height))
+        maximum_translation = max(2, int(round(0.08 * short_extent)))
+        maximum_rotation = float(
+            np.degrees(np.arctan2(float(maximum_translation), max(0.5 * diagonal, 1.0)))
+        )
+        maximum_scale_delta = min(
+            0.25, 3.0 * float(maximum_translation) / float(short_extent)
+        )
+        translations = sorted(
+            {
+                int(round(value))
+                for value in np.linspace(-maximum_translation, maximum_translation, 7)
+            }
+        )
+        rotations = [
+            float(value)
+            for value in np.linspace(-maximum_rotation, maximum_rotation, 7)
+        ]
+        scales = [
+            float(value)
+            for value in np.linspace(
+                1.0 - maximum_scale_delta,
+                1.0 + maximum_scale_delta,
+                7,
+            )
+        ]
+
+        union_y, union_x = np.where(mapped | candidate_union)
+        margin = maximum_translation + 3
+        top = max(0, int(union_y.min()) - margin)
+        bottom = min(visible.shape[0], int(union_y.max()) + margin + 1)
+        left = max(0, int(union_x.min()) - margin)
+        right = min(visible.shape[1], int(union_x.max()) + margin + 1)
+        local_mapped = mapped[top:bottom, left:right]
+        local_candidates = candidate_union[top:bottom, left:right]
+        local_edges = edge_field[top:bottom, left:right]
+        local_neighbors = neighbor_context[top:bottom, left:right]
+        center = (float(xs.mean()) - left, float(ys.mean()) - top)
+        output_size = (local_mapped.shape[1], local_mapped.shape[0])
+
+        top_candidates: list[
+            tuple[
+                tuple[float, float, float, float, float],
+                np.ndarray,
+                int,
+                int,
+                float,
+                float,
+                dict[str, float],
+            ]
+        ] = []
+        evaluated = 0
+        for scale in scales:
+            for rotation in rotations:
+                for dy in translations:
+                    for dx in translations:
+                        evaluated += 1
+                        matrix = cv2.getRotationMatrix2D(center, rotation, scale)
+                        matrix[0, 2] += dx
+                        matrix[1, 2] += dy
+                        transformed = (
+                            cv2.warpAffine(
+                                local_mapped.astype(np.uint8),
+                                matrix,
+                                output_size,
+                                flags=cv2.INTER_NEAREST,
+                                borderMode=cv2.BORDER_CONSTANT,
+                                borderValue=0,
+                            )
+                            > 0
+                        )
+                        pixels = int(np.count_nonzero(transformed))
+                        if pixels == 0:
+                            continue
+                        candidate_support = (
+                            int(np.count_nonzero(transformed & local_candidates))
+                            / pixels
+                        )
+                        edge_support = _mask_edge_support(local_edges, transformed)
+                        neighbor_overlap = (
+                            int(np.count_nonzero(transformed & local_neighbors))
+                            / pixels
+                        )
+                        shift_fraction = float(np.hypot(dx, dy)) / max(
+                            float(np.hypot(maximum_translation, maximum_translation)),
+                            1.0,
+                        )
+                        # Assembly context constrains the centroid. Rotation
+                        # and uniform scale correct the target silhouette
+                        # without moving it onto another model part.
+                        assembly_position_score = float(
+                            np.exp(-0.25 * shift_fraction * shift_fraction)
+                        )
+                        neighbor_clearance = max(1e-9, 1.0 - neighbor_overlap)
+                        score = float(
+                            np.power(
+                                max(candidate_support, 1e-9)
+                                * max(edge_support, 1e-9)
+                                * neighbor_clearance,
+                                1.0 / 3.0,
+                            )
+                        )
+                        key = (
+                            score,
+                            candidate_support,
+                            edge_support,
+                            assembly_position_score,
+                            -abs(scale - 1.0),
+                        )
+                        metrics = {
+                            "candidate_support": candidate_support,
+                            "image_edge_support": edge_support,
+                            "assembly_position_score": assembly_position_score,
+                            "assembly_centroid_shift_fraction": shift_fraction,
+                            "assembly_neighbor_overlap_fraction": neighbor_overlap,
+                            "assembly_neighbor_clearance_score": neighbor_clearance,
+                            "registration_score": score,
+                        }
+                        if len(top_candidates) < 24 or key > top_candidates[-1][0]:
+                            top_candidates.append(
+                                (
+                                    key,
+                                    transformed,
+                                    dx,
+                                    dy,
+                                    rotation,
+                                    scale,
+                                    metrics,
+                                )
+                            )
+                            top_candidates.sort(key=lambda item: item[0], reverse=True)
+                            del top_candidates[24:]
+        if not top_candidates:
+            continue
+        reranked: list[
+            tuple[
+                tuple[float, float, float, float],
+                np.ndarray,
+                int,
+                int,
+                float,
+                float,
+                dict[str, float],
+                dict[str, Any],
+            ]
+        ] = []
+        for (
+            _registration_key,
+            local_candidate,
+            candidate_dx,
+            candidate_dy,
+            candidate_rotation,
+            candidate_scale,
+            candidate_metrics,
+        ) in top_candidates:
+            full_candidate = np.zeros_like(visible)
+            full_candidate[top:bottom, left:right] = local_candidate
+            agreement = _best_model_domain_shape_agreement(full_candidate, variant)
+            model_score = float(agreement["model_shape_score"])
+            joint_score = float(
+                np.power(
+                    max(candidate_metrics["candidate_support"], 1e-9)
+                    * max(candidate_metrics["image_edge_support"], 1e-9)
+                    * max(model_score, 1e-9)
+                    * max(
+                        candidate_metrics["assembly_neighbor_clearance_score"],
+                        1e-9,
+                    ),
+                    0.25,
+                )
+            )
+            reranked.append(
+                (
+                    (
+                        joint_score,
+                        model_score,
+                        float(candidate_metrics["registration_score"]),
+                        float(candidate_metrics["assembly_position_score"]),
+                    ),
+                    full_candidate,
+                    candidate_dx,
+                    candidate_dy,
+                    candidate_rotation,
+                    candidate_scale,
+                    candidate_metrics,
+                    agreement,
+                )
+            )
+        reranked.sort(key=lambda item: item[0], reverse=True)
+        (
+            _joint_key,
+            selected,
+            dx,
+            dy,
+            rotation,
+            scale,
+            selected_metrics,
+            model_agreement,
+        ) = reranked[0]
+        selected_metrics = dict(selected_metrics)
+        selected_metrics["joint_model_edge_candidate_score"] = float(reranked[0][0][0])
+
+        global_center = (float(xs.mean()), float(ys.mean()))
+        local_matrix = cv2.getRotationMatrix2D(global_center, rotation, scale)
+        local_matrix[0, 2] += dx
+        local_matrix[1, 2] += dy
+        base_matrix = np.asarray(base_registration["affine_2x3"], dtype=np.float64)
+        total_matrix = (
+            np.vstack((local_matrix, [0.0, 0.0, 1.0]))
+            @ np.vstack((base_matrix, [0.0, 0.0, 1.0]))
+        )[:2]
+        model_score = float(model_agreement["model_shape_score"])
+        audit = {
+            "variant_index": variant_index,
+            "base_model_to_reference_registration": base_registration,
+            "local_translation_xy_pixels": [int(dx), int(dy)],
+            "local_rotation_degrees": float(rotation),
+            "local_uniform_scale": float(scale),
+            "maximum_translation_pixels": maximum_translation,
+            "maximum_rotation_degrees": maximum_rotation,
+            "maximum_scale_delta": maximum_scale_delta,
+            "evaluated_transform_count": evaluated,
+            "selected_metrics": selected_metrics,
+            "model_domain_shape_score": model_score,
+            "assembly_context_used": assembly_neighbor_context is not None,
+            "model_to_photo_affine_2x3": [
+                [float(value) for value in row] for row in total_matrix
+            ],
+        }
+        audited.append(
+            (
+                (
+                    float(selected_metrics["joint_model_edge_candidate_score"]),
+                    model_score,
+                    float(selected_metrics["candidate_support"]),
+                    -variant_index,
+                ),
+                selected,
+                audit,
+            )
+        )
+    if not audited:
+        raise EntitySegRegionError("no model-shape photo proposal could be registered")
+    audited.sort(key=lambda item: item[0], reverse=True)
+    selected_mask = audited[0][1]
+    selected_audit = audited[0][2]
+    selected_audit.update(
+        {
+            "method": "model_image_part_id_similarity_registration_to_photo",
+            "model_shape_variant_count": len(variants),
+            "proposal_component_policy": (
+                "union_of_all_model_components_associated_with_local_observation"
+            ),
+            "transformed_object": "model_image_part_id_mask_proposal_only",
+            "cad_mesh_transform_changed": False,
+            "assembly_camera_changed": False,
+            "per_mesh_pose_change_allowed": False,
+        }
+    )
+    return selected_mask, selected_audit
+
+
 def _refinement_metrics(
     *,
     image: np.ndarray,
@@ -1210,9 +1714,11 @@ def _iterative_shape_guided_refinement(
     visible_seed: np.ndarray,
     amodal_seed: np.ndarray | None,
     model_visible_shape: np.ndarray | list[np.ndarray] | None = None,
+    assembly_neighbor_context: np.ndarray | None = None,
     candidate_masks: list[tuple[str, np.ndarray]],
     primary_candidate_source: str,
     _enable_local_registration: bool = True,
+    _enable_model_shape_proposal: bool = True,
 ) -> tuple[np.ndarray, dict[str, Any], dict[str, float | int]]:
     """Optimize one visible instance without choosing one model mask verbatim.
 
@@ -1232,6 +1738,13 @@ def _iterative_shape_guided_refinement(
     )
     if image.shape[:2] != visible.shape or amodal.shape != visible.shape:
         raise EntitySegRegionError("shape-guided refinement inputs are incompatible")
+    neighbor_context = (
+        np.asarray(assembly_neighbor_context, dtype=bool)
+        if assembly_neighbor_context is not None
+        else None
+    )
+    if neighbor_context is not None and neighbor_context.shape != visible.shape:
+        raise EntitySegRegionError("assembly context is incompatible with the photo")
     if not candidate_masks or not np.any(visible) or not np.any(amodal):
         raise EntitySegRegionError("shape-guided refinement has no usable authority")
     if model_visible_shape is not None:
@@ -1260,6 +1773,164 @@ def _iterative_shape_guided_refinement(
             "shape-guided candidate mask is empty or incompatible"
         )
 
+    if model_visible_shape is not None and _enable_model_shape_proposal:
+        baseline = _iterative_shape_guided_refinement(
+            image=image,
+            visible_seed=visible,
+            amodal_seed=amodal,
+            model_visible_shape=model_visible_shape,
+            assembly_neighbor_context=neighbor_context,
+            candidate_masks=list(candidate_by_source.items()),
+            primary_candidate_source=primary_candidate_source,
+            _enable_local_registration=True,
+            _enable_model_shape_proposal=False,
+        )
+        model_proposal, model_registration = _register_model_shape_to_photo(
+            image=image,
+            visible_seed=visible,
+            model_shape_variants=model_visible_shape,
+            candidate_masks=list(candidate_by_source.values()),
+            assembly_neighbor_context=neighbor_context,
+        )
+        candidate_values = list(candidate_by_source.values())
+        candidate_union = np.logical_or.reduce(candidate_values)
+        proposal_pixels = int(np.count_nonzero(model_proposal))
+        visible_pixels = int(np.count_nonzero(visible))
+        proposal_candidate_support = int(
+            np.count_nonzero(model_proposal & candidate_union)
+        ) / max(proposal_pixels, 1)
+        seed_candidate_support = int(np.count_nonzero(visible & candidate_union)) / max(
+            visible_pixels, 1
+        )
+        proposal_metrics = _refinement_metrics(
+            image=image,
+            mask=model_proposal,
+            visible_seed=model_proposal,
+            amodal_seed=model_proposal,
+            candidate_masks=candidate_values,
+            model_visible_shape=model_visible_shape,
+        )
+        baseline_metrics = baseline[1]["final_metrics"]
+        proposal_area_ratio = proposal_pixels / max(visible_pixels, 1)
+        seed_neighbor_overlap = (
+            int(np.count_nonzero(visible & neighbor_context)) / max(visible_pixels, 1)
+            if neighbor_context is not None
+            else 0.0
+        )
+        proposal_neighbor_overlap = (
+            int(np.count_nonzero(model_proposal & neighbor_context))
+            / max(proposal_pixels, 1)
+            if neighbor_context is not None
+            else 0.0
+        )
+        rejection_reasons: list[str] = []
+        if (
+            float(proposal_metrics["image_edge_support"])
+            < float(baseline_metrics["image_edge_support"]) - 1e-12
+        ):
+            rejection_reasons.append("photo_edge_support_did_not_improve")
+        if (
+            float(proposal_metrics["model_domain_shape_score"])
+            < float(baseline_metrics["model_domain_shape_score"]) - 1e-12
+        ):
+            rejection_reasons.append("model_domain_shape_did_not_improve")
+        if proposal_candidate_support < seed_candidate_support - 1e-12:
+            rejection_reasons.append("candidate_support_below_cad_location_floor")
+        if not (
+            MINIMUM_REFINED_TO_VISIBLE_AREA_RATIO
+            <= proposal_area_ratio
+            <= MAXIMUM_FINAL_TO_CAD_AREA_RATIO
+        ):
+            rejection_reasons.append("model_shape_proposal_area_outside_cad_bound")
+        alias_tolerance = 1.0 / max(proposal_pixels, 1)
+        if proposal_neighbor_overlap > seed_neighbor_overlap + alias_tolerance:
+            rejection_reasons.append("assembly_neighbor_context_overlap_increased")
+        if not (
+            float(proposal_metrics["image_edge_support"])
+            > float(baseline_metrics["image_edge_support"]) + 1e-12
+            or float(proposal_metrics["model_domain_shape_score"])
+            > float(baseline_metrics["model_domain_shape_score"]) + 1e-12
+        ):
+            rejection_reasons.append("model_shape_proposal_did_not_strictly_improve")
+
+        selected = baseline
+        selected_branch = "iterative_reference_projection_baseline"
+        if not rejection_reasons:
+            selected_audit = dict(baseline[1])
+            iteration_audits = list(selected_audit.get("iterations", []))
+            iteration_audits.append(
+                {
+                    "iteration": len(iteration_audits) + 1,
+                    "lane": "model_image_shape_similarity_proposal",
+                    "lane_iteration": 0,
+                    "accepted": True,
+                    "reason_codes": [],
+                    "metrics": proposal_metrics,
+                    "changed_pixels_from_previous_iteration": int(
+                        np.count_nonzero(model_proposal ^ baseline[0])
+                    ),
+                }
+            )
+            selected_audit.update(
+                {
+                    "selected_iteration": len(iteration_audits),
+                    "selected_optimization_lane": (
+                        "model_image_shape_similarity_proposal"
+                    ),
+                    "selected_lane_iteration": 0,
+                    "executed_iteration_count": len(iteration_audits),
+                    "final_metrics": proposal_metrics,
+                    "final_changed_pixels_from_initial": int(
+                        np.count_nonzero(model_proposal ^ baseline[0])
+                    ),
+                    "iterations": iteration_audits,
+                    "current_view_visibility_authority": (
+                        "model_image_part_id_shape_registered_from_sealed_cad_location"
+                    ),
+                }
+            )
+            primary_unbounded = candidate_by_source[primary_candidate_source]
+            support_audit: dict[str, float | int] = dict(baseline[2])
+            support_audit.update(
+                {
+                    "untrimmed_entity_pixels": int(np.count_nonzero(primary_unbounded)),
+                    "trimmed_entity_pixels": proposal_pixels,
+                    "retained_entity_fraction": int(
+                        np.count_nonzero(model_proposal & primary_unbounded)
+                    )
+                    / max(int(np.count_nonzero(primary_unbounded)), 1),
+                    "final_to_cad_area_ratio": proposal_area_ratio,
+                }
+            )
+            selected = (model_proposal, selected_audit, support_audit)
+            selected_branch = "registered_model_image_shape_proposal"
+
+        model_registration.update(
+            {
+                "accepted": not rejection_reasons,
+                "selection_contract": (
+                    "photo_edges_model_shape_candidate_support_and_assembly_"
+                    "neighbor_nonregression"
+                ),
+                "selected_final_branch": selected_branch,
+                "selection_rejection_reasons": rejection_reasons,
+                "original_cad_candidate_support_floor": seed_candidate_support,
+                "proposal_candidate_support": proposal_candidate_support,
+                "proposal_to_original_visible_area_ratio": proposal_area_ratio,
+                "assembly_context_used": neighbor_context is not None,
+                "original_cad_neighbor_overlap_fraction": seed_neighbor_overlap,
+                "proposal_neighbor_overlap_fraction": proposal_neighbor_overlap,
+                "baseline_final_metrics": dict(baseline_metrics),
+                "proposal_final_metrics": dict(proposal_metrics),
+            }
+        )
+        selected[1]["model_domain_photo_registration"] = model_registration
+        if selected_branch == "registered_model_image_shape_proposal":
+            local_registration = selected[1].get("reference_space_local_registration")
+            if isinstance(local_registration, dict):
+                local_registration["superseded_by_model_shape_proposal"] = True
+        return selected
+
     if model_visible_shape is not None and _enable_local_registration:
         (
             registered_visible,
@@ -1276,9 +1947,11 @@ def _iterative_shape_guided_refinement(
             visible_seed=visible,
             amodal_seed=amodal,
             model_visible_shape=model_visible_shape,
+            assembly_neighbor_context=neighbor_context,
             candidate_masks=list(candidate_by_source.items()),
             primary_candidate_source=primary_candidate_source,
             _enable_local_registration=False,
+            _enable_model_shape_proposal=False,
         )
         selected = baseline
         selected_branch = "zero_transform_baseline"
@@ -1292,9 +1965,11 @@ def _iterative_shape_guided_refinement(
                 visible_seed=registered_visible,
                 amodal_seed=registered_amodal,
                 model_visible_shape=model_visible_shape,
+                assembly_neighbor_context=neighbor_context,
                 candidate_masks=list(candidate_by_source.items()),
                 primary_candidate_source=primary_candidate_source,
                 _enable_local_registration=False,
+                _enable_model_shape_proposal=False,
             )
             baseline_metrics = baseline[1]["final_metrics"]
             registered_metrics = registered[1]["final_metrics"]
@@ -1769,6 +2444,25 @@ def build_hybrid_masks(
                 "sha256": _sha256_file(model_shape_path),
                 "mask_pixels": int(np.count_nonzero(display_shape)),
             }
+            variant_documents: list[dict[str, Any]] = []
+            for variant_index, variant in enumerate(reference["visible_shape"]):
+                variant_path = (
+                    model_shape_dir / f"{key[0]}__{key[1]}__variant_{variant_index}.png"
+                )
+                variant_mask = np.asarray(variant, dtype=np.uint8)
+                if not cv2.imwrite(str(variant_path), variant_mask * 255):
+                    raise EntitySegRegionError(
+                        f"unable to write model-domain shape variant: {key}"
+                    )
+                variant_documents.append(
+                    {
+                        "variant_index": variant_index,
+                        "path": str(variant_path),
+                        "sha256": _sha256_file(variant_path),
+                        "mask_pixels": int(np.count_nonzero(variant_mask)),
+                    }
+                )
+            reference["audit"]["model_shape_variant_masks"] = variant_documents
 
     records: list[dict[str, Any]] = []
     decision_counts: Counter[str] = Counter()
@@ -1948,6 +2642,14 @@ def build_hybrid_masks(
             # optimizer.  The visible projection remains a bounded ROI and
             # visibility constraint; shape comes from the CAD model image.
             refinement_amodal = None if model_reference is not None else aligned_amodal
+            assembly_neighbor_context = (
+                _align_with_audit(
+                    model_reference["assembly_neighbor_context"],
+                    aligned_seed_audit,
+                )
+                if model_reference is not None
+                else None
+            )
             try:
                 (
                     final_mask,
@@ -1962,6 +2664,7 @@ def build_hybrid_masks(
                         if model_reference is not None
                         else None
                     ),
+                    assembly_neighbor_context=assembly_neighbor_context,
                     candidate_masks=candidate_masks,
                     primary_candidate_source=primary_candidate_source,
                 )
@@ -2117,6 +2820,29 @@ def build_hybrid_masks(
                 "cad_model_render_image" if model_shape_references else None
             ),
             "model_shape_photo_warp_applied": False,
+            "model_shape_photo_proposal_warp_applied": bool(model_shape_references),
+            "model_image_shape_photo_proposal": (
+                "bounded_similarity_registration_from_model_image_via_sealed_cad_"
+                "assembly_context_then_photo_edges"
+                if model_shape_references
+                else None
+            ),
+            "model_shape_proposal_selection_contract": (
+                "photo_edges_model_shape_candidate_support_and_assembly_neighbor_"
+                "nonregression"
+                if model_shape_references
+                else None
+            ),
+            "assembly_context_position_authority": (
+                "whole_assembly_model_part_id_neighbor_geometry"
+                if model_shape_references
+                else None
+            ),
+            "model_shape_proposal_component_policy": (
+                "union_of_all_model_components_associated_with_local_observation"
+                if model_shape_references
+                else None
+            ),
             "visibility_authority": "whole_assembly_part_id_projection",
             "final_boundary_method": "iterative_visible_mesh_edge_optimization",
             "shape_guided_optimization_iterations": SHAPE_GUIDED_OPTIMIZATION_ITERATIONS,

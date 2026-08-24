@@ -850,6 +850,7 @@ def _load_part_id_refinement_manifest(
             "qwen-cad-sam3-entityseg-hybrid/v2",
             "qwen-cad-sam3-entityseg-hybrid/v3",
             "qwen-cad-sam3-entityseg-hybrid/v4",
+            "qwen-cad-sam3-entityseg-hybrid/v5",
         }
         if hybrid
         else {"qwen-sam3-region-result/v1"}
@@ -875,6 +876,7 @@ def _load_part_id_refinement_manifest(
                 "qwen-cad-sam3-entityseg-hybrid/v2",
                 "qwen-cad-sam3-entityseg-hybrid/v3",
                 "qwen-cad-sam3-entityseg-hybrid/v4",
+                "qwen-cad-sam3-entityseg-hybrid/v5",
             }
             else "boundary_candidate_only"
         )
@@ -893,6 +895,7 @@ def _load_part_id_refinement_manifest(
             "qwen-cad-sam3-entityseg-hybrid/v2",
             "qwen-cad-sam3-entityseg-hybrid/v3",
             "qwen-cad-sam3-entityseg-hybrid/v4",
+            "qwen-cad-sam3-entityseg-hybrid/v5",
         } and (
             policy.get("sam3_role") != "probable_foreground_initialization_only"
             or policy.get("final_boundary_method")
@@ -907,6 +910,7 @@ def _load_part_id_refinement_manifest(
         if schema_version in {
             "qwen-cad-sam3-entityseg-hybrid/v3",
             "qwen-cad-sam3-entityseg-hybrid/v4",
+            "qwen-cad-sam3-entityseg-hybrid/v5",
         } and (
             policy.get("shape_authority")
             != "cad_model_render_target_part_id_normalized_shape"
@@ -923,7 +927,10 @@ def _load_part_id_refinement_manifest(
             raise PartIdProjectionError(
                 "Part-ID hybrid v3 manifest has an invalid reference CAD role"
             )
-        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v4" and (
+        if schema_version in {
+            "qwen-cad-sam3-entityseg-hybrid/v4",
+            "qwen-cad-sam3-entityseg-hybrid/v5",
+        } and (
             policy.get("reference_space_cad_role")
             != "initial_roi_and_visibility_for_bounded_2d_mask_registration"
             or policy.get("reference_space_local_registration")
@@ -942,6 +949,22 @@ def _load_part_id_refinement_manifest(
             raise PartIdProjectionError(
                 "Part-ID hybrid v4 manifest does not isolate local mask registration"
             )
+        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v5" and (
+            policy.get("model_image_shape_photo_proposal")
+            != "bounded_similarity_registration_from_model_image_via_sealed_cad_"
+            "assembly_context_then_photo_edges"
+            or policy.get("model_shape_proposal_selection_contract")
+            != "photo_edges_model_shape_candidate_support_and_assembly_neighbor_"
+            "nonregression"
+            or policy.get("model_shape_photo_proposal_warp_applied") is not True
+            or policy.get("assembly_context_position_authority")
+            != "whole_assembly_model_part_id_neighbor_geometry"
+            or policy.get("model_shape_proposal_component_policy")
+            != "union_of_all_model_components_associated_with_local_observation"
+        ):
+            raise PartIdProjectionError(
+                "Part-ID hybrid v5 manifest does not seal its model-shape proposal"
+            )
         if refinement_path is None:
             raise PartIdProjectionError(
                 "in-memory Part-ID hybrid manifest cannot resolve its sealed inputs"
@@ -954,6 +977,7 @@ def _load_part_id_refinement_manifest(
         if schema_version in {
             "qwen-cad-sam3-entityseg-hybrid/v3",
             "qwen-cad-sam3-entityseg-hybrid/v4",
+            "qwen-cad-sam3-entityseg-hybrid/v5",
         }:
             input_names.append("cad_model_templates")
         for input_name in input_names:
@@ -1094,6 +1118,7 @@ def _load_part_id_refinement_manifest(
             if schema_version in {
                 "qwen-cad-sam3-entityseg-hybrid/v3",
                 "qwen-cad-sam3-entityseg-hybrid/v4",
+                "qwen-cad-sam3-entityseg-hybrid/v5",
             }:
                 model_reference = raw.get("model_domain_shape_reference")
                 final_metrics = iterative.get("final_metrics")
@@ -1118,7 +1143,10 @@ def _load_part_id_refinement_manifest(
                         f"Part-ID hybrid record {identity} does not bind its final "
                         "boundary to a CAD-model-image shape"
                     )
-                if schema_version == "qwen-cad-sam3-entityseg-hybrid/v4":
+                if schema_version in {
+                    "qwen-cad-sam3-entityseg-hybrid/v4",
+                    "qwen-cad-sam3-entityseg-hybrid/v5",
+                }:
                     local_registration = iterative.get(
                         "reference_space_local_registration"
                     )
@@ -1213,6 +1241,173 @@ def _load_part_id_refinement_manifest(
                         raise PartIdProjectionError(
                             f"Part-ID hybrid record {identity} has an unsafe local "
                             "mask registration"
+                        )
+                if schema_version == "qwen-cad-sam3-entityseg-hybrid/v5":
+                    model_registration = iterative.get(
+                        "model_domain_photo_registration"
+                    )
+                    variant_documents = model_reference.get("model_shape_variant_masks")
+                    variant_count = model_reference.get("model_shape_variant_count")
+                    if (
+                        not isinstance(variant_documents, list)
+                        or isinstance(variant_count, bool)
+                        or not isinstance(variant_count, int)
+                        or variant_count <= 0
+                        or len(variant_documents) != variant_count
+                    ):
+                        raise PartIdProjectionError(
+                            f"Part-ID hybrid record {identity} has no sealed model "
+                            "shape variants"
+                        )
+                    variant_indices: set[int] = set()
+                    for variant_document in variant_documents:
+                        variant_index_value = (
+                            variant_document.get("variant_index")
+                            if isinstance(variant_document, Mapping)
+                            else None
+                        )
+                        if (
+                            isinstance(variant_index_value, bool)
+                            or not isinstance(variant_index_value, int)
+                            or variant_index_value in variant_indices
+                        ):
+                            raise PartIdProjectionError(
+                                f"Part-ID hybrid record {identity} has malformed "
+                                "model shape variants"
+                            )
+                        variant_path = _resolve_file(
+                            variant_document.get("path"),
+                            owner=refinement_path,
+                            label=f"Part-ID hybrid model shape variant {identity}",
+                        )
+                        if variant_document.get("sha256") != _sha256_file(variant_path):
+                            raise PartIdProjectionError(
+                                f"Part-ID hybrid model shape variant hash mismatch: "
+                                f"{identity}"
+                            )
+                        variant_indices.add(variant_index_value)
+                    if variant_indices != set(range(variant_count)):
+                        raise PartIdProjectionError(
+                            f"Part-ID hybrid record {identity} has incomplete model "
+                            "shape variants"
+                        )
+                    affine = (
+                        model_registration.get("model_to_photo_affine_2x3")
+                        if isinstance(model_registration, Mapping)
+                        else None
+                    )
+                    proposal_support = (
+                        model_registration.get("proposal_candidate_support")
+                        if isinstance(model_registration, Mapping)
+                        else None
+                    )
+                    support_floor = (
+                        model_registration.get("original_cad_candidate_support_floor")
+                        if isinstance(model_registration, Mapping)
+                        else None
+                    )
+                    original_neighbor_overlap = (
+                        model_registration.get("original_cad_neighbor_overlap_fraction")
+                        if isinstance(model_registration, Mapping)
+                        else None
+                    )
+                    proposal_neighbor_overlap = (
+                        model_registration.get("proposal_neighbor_overlap_fraction")
+                        if isinstance(model_registration, Mapping)
+                        else None
+                    )
+                    proposal_final_metrics = (
+                        model_registration.get("proposal_final_metrics")
+                        if isinstance(model_registration, Mapping)
+                        else None
+                    )
+                    proposal_pixels = (
+                        proposal_final_metrics.get("mask_pixels")
+                        if isinstance(proposal_final_metrics, Mapping)
+                        else None
+                    )
+                    if (
+                        not isinstance(model_registration, Mapping)
+                        or model_registration.get("method")
+                        != "model_image_part_id_similarity_registration_to_photo"
+                        or not isinstance(model_registration.get("accepted"), bool)
+                        or model_registration.get("selection_contract")
+                        != "photo_edges_model_shape_candidate_support_and_assembly_"
+                        "neighbor_nonregression"
+                        or model_registration.get("transformed_object")
+                        != "model_image_part_id_mask_proposal_only"
+                        or model_registration.get("cad_mesh_transform_changed")
+                        is not False
+                        or model_registration.get("assembly_camera_changed")
+                        is not False
+                        or model_registration.get("per_mesh_pose_change_allowed")
+                        is not False
+                        or model_registration.get("assembly_context_used") is not True
+                        or model_registration.get("variant_index") != 0
+                        or model_registration.get("proposal_component_policy")
+                        != "union_of_all_model_components_associated_with_local_"
+                        "observation"
+                        or model_registration.get("model_shape_variant_count")
+                        != variant_count
+                        or model_registration.get("selected_final_branch")
+                        not in {
+                            "iterative_reference_projection_baseline",
+                            "registered_model_image_shape_proposal",
+                        }
+                        or not isinstance(
+                            model_registration.get("selection_rejection_reasons"), list
+                        )
+                        or not isinstance(affine, list)
+                        or len(affine) != 2
+                        or any(
+                            not isinstance(row, list)
+                            or len(row) != 3
+                            or any(
+                                isinstance(value, bool)
+                                or not isinstance(value, (int, float))
+                                or not math.isfinite(float(value))
+                                for value in row
+                            )
+                            for row in affine
+                        )
+                        or isinstance(proposal_support, bool)
+                        or not isinstance(proposal_support, (int, float))
+                        or not 0.0 <= float(proposal_support) <= 1.0
+                        or isinstance(support_floor, bool)
+                        or not isinstance(support_floor, (int, float))
+                        or not 0.0 <= float(support_floor) <= 1.0
+                        or isinstance(original_neighbor_overlap, bool)
+                        or not isinstance(original_neighbor_overlap, (int, float))
+                        or not 0.0 <= float(original_neighbor_overlap) <= 1.0
+                        or isinstance(proposal_neighbor_overlap, bool)
+                        or not isinstance(proposal_neighbor_overlap, (int, float))
+                        or not 0.0 <= float(proposal_neighbor_overlap) <= 1.0
+                        or isinstance(proposal_pixels, bool)
+                        or not isinstance(proposal_pixels, int)
+                        or proposal_pixels <= 0
+                        or (
+                            model_registration.get("accepted") is True
+                            and (
+                                model_registration.get("selected_final_branch")
+                                != "registered_model_image_shape_proposal"
+                                or iterative.get("selected_optimization_lane")
+                                != "model_image_shape_similarity_proposal"
+                                or float(proposal_support)
+                                < float(support_floor) - 1e-12
+                                or float(proposal_neighbor_overlap)
+                                > float(original_neighbor_overlap)
+                                + 1.0 / proposal_pixels
+                            )
+                        )
+                        or (
+                            model_registration.get("accepted") is False
+                            and model_registration.get("selected_final_branch")
+                            != "iterative_reference_projection_baseline"
+                        )
+                    ):
+                        raise PartIdProjectionError(
+                            f"Part-ID hybrid record {identity} has an unsafe "
+                            "model-image shape proposal"
                         )
         accepted_by_identity[identity] = {
             "mask_path": mask_path,
