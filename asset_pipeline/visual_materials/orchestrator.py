@@ -2304,6 +2304,8 @@ def _run_policy_part_id_stage(
                     str(part_id_sam3_manifest),
                     "--entity-manifest",
                     str(part_id_entityseg_manifest),
+                    "--amodal-manifest",
+                    str(part_id_amodal_template_manifest),
                     "--output-dir",
                     str(part_id_hybrid_mask_dir),
                 ],

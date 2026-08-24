@@ -13,10 +13,14 @@ from qwen_material_pipeline.evidence.part_id_projection import (
 )
 from qwen_material_pipeline.segmentation.hybrid_part_masks import (
     build_hybrid_masks,
+    _best_model_domain_shape_agreement,
     _connected_component_count,
     _entity_aligned_cad_seed,
     _entity_rejection_reasons,
     _iterative_shape_guided_refinement,
+    _model_domain_shape_references,
+    _part_color,
+    _register_visible_template_to_photo,
     _sam_aligned_cad_seed,
     _trim_entity_to_cad_support,
 )
@@ -130,6 +134,111 @@ def test_sam_specific_cad_area_bound_is_stricter_than_entity_default() -> None:
     assert sam_audit["final_to_cad_area_ratio"] <= 1.15
 
 
+def test_local_photo_registration_moves_only_the_2d_cad_mask_to_supported_edges() -> None:
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    image[22:62, 32:72] = (80, 150, 90)
+    visible = np.zeros((80, 100), dtype=bool)
+    visible[20:60, 30:70] = True
+    candidate = np.zeros_like(visible)
+    candidate[22:62, 32:72] = True
+
+    registered, registered_amodal, audit = _register_visible_template_to_photo(
+        image=image,
+        visible_seed=visible,
+        amodal_seed=visible,
+        candidate_masks=[candidate],
+    )
+
+    assert audit["accepted"] is True
+    assert audit["translation_xy_pixels"] == [2, 2]
+    assert audit["rotation_degrees"] == pytest.approx(0.0)
+    assert audit["selected_metrics"]["registration_score"] > (
+        audit["initial_metrics"]["registration_score"]
+    )
+    assert np.array_equal(registered, candidate)
+    assert np.array_equal(registered_amodal, candidate)
+    assert audit["transformed_object"] == "reference_view_segmentation_template_only"
+    assert audit["cad_mesh_transform_changed"] is False
+    assert audit["assembly_camera_changed"] is False
+    assert audit["per_mesh_pose_change_allowed"] is False
+
+
+def test_local_photo_registration_keeps_zero_transform_when_already_aligned() -> None:
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    image[20:60, 30:70] = (80, 150, 90)
+    visible = np.zeros((80, 100), dtype=bool)
+    visible[20:60, 30:70] = True
+
+    registered, registered_amodal, audit = _register_visible_template_to_photo(
+        image=image,
+        visible_seed=visible,
+        amodal_seed=visible,
+        candidate_masks=[visible],
+    )
+
+    assert audit["accepted"] is False
+    assert audit["translation_xy_pixels"] == [0, 0]
+    assert audit["rotation_degrees"] == pytest.approx(0.0)
+    assert np.array_equal(registered, visible)
+    assert np.array_equal(registered_amodal, visible)
+
+
+def test_iterative_refinement_selects_registered_branch_only_after_final_pareto() -> None:
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    image[22:62, 32:72] = (80, 150, 90)
+    visible = np.zeros((80, 100), dtype=bool)
+    visible[20:60, 30:70] = True
+    candidate = np.zeros_like(visible)
+    candidate[22:62, 32:72] = True
+    model_shape = np.ones((40, 40), dtype=bool)
+
+    refined, audit, _support = _iterative_shape_guided_refinement(
+        image=image,
+        visible_seed=visible,
+        amodal_seed=None,
+        model_visible_shape=model_shape,
+        candidate_masks=[("sam3", candidate)],
+        primary_candidate_source="sam3",
+    )
+
+    registration = audit["reference_space_local_registration"]
+    assert registration["accepted"] is True
+    assert registration["selected_final_branch"] == ("bounded_2d_local_registration")
+    assert registration["final_selection_rejection_reasons"] == []
+    assert np.array_equal(refined, candidate)
+    for metric in (
+        "image_edge_support",
+        "model_domain_shape_score",
+        "mean_prior_candidate_iou",
+    ):
+        assert registration["registered_final_metrics"][metric] >= (
+            registration["zero_transform_final_metrics"][metric]
+        )
+
+
+def test_iterative_refinement_keeps_zero_branch_without_registration_evidence() -> None:
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    image[20:60, 30:70] = (80, 150, 90)
+    visible = np.zeros((80, 100), dtype=bool)
+    visible[20:60, 30:70] = True
+
+    refined, audit, _support = _iterative_shape_guided_refinement(
+        image=image,
+        visible_seed=visible,
+        amodal_seed=None,
+        model_visible_shape=np.ones((40, 40), dtype=bool),
+        candidate_masks=[("sam3", visible)],
+        primary_candidate_source="sam3",
+    )
+
+    registration = audit["reference_space_local_registration"]
+    assert registration["accepted"] is False
+    assert registration["selected_final_branch"] == "zero_transform_baseline"
+    assert registration["translation_xy_pixels"] == [0, 0]
+    assert registration["rotation_degrees"] == pytest.approx(0.0)
+    assert np.array_equal(refined, visible)
+
+
 def test_iterative_refinement_removes_current_view_occluder_and_snaps_edges() -> None:
     image = np.zeros((96, 128, 3), dtype=np.uint8)
     image[20:76, 24:104] = (30, 130, 40)
@@ -184,6 +293,116 @@ def test_iterative_refinement_jointly_consumes_safe_sam_and_entity_priors() -> N
     assert audit["candidate_sources"] == ["entityseg", "sam3"]
     assert audit["prior_candidate_role"] == "probable_foreground_initialization_only"
     assert audit["method"] == "iterative_visible_mesh_edge_optimization"
+
+
+def test_model_domain_shape_selects_the_corresponding_local_component() -> None:
+    candidate = np.zeros((80, 100), dtype=bool)
+    candidate[20:60, 20:60] = True
+    matching_component = np.zeros((120, 140), dtype=bool)
+    matching_component[30:90, 20:80] = True
+    unrelated_component = np.zeros_like(matching_component)
+    unrelated_component[10:110, 110:116] = True
+    union = matching_component | unrelated_component
+
+    agreement = _best_model_domain_shape_agreement(
+        candidate,
+        [union, matching_component, unrelated_component],
+    )
+
+    assert agreement["model_shape_variant_index"] == 1
+    assert agreement["model_shape_variant_count"] == 3
+    assert agreement["cad_shape_iou"] > 0.95
+
+
+def test_model_domain_reference_keeps_shape_on_model_image(tmp_path: Path) -> None:
+    model_rgb = np.full((32, 40, 3), 120, dtype=np.uint8)
+    part_ids = np.full((32, 40, 3), 28, dtype=np.uint8)
+    red, green, blue = _part_color("P0001")
+    part_ids[6:18, 5:15] = (blue, green, red)
+    part_ids[22:26, 30:36] = (blue, green, red)
+    complete = np.zeros((32, 40), dtype=np.uint8)
+    complete[5:19, 4:16] = 255
+    complete[21:27, 29:37] = 255
+    local_reference = np.zeros((32, 40), dtype=np.uint8)
+    local_reference[6:18, 5:15] = 255
+    model_rgb_path = tmp_path / "model.png"
+    part_ids_path = tmp_path / "part_ids.png"
+    complete_path = tmp_path / "complete.png"
+    local_reference_path = tmp_path / "local.png"
+    for path, image in (
+        (model_rgb_path, model_rgb),
+        (part_ids_path, part_ids),
+        (complete_path, complete),
+        (local_reference_path, local_reference),
+    ):
+        assert cv2.imwrite(str(path), image)
+    registry = {
+        "render_set": {
+            "views": [
+                {
+                    "view_id": "front",
+                    "rgb": str(model_rgb_path),
+                    "part_ids": str(part_ids_path),
+                    "visible_parts": [
+                        {"part_id": "P0001", "pixels": 144},
+                    ],
+                }
+            ]
+        }
+    }
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(registry), encoding="utf-8")
+    spatial = {
+        "view_alignments": [
+            {
+                "reference_view_id": "front",
+                "bbox_affine": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                "ecc_warp": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            }
+        ]
+    }
+    spatial_path = tmp_path / "spatial.json"
+    spatial_path.write_text(json.dumps(spatial), encoding="utf-8")
+    manifest = {
+        "schema_version": "qwen-cad-amodal-part-templates/v1",
+        "inputs": {
+            "registry": {"path": str(registry_path), "sha256": _sha256(registry_path)},
+            "spatial_report": {
+                "path": str(spatial_path),
+                "sha256": _sha256(spatial_path),
+            },
+        },
+        "records": [
+            {
+                "view_id": "front",
+                "part_id": "P0001",
+                "render_view_id": "front",
+                "quarter_turns_ccw": 0,
+                "raw_amodal_mask": {
+                    "path": str(complete_path),
+                    "sha256": _sha256(complete_path),
+                },
+                "aligned_amodal_mask": {"sha256": "a" * 64},
+                "modal_visibility_mask": {
+                    "path": str(local_reference_path),
+                    "sha256": _sha256(local_reference_path),
+                },
+            }
+        ],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    references, _document = _model_domain_shape_references(
+        manifest_path=manifest_path,
+        expected_keys={("front", "P0001")},
+    )
+
+    reference = references[("front", "P0001")]
+    assert reference["audit"]["coordinate_domain"] == "cad_model_render_image"
+    assert reference["audit"]["model_selected_component_indices"] == [1]
+    assert np.count_nonzero(reference["display_visible_shape"]) == 120
+    assert len(reference["visible_shape"]) == 1
 
 
 def test_hybrid_replays_sam_shared_camera_template_translation() -> None:

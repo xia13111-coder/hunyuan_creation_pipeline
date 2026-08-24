@@ -848,6 +848,8 @@ def _load_part_id_refinement_manifest(
         {
             "qwen-cad-sam3-entityseg-hybrid/v1",
             "qwen-cad-sam3-entityseg-hybrid/v2",
+            "qwen-cad-sam3-entityseg-hybrid/v3",
+            "qwen-cad-sam3-entityseg-hybrid/v4",
         }
         if hybrid
         else {"qwen-sam3-region-result/v1"}
@@ -868,7 +870,12 @@ def _load_part_id_refinement_manifest(
         schema_version = refinement.get("schema_version")
         expected_entity_role = (
             "probable_foreground_initialization_only"
-            if schema_version == "qwen-cad-sam3-entityseg-hybrid/v2"
+            if schema_version
+            in {
+                "qwen-cad-sam3-entityseg-hybrid/v2",
+                "qwen-cad-sam3-entityseg-hybrid/v3",
+                "qwen-cad-sam3-entityseg-hybrid/v4",
+            }
             else "boundary_candidate_only"
         )
         if (
@@ -882,7 +889,11 @@ def _load_part_id_refinement_manifest(
                 "Part-ID hybrid manifest does not enforce CAD identity and "
                 "view-shared alignment"
             )
-        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v2" and (
+        if schema_version in {
+            "qwen-cad-sam3-entityseg-hybrid/v2",
+            "qwen-cad-sam3-entityseg-hybrid/v3",
+            "qwen-cad-sam3-entityseg-hybrid/v4",
+        } and (
             policy.get("sam3_role") != "probable_foreground_initialization_only"
             or policy.get("final_boundary_method")
             != "iterative_visible_mesh_edge_optimization"
@@ -893,6 +904,44 @@ def _load_part_id_refinement_manifest(
                 "Part-ID hybrid manifest does not seal iterative shape-guided "
                 "boundary optimization"
             )
+        if schema_version in {
+            "qwen-cad-sam3-entityseg-hybrid/v3",
+            "qwen-cad-sam3-entityseg-hybrid/v4",
+        } and (
+            policy.get("shape_authority")
+            != "cad_model_render_target_part_id_normalized_shape"
+            or policy.get("shape_coordinate_domain") != "cad_model_render_image"
+            or policy.get("model_shape_photo_warp_applied") is not False
+        ):
+            raise PartIdProjectionError(
+                "Part-ID hybrid manifest does not keep model shape in CAD image space"
+            )
+        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v3" and (
+            policy.get("reference_space_cad_role")
+            != "roi_and_current_view_visibility_only"
+        ):
+            raise PartIdProjectionError(
+                "Part-ID hybrid v3 manifest has an invalid reference CAD role"
+            )
+        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v4" and (
+            policy.get("reference_space_cad_role")
+            != "initial_roi_and_visibility_for_bounded_2d_mask_registration"
+            or policy.get("reference_space_local_registration")
+            != "scale_derived_2d_mask_rigid_search_using_photo_edges_and_"
+            "segmentation_candidate_support"
+            or policy.get("local_registration_transformed_object")
+            != "reference_view_segmentation_template_only"
+            or policy.get("local_registration_selection_contract")
+            != "pareto_nonregression_of_photo_edges_and_candidate_support"
+            or policy.get("local_registration_final_selection_contract")
+            != "pareto_nonregression_of_photo_edges_model_shape_and_"
+            "segmentation_candidate_agreement"
+            or policy.get("cad_mesh_transform_changed") is not False
+            or policy.get("assembly_camera_changed") is not False
+        ):
+            raise PartIdProjectionError(
+                "Part-ID hybrid v4 manifest does not isolate local mask registration"
+            )
         if refinement_path is None:
             raise PartIdProjectionError(
                 "in-memory Part-ID hybrid manifest cannot resolve its sealed inputs"
@@ -901,7 +950,13 @@ def _load_part_id_refinement_manifest(
         if not isinstance(inputs, Mapping):
             raise PartIdProjectionError("Part-ID hybrid manifest has no inputs")
         linked_documents: list[dict[str, Any]] = []
-        for input_name in ("sam3_manifest", "entityseg_manifest"):
+        input_names = ["sam3_manifest", "entityseg_manifest"]
+        if schema_version in {
+            "qwen-cad-sam3-entityseg-hybrid/v3",
+            "qwen-cad-sam3-entityseg-hybrid/v4",
+        }:
+            input_names.append("cad_model_templates")
+        for input_name in input_names:
             binding = inputs.get(input_name)
             if not isinstance(binding, Mapping):
                 raise PartIdProjectionError(
@@ -1036,6 +1091,129 @@ def _load_part_id_refinement_manifest(
                 raise PartIdProjectionError(
                     f"Part-ID hybrid record {identity} has no sealed iterative audit"
                 )
+            if schema_version in {
+                "qwen-cad-sam3-entityseg-hybrid/v3",
+                "qwen-cad-sam3-entityseg-hybrid/v4",
+            }:
+                model_reference = raw.get("model_domain_shape_reference")
+                final_metrics = iterative.get("final_metrics")
+                if (
+                    not isinstance(model_reference, Mapping)
+                    or model_reference.get("coordinate_domain")
+                    != "cad_model_render_image"
+                    or model_reference.get("comparison_mode")
+                    != "location_scale_invariant_normalized_shape_no_photo_warp"
+                    or model_reference.get("per_mesh_pose_change_allowed") is not False
+                    or raw.get("reference_space_amodal_used_for_final_boundary")
+                    is not False
+                    or iterative.get("model_shape_coordinate_domain")
+                    != "cad_model_render_image"
+                    or iterative.get("model_shape_photo_warp_applied") is not False
+                    or not isinstance(final_metrics, Mapping)
+                    or not isinstance(
+                        final_metrics.get("model_domain_shape_score"), (int, float)
+                    )
+                ):
+                    raise PartIdProjectionError(
+                        f"Part-ID hybrid record {identity} does not bind its final "
+                        "boundary to a CAD-model-image shape"
+                    )
+                if schema_version == "qwen-cad-sam3-entityseg-hybrid/v4":
+                    local_registration = iterative.get(
+                        "reference_space_local_registration"
+                    )
+                    translation = (
+                        local_registration.get("translation_xy_pixels")
+                        if isinstance(local_registration, Mapping)
+                        else None
+                    )
+                    maximum_translation = (
+                        local_registration.get("maximum_translation_pixels")
+                        if isinstance(local_registration, Mapping)
+                        else None
+                    )
+                    rotation = (
+                        local_registration.get("rotation_degrees")
+                        if isinstance(local_registration, Mapping)
+                        else None
+                    )
+                    maximum_rotation = (
+                        local_registration.get("maximum_rotation_degrees")
+                        if isinstance(local_registration, Mapping)
+                        else None
+                    )
+                    if (
+                        not isinstance(local_registration, Mapping)
+                        or local_registration.get("method")
+                        != "bounded_2d_cad_template_registration_to_photo_evidence"
+                        or not isinstance(local_registration.get("accepted"), bool)
+                        or local_registration.get("transformed_object")
+                        != "reference_view_segmentation_template_only"
+                        or local_registration.get("selection_contract")
+                        != "pareto_nonregression_of_photo_edges_and_candidate_support"
+                        or local_registration.get("final_selection_contract")
+                        != "pareto_nonregression_of_photo_edges_model_shape_and_"
+                        "segmentation_candidate_agreement"
+                        or local_registration.get("selected_final_branch")
+                        not in {
+                            "zero_transform_baseline",
+                            "bounded_2d_local_registration",
+                        }
+                        or not isinstance(
+                            local_registration.get(
+                                "proposal_accepted_by_local_objective"
+                            ),
+                            bool,
+                        )
+                        or not isinstance(
+                            local_registration.get("final_selection_rejection_reasons"),
+                            list,
+                        )
+                        or local_registration.get("cad_mesh_transform_changed")
+                        is not False
+                        or local_registration.get("assembly_camera_changed")
+                        is not False
+                        or local_registration.get("per_mesh_pose_change_allowed")
+                        is not False
+                        or not isinstance(translation, list)
+                        or len(translation) != 2
+                        or any(
+                            isinstance(value, bool) or not isinstance(value, int)
+                            for value in translation
+                        )
+                        or isinstance(maximum_translation, bool)
+                        or not isinstance(maximum_translation, int)
+                        or maximum_translation < 1
+                        or any(
+                            abs(value) > maximum_translation for value in translation
+                        )
+                        or isinstance(rotation, bool)
+                        or not isinstance(rotation, (int, float))
+                        or not math.isfinite(float(rotation))
+                        or isinstance(maximum_rotation, bool)
+                        or not isinstance(maximum_rotation, (int, float))
+                        or not math.isfinite(float(maximum_rotation))
+                        or float(maximum_rotation) <= 0.0
+                        or abs(float(rotation)) > float(maximum_rotation) + 1e-9
+                        or (
+                            local_registration.get("accepted") is True
+                            and local_registration.get("selected_final_branch")
+                            != "bounded_2d_local_registration"
+                        )
+                        or (
+                            local_registration.get("accepted") is False
+                            and (
+                                local_registration.get("selected_final_branch")
+                                != "zero_transform_baseline"
+                                or translation != [0, 0]
+                                or abs(float(rotation)) > 1e-12
+                            )
+                        )
+                    ):
+                        raise PartIdProjectionError(
+                            f"Part-ID hybrid record {identity} has an unsafe local "
+                            "mask registration"
+                        )
         accepted_by_identity[identity] = {
             "mask_path": mask_path,
             "cad_seed_path": seed_path,
