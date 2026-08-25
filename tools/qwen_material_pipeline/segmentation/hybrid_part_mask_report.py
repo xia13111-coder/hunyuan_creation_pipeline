@@ -310,6 +310,8 @@ def build_report(
     entity_manifest_path: Path,
     hybrid_manifest_path: Path,
     amodal_manifest_path: Path | None = None,
+    baseline_hybrid_manifest_path: Path | None = None,
+    only_edge_improved: bool = False,
     output_dir: Path,
 ) -> dict[str, Any]:
     sam_manifest_path = sam_manifest_path.expanduser().resolve(strict=True)
@@ -330,6 +332,23 @@ def build_report(
     hybrid = _all_records(hybrid_document, "hybrid")
     if set(sam) != set(entity) or set(sam) != set(hybrid):
         raise EntitySegRegionError("comparison manifests have different region sets")
+    baseline_hybrid: dict[tuple[str, str], Mapping[str, Any]] = {}
+    if baseline_hybrid_manifest_path is not None:
+        baseline_hybrid_manifest_path = (
+            baseline_hybrid_manifest_path.expanduser().resolve(strict=True)
+        )
+        baseline_hybrid = _all_records(
+            _read_manifest(baseline_hybrid_manifest_path, "baseline hybrid manifest"),
+            "baseline hybrid",
+        )
+        if set(baseline_hybrid) != set(hybrid):
+            raise EntitySegRegionError(
+                "baseline and current hybrid manifests have different region sets"
+            )
+    if only_edge_improved and not baseline_hybrid:
+        raise EntitySegRegionError(
+            "only-edge-improved report requires a baseline hybrid manifest"
+        )
     amodal_records: dict[tuple[str, str], Mapping[str, Any]] = {}
     model_views: dict[str, Mapping[str, Any]] = {}
     if amodal_manifest_path is not None:
@@ -377,6 +396,43 @@ def build_report(
     rows: list[dict[str, Any]] = []
     for key in sorted(hybrid):
         final_row = hybrid[key]
+        baseline_edge_support: float | None = None
+        edge_support_improvement: float | None = None
+        if baseline_hybrid:
+            baseline_row = baseline_hybrid[key]
+            if (
+                baseline_row.get("source_image") != final_row.get("source_image")
+                or baseline_row.get("source_image_sha256")
+                != final_row.get("source_image_sha256")
+            ):
+                raise EntitySegRegionError(
+                    f"baseline comparison source image differs: {key}"
+                )
+            baseline_refinement = baseline_row.get("iterative_refinement")
+            current_refinement = final_row.get("iterative_refinement")
+            baseline_metrics = (
+                baseline_refinement.get("final_metrics")
+                if isinstance(baseline_refinement, Mapping)
+                else None
+            )
+            current_metrics = (
+                current_refinement.get("final_metrics")
+                if isinstance(current_refinement, Mapping)
+                else None
+            )
+            if not isinstance(baseline_metrics, Mapping) or not isinstance(
+                current_metrics, Mapping
+            ):
+                raise EntitySegRegionError(
+                    f"baseline comparison has no final metrics: {key}"
+                )
+            baseline_edge_support = float(baseline_metrics["image_edge_support"])
+            edge_support_improvement = (
+                float(current_metrics["image_edge_support"])
+                - baseline_edge_support
+            )
+            if only_edge_improved and edge_support_improvement <= 1e-12:
+                continue
         sam_row = sam[key]
         entity_row = entity[key]
         source_path = (
@@ -537,6 +593,8 @@ def build_report(
                 "aligned_cad_template": final_row.get("aligned_cad_template"),
                 "relation_guidance": final_row.get("relation_guidance"),
                 "accepted": final_row.get("accepted") is True,
+                "baseline_edge_support": baseline_edge_support,
+                "edge_support_improvement": edge_support_improvement,
                 "model_space_projection": (
                     final_row.get("model_domain_shape_reference", {}).get(
                         "model_local_shape_mask"
@@ -584,6 +642,11 @@ def build_report(
                 continue
             metrics = row.get("metrics") or {}
             details: list[str] = []
+            edge_support_improvement = row.get("edge_support_improvement")
+            if isinstance(edge_support_improvement, (int, float)):
+                details.append(
+                    "相对上一版边缘支持 " f"{float(edge_support_improvement):+.3f}"
+                )
             if "entity_edge_improvement" in metrics:
                 details.append(f"边缘增益 {metrics['entity_edge_improvement']:+.3f}")
             if "entity_cad_direct_iou" in metrics:
@@ -684,12 +747,62 @@ def build_report(
                 f'<img src="{html.escape(row["asset"])}" loading="lazy"></a>'
                 f"<p>{html.escape(' · '.join(details))}</p></article>"
             )
-        sections.append(
-            f'<section id="{decision}"><h2>{labels[decision]} ({len(cards)})</h2>'
-            f'<div class="grid">{"".join(cards)}</div></section>'
-        )
+        if cards or not only_edge_improved:
+            sections.append(
+                f'<section id="{decision}"><h2>{labels[decision]} ({len(cards)})</h2>'
+                f'<div class="grid">{"".join(cards)}</div></section>'
+            )
 
     summary = hybrid_document["summary"]
+    visible_decisions = {
+        str(row["decision"])
+        for row in rows
+    }
+    navigation_labels = (
+        {
+            key: value
+            for key, value in labels.items()
+            if key in visible_decisions
+        }
+        if only_edge_improved
+        else labels
+    )
+    if only_edge_improved:
+        page_title = "相对上一版有改善的 Part-ID"
+        page_lead = (
+            "本页只显示最终照片边缘支持严格高于上一版的零件。未变化、仅重新封存以及边缘支持"
+            "没有提高的条目均已隐藏。每张图仍依次展示模型目标、配准模型形状、关系定位 CAD、"
+            "SAM3、EntitySeg 和最终边界。"
+        )
+        page_stats = (
+            f'<div class="stat">有改善 <b>{len(rows)}</b> / {summary["region_count"]}</div>'
+            + "".join(
+                f'<div class="stat">{view_id} <b>{sum(row["view_id"] == view_id for row in rows)}</b></div>'
+                for view_id in ("front", "iso", "side", "top")
+            )
+        )
+        page_note = (
+            "改善条件：当前最终 mask 的 image_edge_support 严格大于基线最终 mask。"
+            "卡片中的增量由两份封存清单自动计算。"
+        )
+    else:
+        page_title = "SAM3 + EntitySeg 辅助分割"
+        page_lead = (
+            "第一栏只显示 CAD 模型图中的目标 Part-ID 及其真实装配位置。目标在参考图中的位置"
+            "由多个非目标邻件自动投票推断，目标自身旧 mask 和旧直接映射不参与定位；随后在新区域"
+            "重新运行 SAM3 与 EntitySeg。紫色结果联合上一版安全候选、完整 CAD 目标形状、邻件"
+            "禁入区域和照片边缘优化得到；不修改 USD、相机或任何 mesh 变换。"
+        )
+        page_stats = (
+            f'<div class="stat">最终通过 <b>{summary["accepted_region_count"]}</b> / {summary["region_count"]}</div>'
+            f'<div class="stat">保留上一版并联合优化 <b>{summary["decision_counts"].get("iterative_refinement_from_prior_and_relation_candidates", 0)}</b></div>'
+            f'<div class="stat">邻件定位 CAD 回退 <b>{summary["decision_counts"].get("iterative_refinement_from_relation_cad_fallback", 0)}</b></div>'
+            f'<div class="stat">最终边界：迭代优化 <b>{summary["selected_source_counts"].get("shape_guided_iterative", 0)}</b></div>'
+        )
+        page_note = (
+            "这是正式 Part-ID 材质证据使用的边界融合结果；神经分割拒绝时仍由邻件定位的 CAD "
+            "形状继续做照片边缘优化，因此每个可见 Part-ID 都有结果。点击图片可查看原始像素。"
+        )
     page = f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SAM3 + EntitySeg 融合结果</title><style>
 :root{{--bg:#0b0f14;--panel:#131a22;--text:#e8eef5;--muted:#9fb0c1;--accent:#40ded7}}*{{box-sizing:border-box}}
@@ -698,13 +811,25 @@ h1{{margin:.1em 0}}h2{{margin-top:42px}}.lead,.card p{{color:var(--muted)}}.stat
 .stat,.card{{background:var(--panel);border:1px solid #253342;border-radius:11px}}.stat{{padding:12px 16px}}nav a{{color:var(--accent);margin-right:18px}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(590px,1fr));gap:14px}}.card{{padding:12px;overflow:hidden}}.card h3{{margin:0 0 8px}}
 .card img{{display:block;width:100%;height:auto;border-radius:7px}}.card p{{margin:8px 2px 0}}@media(max-width:650px){{main{{padding:14px}}.grid{{grid-template-columns:1fr}}}}
-</style></head><body><main><h1>SAM3 + EntitySeg 辅助分割</h1>
-<p class="lead">第一栏只显示 CAD 模型图中的目标 Part-ID 及其真实装配位置。目标在参考图中的位置由多个非目标邻件自动投票推断，目标自身旧 mask 和旧直接映射不参与定位；随后在新区域重新运行 SAM3 与 EntitySeg。紫色结果联合上一版安全候选、完整 CAD 目标形状、邻件禁入区域和照片边缘优化得到；不修改 USD、相机或任何 mesh 变换。</p>
-<div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">保留上一版并联合优化 <b>{summary['decision_counts'].get('iterative_refinement_from_prior_and_relation_candidates', 0)}</b></div><div class="stat">邻件定位 CAD 回退 <b>{summary['decision_counts'].get('iterative_refinement_from_relation_cad_fallback', 0)}</b></div><div class="stat">最终边界：迭代优化 <b>{summary['selected_source_counts'].get('shape_guided_iterative', 0)}</b></div></div>
-<p class="lead">这是正式 Part-ID 材质证据使用的边界融合结果；神经分割拒绝时仍由邻件定位的 CAD 形状继续做照片边缘优化，因此每个可见 Part-ID 都有结果。点击图片可查看原始像素。</p>
-<nav>{''.join(f'<a href="#{key}">{value}</a>' for key,value in labels.items())}</nav>{''.join(sections)}</main></body></html>"""
+</style></head><body><main><h1>{html.escape(page_title)}</h1>
+<p class="lead">{html.escape(page_lead)}</p>
+<div class="stats">{page_stats}</div>
+<p class="lead">{html.escape(page_note)}</p>
+<nav>{''.join(f'<a href="#{key}">{value}</a>' for key,value in navigation_labels.items())}</nav>{''.join(sections)}</main></body></html>"""
     (output_dir / "index.html").write_text(page, encoding="utf-8")
-    result = {"summary": summary, "records": rows}
+    result = {
+        "summary": summary,
+        "filter": {
+            "only_edge_improved": only_edge_improved,
+            "baseline_hybrid_manifest": (
+                str(baseline_hybrid_manifest_path)
+                if baseline_hybrid_manifest_path is not None
+                else None
+            ),
+            "visible_record_count": len(rows),
+        },
+        "records": rows,
+    }
     (output_dir / "comparison.json").write_text(
         json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
         encoding="utf-8",
@@ -718,6 +843,8 @@ def main() -> int:
     parser.add_argument("--entity-manifest", required=True, type=Path)
     parser.add_argument("--hybrid-manifest", required=True, type=Path)
     parser.add_argument("--amodal-manifest", type=Path)
+    parser.add_argument("--baseline-hybrid-manifest", type=Path)
+    parser.add_argument("--only-edge-improved", action="store_true")
     parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args()
     result = build_report(
@@ -725,6 +852,8 @@ def main() -> int:
         entity_manifest_path=args.entity_manifest,
         hybrid_manifest_path=args.hybrid_manifest,
         amodal_manifest_path=args.amodal_manifest,
+        baseline_hybrid_manifest_path=args.baseline_hybrid_manifest,
+        only_edge_improved=args.only_edge_improved,
         output_dir=args.output_dir,
     )
     print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
