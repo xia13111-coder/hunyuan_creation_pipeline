@@ -31,19 +31,25 @@ from qwen_material_pipeline.evidence.spatial import (
 )
 
 
-SCHEMA_VERSION = "qwen-whole-asset-camera-calibration/v9"
+SCHEMA_VERSION = "qwen-whole-asset-camera-calibration/v10"
 VIEW_SPEC_SCHEMA_VERSION = "qwen-camera-view-specs/v1"
 FINALIST_COUNT = 5
+FAST_FINALIST_COUNT = 12
+REFINEMENT_SEED_COUNT = 3
 RENDER_RETRY_ATTEMPTS = 3
 RENDER_RETRY_DELAY_SECONDS = 3.0
 MAX_FOCAL_LENGTH_MM = 2000.0
 CAMERA_OBJECTIVE_VERSION = "hierarchical_visible_part_alignment/v9"
 CAMERA_SELECTION_POLICY_VERSION = (
-    "alignment_gate_then_canonical_camera_signature/v1"
+    "alignment_gate_then_canonical_camera_signature_with_view_fallback/v2"
 )
 COMPLETE_ALIGNMENT_MINIMUM_IOU = 0.97
 COMPLETE_ALIGNMENT_MAXIMUM_BOUNDARY_P95_PX = 3.0
 FAST_SEARCH_MODES = ("auto", "disabled", "required")
+FAST_VERIFY_MAXIMUM_ABSOLUTE_IOU_DELTA = 0.025
+FAST_VERIFY_MAXIMUM_ABSOLUTE_SCORE_DELTA = 0.04
+FAST_VERIFY_MAXIMUM_BOUNDARY_DELTA_DIAGONAL_RATIO = 0.012
+FAST_VERIFY_OBJECTIVE_EDGE_RANK_FRACTION = 0.75
 CAMERA_PHASES = (
     "coarse",
     "lens",
@@ -1740,6 +1746,7 @@ def _completed_phase(
     expected_specs: Mapping[str, Any],
     reference_id: str,
     phase: str,
+    expected_search_backend: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
     """Return a validated completed phase that can be resumed without rendering.
 
@@ -1766,6 +1773,10 @@ def _completed_phase(
         != CAMERA_OBJECTIVE_VERSION
         or stored_scores.get("camera_selection_policy_version")
         != CAMERA_SELECTION_POLICY_VERSION
+        or (
+            expected_search_backend is not None
+            and stored_scores.get("search_backend") != expected_search_backend
+        )
     ):
         return None
     winner = stored_scores.get("winner")
@@ -1799,6 +1810,97 @@ def _completed_phase(
     return dict(winner), [dict(candidate) for candidate in candidates]
 
 
+def _fast_verification_fallback_reasons(
+    verification: Mapping[str, Any],
+    *,
+    exact_winner: Mapping[str, Any],
+    expected_candidate_count: int,
+    reference_shape: Sequence[int],
+) -> list[str]:
+    """Audit one view before accepting a fast-search camera.
+
+    Absolute photo alignment is deliberately left to the existing downstream
+    camera gate: a difficult reference can be equally difficult for both
+    renderers.  This gate instead asks whether Kaolin and the authoritative
+    full-resolution Isaac render agree on the same Top-K neighborhood.  A
+    disagreement reruns only this reference view through the legacy Isaac
+    search, so one unsafe view cannot invalidate or slow the other views.
+    """
+
+    reasons: list[str] = []
+    candidates = verification.get("candidates")
+    if not isinstance(candidates, list):
+        return ["verification_candidates_missing"]
+    if len(candidates) != expected_candidate_count:
+        reasons.append("verification_candidate_coverage_incomplete")
+    if not candidates:
+        return [*reasons, "verification_candidates_empty"]
+
+    if len(reference_shape) < 2:
+        raise ValueError("Reference shape requires height and width")
+    diagonal = math.hypot(float(reference_shape[0]), float(reference_shape[1]))
+    if not math.isfinite(diagonal) or diagonal <= 0.0:
+        raise ValueError("Reference shape has no finite image diagonal")
+
+    objective_disagreement = False
+    for row in candidates:
+        if not isinstance(row, Mapping):
+            reasons.append("verification_candidate_invalid")
+            continue
+        backend = str(row.get("candidate_search_backend", ""))
+        if not backend.startswith("kaolin_cuda_part_id/"):
+            reasons.append("verification_candidate_backend_mixed")
+        try:
+            iou_delta = abs(float(row["iou_delta"]))
+            score_delta = abs(float(row["score_delta"]))
+            boundary_ratio = abs(float(row["boundary_p95_delta_px"])) / diagonal
+        except (KeyError, TypeError, ValueError):
+            reasons.append("verification_candidate_metrics_missing")
+            continue
+        if not all(
+            math.isfinite(value)
+            for value in (iou_delta, score_delta, boundary_ratio)
+        ):
+            reasons.append("verification_candidate_metrics_non_finite")
+            continue
+        if iou_delta > FAST_VERIFY_MAXIMUM_ABSOLUTE_IOU_DELTA:
+            reasons.append("fast_isaac_iou_disagreement")
+        if score_delta > FAST_VERIFY_MAXIMUM_ABSOLUTE_SCORE_DELTA:
+            objective_disagreement = True
+        if boundary_ratio > FAST_VERIFY_MAXIMUM_BOUNDARY_DELTA_DIAGONAL_RATIO:
+            reasons.append("fast_isaac_boundary_disagreement")
+
+    similarity = exact_winner.get("whole_asset_similarity")
+    if (
+        not isinstance(similarity, Mapping)
+        or similarity.get("ecc_status") != "success"
+    ):
+        reasons.append("authoritative_winner_transform_invalid")
+    winner_rank = verification.get("isaac_winner_candidate_search_rank")
+    if (
+        not isinstance(winner_rank, int)
+        or winner_rank < 1
+        or winner_rank > expected_candidate_count
+    ):
+        reasons.append("authoritative_winner_not_bound_to_top_k")
+    elif (
+        objective_disagreement
+        and winner_rank
+        > max(
+            1,
+            math.ceil(
+                expected_candidate_count
+                * FAST_VERIFY_OBJECTIVE_EDGE_RANK_FRACTION
+            ),
+        )
+    ):
+        # Isaac has already corrected the final objective. A score mismatch is
+        # unsafe only when its exact winner lands near the retained Top-K
+        # boundary, where an omitted candidate could plausibly have won.
+        reasons.append("fast_isaac_objective_disagreement_near_top_k_edge")
+    return sorted(set(reasons))
+
+
 def _seed_by_reference(
     spatial_mapping: Mapping[str, Any],
 ) -> dict[str, dict[str, Any]]:
@@ -1827,22 +1929,35 @@ def _seed_by_reference(
     return output
 
 
-def _seed_by_view_specs(document: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+def _seed_candidates_by_view_specs(
+    document: Mapping[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
     if document.get("schema_version") != VIEW_SPEC_SCHEMA_VERSION:
         raise ValueError("Initial camera view specs use an unsupported schema_version")
     raw_views = document.get("views")
     if not isinstance(raw_views, list) or not raw_views:
         raise ValueError("Initial camera view specs require non-empty views")
-    output: dict[str, dict[str, Any]] = {}
+    output: dict[str, list[dict[str, Any]]] = {}
     for raw in raw_views:
         if not isinstance(raw, Mapping) or not isinstance(raw.get("view_id"), str):
             continue
-        reference_id = str(raw["view_id"])
+        calibration = raw.get("calibration")
+        calibrated_reference_id = (
+            calibration.get("reference_view_id")
+            if isinstance(calibration, Mapping)
+            else None
+        )
+        reference_id = (
+            str(calibrated_reference_id)
+            if isinstance(calibrated_reference_id, str)
+            and calibrated_reference_id
+            else str(raw["view_id"])
+        )
         direction = raw.get("analysis_direction")
         up_axis = raw.get("analysis_up_axis")
         if direction is None or up_axis is None:
             continue
-        output[reference_id] = {
+        output.setdefault(reference_id, []).append({
             "analysis_direction": direction,
             "analysis_up_axis": up_axis,
             "focal_length_mm": float(raw.get("focal_length_mm", 45.0)),
@@ -1853,9 +1968,46 @@ def _seed_by_view_specs(document: Mapping[str, Any]) -> dict[str, dict[str, Any]
             "orthographic_span_multiplier": float(
                 raw.get("orthographic_span_multiplier", 2.0)
             ),
-        }
+            "source_seed_view_id": str(raw["view_id"]),
+        })
     if not output:
         raise ValueError("Initial camera view specs contain no usable views")
+    return output
+
+
+def _seed_by_view_specs(document: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return the first seed per view for legacy callers.
+
+    Production refinement consumes all candidates through
+    ``_seed_candidates_by_view_specs``. Keeping this compatibility helper
+    makes single-camera tools and older tests deterministic.
+    """
+
+    candidates = _seed_candidates_by_view_specs(document)
+    return {reference_id: values[0] for reference_id, values in candidates.items()}
+
+
+def _namespace_candidate_specs(
+    specs: Mapping[str, Any],
+    *,
+    seed_index: int,
+    source_seed_view_id: str,
+) -> dict[str, Any]:
+    """Give multi-start candidates globally unique, auditable view IDs."""
+
+    output = copy.deepcopy(dict(specs))
+    views = output.get("views")
+    if not isinstance(views, list):
+        raise ValueError("Camera candidate specs require views")
+    for raw in views:
+        if not isinstance(raw, dict) or not isinstance(raw.get("view_id"), str):
+            raise ValueError("Camera candidate spec has no stable view ID")
+        raw["view_id"] = f"seed_{seed_index:02d}_{raw['view_id']}"
+        calibration = raw.get("calibration")
+        if not isinstance(calibration, dict):
+            raise ValueError("Camera candidate spec has no calibration")
+        calibration["refinement_seed_index"] = seed_index
+        calibration["refinement_source_seed_view_id"] = source_seed_view_id
     return output
 
 
@@ -2107,6 +2259,7 @@ def _seal_full_resolution_winners(
     rendered_path: Path,
     winners: Mapping[str, Mapping[str, Any]],
     output_path: Path,
+    rendered_paths_by_reference: Mapping[str, Path] | None = None,
 ) -> Path:
     """Seal already-scored full-resolution frames as the final render set.
 
@@ -2121,14 +2274,37 @@ def _seal_full_resolution_winners(
     render_set = rendered.get("render_set")
     if not isinstance(render_set, dict):
         raise ValueError("Full-resolution finalist registry has no render_set")
-    by_view_id = {
-        str(view.get("view_id")): view
-        for view in render_set.get("views", [])
-        if isinstance(view, dict) and isinstance(view.get("view_id"), str)
-    }
+    registry_cache: dict[Path, dict[str, dict[str, Any]]] = {}
+
+    def registry_views(path: Path) -> dict[str, dict[str, Any]]:
+        resolved = path.expanduser().resolve(strict=True)
+        cached = registry_cache.get(resolved)
+        if cached is not None:
+            return cached
+        document = _read_object(resolved)
+        source_render_set = document.get("render_set")
+        if not isinstance(source_render_set, dict):
+            raise ValueError(
+                f"Full-resolution winner registry has no render_set: {resolved}"
+            )
+        by_view_id = {
+            str(view.get("view_id")): view
+            for view in source_render_set.get("views", [])
+            if isinstance(view, dict) and isinstance(view.get("view_id"), str)
+        }
+        registry_cache[resolved] = by_view_id
+        return by_view_id
+
     sealed_views: list[dict[str, Any]] = []
     source_views: dict[str, str] = {}
+    source_registries: dict[str, str] = {}
     for reference_id, winner in winners.items():
+        source_registry = (
+            rendered_paths_by_reference.get(reference_id, rendered_path)
+            if rendered_paths_by_reference is not None
+            else rendered_path
+        )
+        by_view_id = registry_views(source_registry)
         source_view_id = winner.get("view_id")
         if not isinstance(source_view_id, str) or source_view_id not in by_view_id:
             raise ValueError(
@@ -2153,6 +2329,7 @@ def _seal_full_resolution_winners(
         }
         sealed_views.append(view)
         source_views[reference_id] = source_view_id
+        source_registries[reference_id] = str(source_registry.resolve(strict=True))
     rendered["render_set"] = {
         **render_set,
         "views": sealed_views,
@@ -2160,6 +2337,7 @@ def _seal_full_resolution_winners(
         "expanded_view_count": len(sealed_views),
         "sealed_full_resolution_winners": True,
         "sealed_source_views": source_views,
+        "sealed_source_registries": source_registries,
     }
     return _write_object(output_path, rendered)
 
@@ -2219,13 +2397,29 @@ def calibrate(
         for reference_id, (mask, raw) in references.items()
     }
     if initial_view_specs is not None:
-        seeds = _seed_by_view_specs(_read_object(initial_view_specs))
+        seed_candidates = _seed_candidates_by_view_specs(
+            _read_object(initial_view_specs)
+        )
+        seeds = {
+            reference_id: candidates[0]
+            for reference_id, candidates in seed_candidates.items()
+        }
         seed_audit = {
             "mode": "existing_continuous_camera_specs",
             "initial_view_specs": str(initial_view_specs),
+            "candidate_count_by_reference": {
+                reference_id: len(candidates)
+                for reference_id, candidates in seed_candidates.items()
+            },
         }
     elif spatial_mapping is not None:
         seeds = _seed_by_reference(_read_object(spatial_mapping))
+        seed_candidates = {
+            reference_id: [
+                {**seed, "source_seed_view_id": reference_id}
+            ]
+            for reference_id, seed in seeds.items()
+        }
         seed_audit: dict[str, Any] = {
             "mode": "existing_spatial_mapping",
             "spatial_mapping": str(spatial_mapping),
@@ -2236,6 +2430,12 @@ def calibrate(
             references=references,
             reference_images=reference_images,
         )
+        seed_candidates = {
+            reference_id: [
+                {**seed, "source_seed_view_id": reference_id}
+            ]
+            for reference_id, seed in seeds.items()
+        }
         seed_audit = {
             "mode": "source_render_continuous_seed",
             "references": initial_candidates,
@@ -2324,115 +2524,152 @@ def calibrate(
     winners: dict[str, dict[str, Any]] = {}
     phases: dict[str, list[dict[str, Any]]] = {}
     finalists: dict[str, list[dict[str, Any]]] = {}
+    phase_search_backend = (
+        str(fast_rasterizer.audit["backend"])
+        if fast_rasterizer is not None
+        else "isaac_rtx_part_id"
+    )
     for view_index, reference_id in enumerate(requested, start=1):
         print(
             f"[CAMERA] reference {view_index}/{len(requested)} {reference_id}",
             flush=True,
         )
-        seed = seeds[reference_id]
         phase_records: list[dict[str, Any]] = []
         phase_candidate_pool: list[dict[str, Any]] = []
-        for phase in active_phases:
-            specs = _candidate_specs(
-                reference_id=reference_id,
-                seed=seed,
-                phase=phase,
+        reference_seeds = seed_candidates[reference_id]
+        multi_start = len(reference_seeds) > 1
+        for seed_index, initial_seed in enumerate(reference_seeds, start=1):
+            seed = dict(initial_seed)
+            source_seed_view_id = str(
+                seed.get("source_seed_view_id", reference_id)
             )
-            view_specs_path = destination / reference_id / f"{phase}_view_specs.json"
-            scores_path = destination / reference_id / f"{phase}_scores.json"
-            completed = _completed_phase(
-                specs_path=view_specs_path,
-                scores_path=scores_path,
-                expected_specs=specs,
-                reference_id=reference_id,
-                phase=phase,
+            phase_dir = (
+                destination / reference_id / f"seed_{seed_index:02d}"
+                if multi_start
+                else destination / reference_id
             )
-            if completed is not None:
-                winner, candidates = completed
-                phase_backend = str(
-                    winner.get("render_backend", "verified_legacy_checkpoint")
+            for phase in active_phases:
+                specs = _candidate_specs(
+                    reference_id=reference_id,
+                    seed=seed,
+                    phase=phase,
                 )
+                if multi_start:
+                    specs = _namespace_candidate_specs(
+                        specs,
+                        seed_index=seed_index,
+                        source_seed_view_id=source_seed_view_id,
+                    )
+                view_specs_path = phase_dir / f"{phase}_view_specs.json"
+                scores_path = phase_dir / f"{phase}_scores.json"
+                completed = _completed_phase(
+                    specs_path=view_specs_path,
+                    scores_path=scores_path,
+                    expected_specs=specs,
+                    reference_id=reference_id,
+                    phase=phase,
+                    expected_search_backend=phase_search_backend,
+                )
+                if completed is not None:
+                    winner, candidates = completed
+                    phase_backend = str(
+                        winner.get(
+                            "render_backend", "verified_legacy_checkpoint"
+                        )
+                    )
+                    print(
+                        f"[CAMERA] {reference_id}/seed_{seed_index:02d}/"
+                        f"{phase} reusing verified completed candidate batch",
+                        flush=True,
+                    )
+                else:
+                    specs_path = _write_object(view_specs_path, specs)
+                    if fast_rasterizer is not None:
+                        winner, candidates = _score_fast_candidates(
+                            reference_id=reference_id,
+                            reference_mask=references[reference_id][0],
+                            reference_image=reference_images[reference_id],
+                            specs=specs,
+                            rasterizer=fast_rasterizer,
+                        )
+                        phase_backend = str(fast_rasterizer.audit["backend"])
+                    else:
+                        rendered = _run_render(
+                            isaac_python=isaac_python,
+                            registry=registry,
+                            output_dir=phase_dir / f"{phase}_renders",
+                            view_specs=specs_path,
+                            resolution=search_resolution,
+                            rt_subframes=rt_subframes,
+                            analysis_up_axis=analysis_up_axis,
+                            analysis_front_axis=analysis_front_axis,
+                        )
+                        winner, candidates = _score_candidates(
+                            reference_id=reference_id,
+                            reference_mask=references[reference_id][0],
+                            reference_image=reference_images[reference_id],
+                            registry_path=rendered,
+                        )
+                        phase_backend = "isaac_rtx_part_id"
+                    _write_object(
+                        scores_path,
+                        {
+                            "schema_version": SCHEMA_VERSION,
+                            "camera_objective_version": CAMERA_OBJECTIVE_VERSION,
+                            "camera_selection_policy_version": (
+                                CAMERA_SELECTION_POLICY_VERSION
+                            ),
+                            "reference_view_id": reference_id,
+                            "phase": phase,
+                            "refinement_seed_index": seed_index,
+                            "refinement_source_seed_view_id": (
+                                source_seed_view_id
+                            ),
+                            "search_backend": phase_backend,
+                            "winner": winner,
+                            "candidates": candidates,
+                        },
+                    )
+                phase_records.append(
+                    {
+                        "phase": phase,
+                        "refinement_seed_index": seed_index,
+                        "refinement_source_seed_view_id": source_seed_view_id,
+                        "winner": winner,
+                        "candidate_count": len(candidates),
+                        "search_backend": phase_backend,
+                    }
+                )
+                phase_candidate_pool.extend(candidates[:FINALIST_COUNT])
+                seed = {
+                    "analysis_direction": winner["analysis_direction"],
+                    "analysis_up_axis": winner["analysis_up_axis"],
+                    "focal_length_mm": winner["focal_length_mm"],
+                    "distance_multiplier": winner["distance_multiplier"],
+                    "target_offset_u": winner.get("target_offset_u", 0.0),
+                    "target_offset_v": winner.get("target_offset_v", 0.0),
+                    "projection_mode": winner.get(
+                        "projection_mode", "perspective"
+                    ),
+                    "orthographic_span_multiplier": winner.get(
+                        "orthographic_span_multiplier", 2.0
+                    ),
+                }
                 print(
-                    f"[CAMERA] {reference_id}/{phase} reusing verified "
-                    "completed candidate batch",
+                    f"[CAMERA] {reference_id}/seed_{seed_index:02d}/{phase} "
+                    f"IoU={winner['projection_iou']:.4f} "
+                    f"boundary_p95={winner['boundary_p95_px']:.2f}px",
                     flush=True,
                 )
-            else:
-                specs_path = _write_object(view_specs_path, specs)
-                if fast_rasterizer is not None:
-                    winner, candidates = _score_fast_candidates(
-                        reference_id=reference_id,
-                        reference_mask=references[reference_id][0],
-                        reference_image=reference_images[reference_id],
-                        specs=specs,
-                        rasterizer=fast_rasterizer,
-                    )
-                    phase_backend = str(fast_rasterizer.audit["backend"])
-                else:
-                    rendered = _run_render(
-                        isaac_python=isaac_python,
-                        registry=registry,
-                        output_dir=destination / reference_id / f"{phase}_renders",
-                        view_specs=specs_path,
-                        resolution=search_resolution,
-                        rt_subframes=rt_subframes,
-                        analysis_up_axis=analysis_up_axis,
-                        analysis_front_axis=analysis_front_axis,
-                    )
-                    winner, candidates = _score_candidates(
-                        reference_id=reference_id,
-                        reference_mask=references[reference_id][0],
-                        reference_image=reference_images[reference_id],
-                        registry_path=rendered,
-                    )
-                    phase_backend = "isaac_rtx_part_id"
-                _write_object(
-                    scores_path,
-                    {
-                        "schema_version": SCHEMA_VERSION,
-                        "camera_objective_version": CAMERA_OBJECTIVE_VERSION,
-                        "camera_selection_policy_version": (
-                            CAMERA_SELECTION_POLICY_VERSION
-                        ),
-                        "reference_view_id": reference_id,
-                        "phase": phase,
-                        "search_backend": phase_backend,
-                        "winner": winner,
-                        "candidates": candidates,
-                    },
-                )
-            phase_records.append(
-                {
-                    "phase": phase,
-                    "winner": winner,
-                    "candidate_count": len(candidates),
-                    "search_backend": phase_backend,
-                }
-            )
-            phase_candidate_pool.extend(candidates[:FINALIST_COUNT])
-            seed = {
-                "analysis_direction": winner["analysis_direction"],
-                "analysis_up_axis": winner["analysis_up_axis"],
-                "focal_length_mm": winner["focal_length_mm"],
-                "distance_multiplier": winner["distance_multiplier"],
-                "target_offset_u": winner.get("target_offset_u", 0.0),
-                "target_offset_v": winner.get("target_offset_v", 0.0),
-                "projection_mode": winner.get("projection_mode", "perspective"),
-                "orthographic_span_multiplier": winner.get(
-                    "orthographic_span_multiplier", 2.0
-                ),
-            }
-            print(
-                f"[CAMERA] {reference_id}/{phase} "
-                f"IoU={winner['projection_iou']:.4f} "
-                f"boundary_p95={winner['boundary_p95_px']:.2f}px",
-                flush=True,
-            )
         finalists[reference_id] = _global_finalists(
             phase_candidate_pool,
-            count=FINALIST_COUNT,
+            count=(
+                FAST_FINALIST_COUNT
+                if fast_rasterizer is not None
+                else FINALIST_COUNT
+            ),
         )
-        winners[reference_id] = phase_records[-1]["winner"]
+        winners[reference_id] = finalists[reference_id][0]
         phases[reference_id] = phase_records
 
     if fast_rasterizer is not None:
@@ -2468,6 +2705,8 @@ def calibrate(
         analysis_front_axis=analysis_front_axis,
     )
     finalist_verification: dict[str, dict[str, Any]] = {}
+    exact_finalist_winners: dict[str, dict[str, Any]] = {}
+    exact_finalist_candidates: dict[str, list[dict[str, Any]]] = {}
     for reference_id in requested:
         winner, candidates = _score_candidates(
             reference_id=reference_id,
@@ -2504,6 +2743,12 @@ def calibrate(
                     "iou_delta": round(
                         float(exact["projection_iou"])
                         - float(predicted["projection_iou"]),
+                        8,
+                    ),
+                    "candidate_search_score": predicted["score"],
+                    "isaac_score": exact["score"],
+                    "score_delta": round(
+                        float(exact["score"]) - float(predicted["score"]),
                         8,
                     ),
                     "candidate_search_boundary_p95_px": predicted[
@@ -2545,6 +2790,8 @@ def calibrate(
             ),
             "candidates": verification_candidates,
         }
+        exact_finalist_winners[reference_id] = winner
+        exact_finalist_candidates[reference_id] = candidates
         winners[reference_id] = winner
         phases[reference_id].append(
             {
@@ -2578,6 +2825,158 @@ def calibrate(
             flush=True,
         )
 
+    winner_rendered_paths: dict[str, Path] = {
+        reference_id: finalist_rendered for reference_id in requested
+    }
+    per_view_fallback: dict[str, dict[str, Any]] = {}
+    fallback_refinement_views: dict[str, list[dict[str, Any]]] = {}
+    if fast_rasterizer is not None:
+        for reference_id in requested:
+            verification = finalist_verification[reference_id]
+            reasons = _fast_verification_fallback_reasons(
+                verification,
+                exact_winner=exact_finalist_winners[reference_id],
+                expected_candidate_count=len(finalists[reference_id]),
+                reference_shape=references[reference_id][0].shape,
+            )
+            verification["fast_search_accepted"] = not reasons
+            verification["fallback_reasons"] = reasons
+            if not reasons:
+                print(
+                    f"[CAMERA] {reference_id}/fast_search_gate accepted "
+                    f"{len(finalists[reference_id])} Isaac-verified finalists",
+                    flush=True,
+                )
+                continue
+            if fast_search_mode == "required":
+                raise RuntimeError(
+                    "Fast camera search failed authoritative per-view "
+                    f"verification for {reference_id}: {', '.join(reasons)}"
+                )
+
+            print(
+                f"[CAMERA] {reference_id}/fast_search_gate unsafe "
+                f"({', '.join(reasons)}); rerunning only this view with "
+                "the legacy Isaac search",
+                flush=True,
+            )
+            fallback_dir = destination / "per_view_legacy_fallback" / reference_id
+            fallback_report = calibrate(
+                registry=registry,
+                reference_manifest=reference_manifest,
+                spatial_mapping=spatial_mapping,
+                isaac_python=isaac_python,
+                output_dir=fallback_dir,
+                reference_ids=(reference_id,),
+                search_resolution=search_resolution,
+                final_resolution=final_resolution,
+                rt_subframes=rt_subframes,
+                analysis_up_axis=analysis_up_axis,
+                analysis_front_axis=analysis_front_axis,
+                initial_view_specs=initial_view_specs,
+                search_phases=active_phases,
+                fast_search_mode="disabled",
+            )
+            fallback_views = fallback_report.get("views")
+            if not isinstance(fallback_views, list) or len(fallback_views) != 1:
+                raise RuntimeError(
+                    f"Legacy camera fallback for {reference_id} returned an "
+                    "invalid view report"
+                )
+            fallback_final = fallback_views[0].get("final")
+            fallback_registry_value = fallback_report.get("final_rendered_registry")
+            if not isinstance(fallback_final, dict) or not isinstance(
+                fallback_registry_value, str
+            ):
+                raise RuntimeError(
+                    f"Legacy camera fallback for {reference_id} lacks exact "
+                    "full-resolution evidence"
+                )
+            fallback_registry = Path(fallback_registry_value).resolve(strict=True)
+            fallback_refinement_value = fallback_report.get(
+                "refinement_seed_view_specs"
+            )
+            if not isinstance(fallback_refinement_value, str):
+                raise RuntimeError(
+                    f"Legacy camera fallback for {reference_id} lacks "
+                    "refinement seeds"
+                )
+            fallback_refinement_document = _read_object(
+                Path(fallback_refinement_value).resolve(strict=True)
+            )
+            fallback_candidates = _seed_candidates_by_view_specs(
+                fallback_refinement_document
+            ).get(reference_id, [])
+            if not fallback_candidates:
+                raise RuntimeError(
+                    f"Legacy camera fallback for {reference_id} produced no "
+                    "usable refinement seed"
+                )
+            fallback_refinement_views[reference_id] = [
+                copy.deepcopy(raw)
+                for raw in fallback_refinement_document.get("views", [])
+                if isinstance(raw, dict)
+                and isinstance(raw.get("calibration"), Mapping)
+                and raw["calibration"].get("reference_view_id")
+                == reference_id
+            ][:REFINEMENT_SEED_COUNT]
+            winners[reference_id] = dict(fallback_final)
+            winner_rendered_paths[reference_id] = fallback_registry
+            per_view_fallback[reference_id] = {
+                "reasons": reasons,
+                "report": str(
+                    (fallback_dir / "camera_calibration_report.json").resolve(
+                        strict=True
+                    )
+                ),
+                "selected_backend": "isaac_rtx_part_id",
+                "selected_iou": fallback_final.get("projection_iou"),
+                "selected_boundary_p95_px": fallback_final.get(
+                    "boundary_p95_px"
+                ),
+            }
+            phases[reference_id].append(
+                {
+                    "phase": "per_view_legacy_fallback",
+                    "winner": dict(fallback_final),
+                    "candidate_count": None,
+                    "search_backend": "isaac_rtx_part_id",
+                    "fallback_reasons": reasons,
+                    "fallback_report": per_view_fallback[reference_id]["report"],
+                }
+            )
+
+    refinement_seed_views: list[dict[str, Any]] = []
+    for reference_id in requested:
+        if reference_id in fallback_refinement_views:
+            for rank, raw in enumerate(
+                fallback_refinement_views[reference_id], start=1
+            ):
+                raw["view_id"] = f"refine_seed_{reference_id}_{rank:02d}"
+                refinement_seed_views.append(raw)
+            continue
+        refinement_seed_views.extend(
+            _spec_from_score(
+                score,
+                view_id=f"refine_seed_{reference_id}_{rank:02d}",
+                phase="next_pass_refinement_seed",
+            )
+            for rank, score in enumerate(
+                _global_finalists(
+                    exact_finalist_candidates[reference_id],
+                    count=REFINEMENT_SEED_COUNT,
+                ),
+                start=1,
+            )
+        )
+    refinement_seed_specs = {
+        "schema_version": VIEW_SPEC_SCHEMA_VERSION,
+        "views": refinement_seed_views,
+    }
+    refinement_seed_specs_path = _write_object(
+        destination / "refinement_seed_view_specs.json",
+        refinement_seed_specs,
+    )
     final_specs = {
         "schema_version": VIEW_SPEC_SCHEMA_VERSION,
         "views": [
@@ -2596,6 +2995,7 @@ def calibrate(
         rendered_path=finalist_rendered,
         winners=winners,
         output_path=destination / "sealed_finalists" / "part_registry.rendered.json",
+        rendered_paths_by_reference=winner_rendered_paths,
     )
     final_scores: dict[str, Any] = {}
     residual_audits: dict[str, Any] = {}
@@ -2632,6 +3032,38 @@ def calibrate(
             "camera_solution_fingerprint": solution_fingerprint,
         },
     )
+    fast_raster_audit: dict[str, Any] | None = None
+    if fast_rasterizer is not None:
+        fast_raster_audit = dict(fast_rasterizer.audit)
+        current_process_candidate_count = int(
+            fast_raster_audit.get("candidate_count", 0)
+        )
+        verified_phase_candidate_count = sum(
+            int(record["candidate_count"])
+            for reference_id in requested
+            for record in phases[reference_id]
+            if str(record.get("search_backend", "")).startswith(
+                "kaolin_cuda_part_id/"
+            )
+            and isinstance(record.get("candidate_count"), int)
+        )
+        fast_raster_audit.update(
+            {
+                "current_process_candidate_count": (
+                    current_process_candidate_count
+                ),
+                "current_process_raster_seconds": float(
+                    fast_raster_audit.get("raster_seconds", 0.0)
+                ),
+                "verified_phase_candidate_count": (
+                    verified_phase_candidate_count
+                ),
+                "phase_checkpoint_reuse_detected": (
+                    verified_phase_candidate_count
+                    > current_process_candidate_count
+                ),
+            }
+        )
     report = {
         "schema_version": SCHEMA_VERSION,
         "source_registry": str(registry),
@@ -2660,15 +3092,29 @@ def calibrate(
         "candidate_search": {
             "requested_mode": fast_search_mode,
             "selected_backend": (
-                fast_rasterizer.audit["backend"]
-                if fast_rasterizer is not None
-                else "isaac_rtx_part_id"
+                "per_view_hybrid"
+                if per_view_fallback
+                else (
+                    fast_rasterizer.audit["backend"]
+                    if fast_rasterizer is not None
+                    else "isaac_rtx_part_id"
+                )
             ),
             "fallback_reason": fast_fallback_reason,
+            "per_view_selected_backend": {
+                reference_id: (
+                    "isaac_rtx_part_id"
+                    if reference_id in per_view_fallback
+                    else phase_search_backend
+                )
+                for reference_id in requested
+            },
+            "per_view_fallback": per_view_fallback,
+            "fast_finalist_count": (
+                FAST_FINALIST_COUNT if fast_rasterizer is not None else None
+            ),
             "fast_raster_audit": (
-                dict(fast_rasterizer.audit)
-                if fast_rasterizer is not None
-                else None
+                fast_raster_audit
             ),
             "authoritative_full_resolution_backend": "isaac_rtx_part_id",
             "full_resolution_verification": finalist_verification,
@@ -2736,6 +3182,21 @@ def calibrate(
         ],
         "final_view_specs": str(final_specs_path),
         "final_view_specs_sha256": _sha256_file(final_specs_path),
+        "refinement_seed_view_specs": str(refinement_seed_specs_path),
+        "refinement_seed_view_specs_sha256": _sha256_file(
+            refinement_seed_specs_path
+        ),
+        "refinement_seed_count_per_reference": REFINEMENT_SEED_COUNT,
+        "refinement_seed_actual_count_by_reference": {
+            reference_id: sum(
+                1
+                for raw in refinement_seed_views
+                if isinstance(raw.get("calibration"), Mapping)
+                and raw["calibration"].get("reference_view_id")
+                == reference_id
+            )
+            for reference_id in requested
+        },
         "full_resolution_finalists": str(finalist_specs_path),
         "full_resolution_finalist_renders": str(finalist_rendered),
         "final_rendered_registry": str(final_rendered),

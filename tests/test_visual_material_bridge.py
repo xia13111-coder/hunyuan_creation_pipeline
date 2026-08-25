@@ -1829,7 +1829,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             document["materials"]["corresponding_color_calibration"],
             "adaptive_actual_cad",
         )
-        self.assertEqual(document["render"]["camera_fast_search"], "disabled")
+        self.assertEqual(document["render"]["camera_fast_search"], "auto")
         self.assertTrue(document["sam3"]["entityseg"]["enabled"])
         self.assertEqual(
             document["sam3"]["entityseg"]["python"],
@@ -1873,7 +1873,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             document["retrieval"]["final_top_k"],
             document["retrieval"]["siglip_top_k"],
         )
-        self.assertEqual(document["render"]["camera_fast_search"], "disabled")
+        self.assertEqual(document["render"]["camera_fast_search"], "auto")
         self.assertTrue(document["sam3"]["entityseg"]["enabled"])
 
     def test_entityseg_runtime_is_fail_closed_when_enabled(self) -> None:

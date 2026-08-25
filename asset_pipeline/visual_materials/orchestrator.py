@@ -831,7 +831,7 @@ def _verified_partial_live_resume_available(
             )
             if (
                 camera_report.get("schema_version")
-                == "qwen-whole-asset-camera-calibration/v9"
+                == "qwen-whole-asset-camera-calibration/v10"
                 and camera_report.get("source_registry") == expected_registry
                 and camera_report.get("reference_manifest") == expected_annotations
                 and (hashes_match or legacy_path_match)

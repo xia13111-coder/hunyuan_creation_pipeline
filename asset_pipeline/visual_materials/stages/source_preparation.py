@@ -69,6 +69,9 @@ def prepare_source_evidence(
     camera_calibration_dir = source_paths.camera_dir
     camera_calibration_search_dir = source_paths.camera_search_dir
     camera_calibration_search_specs = source_paths.camera_search_specs
+    camera_calibration_search_refinement_specs = (
+        camera_calibration_search_dir / "refinement_seed_view_specs.json"
+    )
     camera_calibration_search_report = source_paths.camera_search_report
     camera_calibrated_registry = source_paths.camera_calibrated_registry
     camera_calibration_report = source_paths.camera_report
@@ -215,6 +218,7 @@ def prepare_source_evidence(
         camera_search_is_reusable = (
             partial_live_resume
             and camera_calibration_search_specs.is_file()
+            and camera_calibration_search_refinement_specs.is_file()
             and camera_calibration_search_report.is_file()
         )
         if calibration_is_reusable:
@@ -223,7 +227,7 @@ def prepare_source_evidence(
                     camera_calibration_report,
                     source_registry=rendered_registry,
                     reference_manifest=resolved_foreground_annotations,
-                    initial_view_specs=camera_calibration_search_specs,
+                    initial_view_specs=camera_calibration_search_refinement_specs,
                 )
             except (OSError, RuntimeError, ValueError):
                 # A final report from another objective, seed, mask or source
@@ -266,6 +270,7 @@ def prepare_source_evidence(
                     command_runner=command_runner,
                     required_files=(
                         camera_calibration_search_specs,
+                        camera_calibration_search_refinement_specs,
                         camera_calibration_search_report,
                     ),
                 )
@@ -293,7 +298,7 @@ def prepare_source_evidence(
                     rt_subframes=render_rt_subframes,
                     analysis_up_axis=analysis_up_axis,
                     analysis_front_axis=analysis_front_axis,
-                    initial_view_specs=camera_calibration_search_specs,
+                    initial_view_specs=camera_calibration_search_refinement_specs,
                     search_phases=(
                         "orthographic",
                         "component_pose_recheck",
@@ -333,7 +338,7 @@ def prepare_source_evidence(
             camera_calibration_report,
             source_registry=rendered_registry,
             reference_manifest=resolved_foreground_annotations,
-            initial_view_specs=camera_calibration_search_specs,
+            initial_view_specs=camera_calibration_search_refinement_specs,
         )
         camera_alignment_acceptance = _require_complete_live_camera_alignment(
             final_camera_report,

@@ -18,6 +18,7 @@ from qwen_material_pipeline.evidence.camera_calibration import (
     _candidate_specs,
     _component_balanced_reference_metrics,
     _direction,
+    _fast_verification_fallback_reasons,
     _deterministic_part_id_foreground,
     _global_finalists,
     _merge_registry,
@@ -28,6 +29,7 @@ from qwen_material_pipeline.evidence.camera_calibration import (
     _residual_components,
     _rank_seed_candidates,
     _seal_full_resolution_winners,
+    _seed_candidates_by_view_specs,
     _seed_by_view_specs,
     _score_fast_candidates,
     _silhouette_coverage_metrics,
@@ -154,6 +156,133 @@ def test_camera_phase_checkpoint_reuse_requires_exact_candidate_specs(
         is None
     )
 
+
+def test_camera_phase_checkpoint_reuse_requires_matching_search_backend(
+    tmp_path: Path,
+) -> None:
+    specs = {
+        "schema_version": "qwen-camera-view-specs/v1",
+        "views": [{"view_id": "cal_front_micro_000"}],
+    }
+    specs_path = tmp_path / "micro_view_specs.json"
+    scores_path = tmp_path / "micro_scores.json"
+    specs_path.write_text(json.dumps(specs), encoding="utf-8")
+    scores_path.write_text(
+        json.dumps(
+            {
+                "schema_version": camera_calibration.SCHEMA_VERSION,
+                "camera_objective_version": (
+                    camera_calibration.CAMERA_OBJECTIVE_VERSION
+                ),
+                "camera_selection_policy_version": (
+                    camera_calibration.CAMERA_SELECTION_POLICY_VERSION
+                ),
+                "reference_view_id": "front",
+                "phase": "micro",
+                "search_backend": "isaac_rtx_part_id",
+                "winner": {
+                    "view_id": "cal_front_micro_000",
+                    "objective_version": camera_calibration.CAMERA_OBJECTIVE_VERSION,
+                },
+                "candidates": [
+                    {
+                        "view_id": "cal_front_micro_000",
+                        "objective_version": (
+                            camera_calibration.CAMERA_OBJECTIVE_VERSION
+                        ),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        camera_calibration._completed_phase(
+            specs_path=specs_path,
+            scores_path=scores_path,
+            expected_specs=specs,
+            reference_id="front",
+            phase="micro",
+            expected_search_backend="kaolin_cuda_part_id/v1",
+        )
+        is None
+    )
+
+
+def test_fast_camera_verification_accepts_consistent_top_k() -> None:
+    verification = {
+        "isaac_winner_candidate_search_rank": 2,
+        "candidates": [
+            {
+                "candidate_search_backend": "kaolin_cuda_part_id/v1",
+                "iou_delta": 0.006,
+                "score_delta": -0.008,
+                "boundary_p95_delta_px": 2.8,
+            },
+            {
+                "candidate_search_backend": "kaolin_cuda_part_id/v1",
+                "iou_delta": -0.004,
+                "score_delta": 0.012,
+                "boundary_p95_delta_px": -1.2,
+            },
+        ],
+    }
+
+    assert _fast_verification_fallback_reasons(
+        verification,
+        exact_winner={"whole_asset_similarity": {"ecc_status": "success"}},
+        expected_candidate_count=2,
+        reference_shape=(512, 512),
+    ) == []
+
+
+def test_fast_camera_verification_rejects_only_unsafe_view() -> None:
+    verification = {
+        "isaac_winner_candidate_search_rank": 1,
+        "candidates": [
+            {
+                "candidate_search_backend": "kaolin_cuda_part_id/v1",
+                "iou_delta": 0.04,
+                "score_delta": 0.06,
+                "boundary_p95_delta_px": 12.0,
+            }
+        ],
+    }
+
+    reasons = _fast_verification_fallback_reasons(
+        verification,
+        exact_winner={"whole_asset_similarity": {"ecc_status": "success"}},
+        expected_candidate_count=1,
+        reference_shape=(512, 512),
+    )
+
+    assert reasons == [
+        "fast_isaac_boundary_disagreement",
+        "fast_isaac_iou_disagreement",
+    ]
+
+
+def test_fast_camera_verification_rejects_objective_drift_at_top_k_edge() -> None:
+    verification = {
+        "isaac_winner_candidate_search_rank": 4,
+        "candidates": [
+            {
+                "candidate_search_backend": "kaolin_cuda_part_id/v1",
+                "iou_delta": 0.001,
+                "score_delta": (0.06 if rank == 4 else 0.002),
+                "boundary_p95_delta_px": 0.5,
+            }
+            for rank in range(1, 5)
+        ],
+    }
+
+    assert _fast_verification_fallback_reasons(
+        verification,
+        exact_winner={"whole_asset_similarity": {"ecc_status": "success"}},
+        expected_candidate_count=4,
+        reference_shape=(512, 512),
+    ) == ["fast_isaac_objective_disagreement_near_top_k_edge"]
 
 def test_direction_angle_round_trip_is_continuous() -> None:
     for azimuth, elevation in ((0.0, 15.0), (137.25, 23.5), (359.5, 81.0)):
@@ -551,6 +680,32 @@ def test_continuous_view_specs_can_resume_camera_only_refinement() -> None:
     assert seeds["front"]["distance_multiplier"] == 2.8
     assert seeds["front"]["target_offset_u"] == 0.04
     assert seeds["front"]["target_offset_v"] == -0.02
+
+
+def test_refinement_view_specs_preserve_multiple_seeds_per_reference() -> None:
+    seeds = _seed_candidates_by_view_specs(
+        {
+            "schema_version": "qwen-camera-view-specs/v1",
+            "views": [
+                {
+                    "view_id": f"refine_seed_side_{rank:02d}",
+                    "analysis_direction": [0.0, -1.0, rank * 0.01],
+                    "analysis_up_axis": [0.0, 0.0, 1.0],
+                    "focal_length_mm": 450.0,
+                    "distance_multiplier": 23.0 + rank * 0.1,
+                    "calibration": {"reference_view_id": "side"},
+                }
+                for rank in range(1, 4)
+            ],
+        }
+    )
+
+    assert len(seeds["side"]) == 3
+    assert [seed["source_seed_view_id"] for seed in seeds["side"]] == [
+        "refine_seed_side_01",
+        "refine_seed_side_02",
+        "refine_seed_side_03",
+    ]
 
 
 def test_full_resolution_finalists_are_global_across_phases() -> None:
@@ -1068,3 +1223,62 @@ def test_full_resolution_winner_is_sealed_without_rerender(
         "rerank_front_02"
     )
     assert sealed["render_set"]["sealed_full_resolution_winners"] is True
+
+
+def test_full_resolution_winners_can_mix_verified_fast_and_fallback_registries(
+    tmp_path: Path,
+) -> None:
+    fast = tmp_path / "fast.json"
+    fallback = tmp_path / "fallback.json"
+    output = tmp_path / "sealed" / "part_registry.rendered.json"
+
+    def registry(view_id: str, reference_id: str, rgb: str) -> dict:
+        return {
+            "schema_version": "qwen-material-parts/v1",
+            "parts": [{"part_id": "P0001"}],
+            "render_set": {
+                "views": [
+                    {
+                        "view_id": view_id,
+                        "rgb": rgb,
+                        "camera_calibration": {
+                            "reference_view_id": reference_id,
+                            "phase": "full_resolution_rerank",
+                        },
+                    }
+                ]
+            },
+        }
+
+    fast.write_text(
+        json.dumps(registry("rerank_front_01", "front", "fast.png")),
+        encoding="utf-8",
+    )
+    fallback.write_text(
+        json.dumps(registry("side", "side", "fallback.png")),
+        encoding="utf-8",
+    )
+
+    _seal_full_resolution_winners(
+        rendered_path=fast,
+        winners={
+            "front": {"view_id": "rerank_front_01"},
+            "side": {"view_id": "side"},
+        },
+        output_path=output,
+        rendered_paths_by_reference={"front": fast, "side": fallback},
+    )
+    sealed = json.loads(output.read_text(encoding="utf-8"))
+
+    assert [view["view_id"] for view in sealed["render_set"]["views"]] == [
+        "front",
+        "side",
+    ]
+    assert [view["rgb"] for view in sealed["render_set"]["views"]] == [
+        "fast.png",
+        "fallback.png",
+    ]
+    assert sealed["render_set"]["sealed_source_registries"] == {
+        "front": str(fast.resolve()),
+        "side": str(fallback.resolve()),
+    }

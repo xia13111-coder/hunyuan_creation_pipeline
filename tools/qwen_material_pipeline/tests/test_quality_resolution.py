@@ -939,7 +939,7 @@ def test_live_camera_provenance_accepts_only_current_run_two_pass_seed(
     input_contract = {
         "camera_objective_version": "hierarchical_visible_part_alignment/v9",
         "camera_selection_policy_version": (
-            "alignment_gate_then_canonical_camera_signature/v1"
+            "alignment_gate_then_canonical_camera_signature_with_view_fallback/v2"
         ),
         "initial_view_specs_sha256": canonical_sha256({}),
     }
@@ -948,7 +948,7 @@ def test_live_camera_provenance_accepts_only_current_run_two_pass_seed(
     report.write_text(
         json.dumps(
             {
-                "schema_version": "qwen-whole-asset-camera-calibration/v9",
+                "schema_version": "qwen-whole-asset-camera-calibration/v10",
                 "source_registry": str(registry.resolve()),
                 "source_registry_sha256": hashlib.sha256(b"{}").hexdigest(),
                 "reference_manifest": str(reference_manifest.resolve()),
@@ -959,7 +959,7 @@ def test_live_camera_provenance_accepts_only_current_run_two_pass_seed(
                 "seed_search": {"mode": "existing_continuous_camera_specs"},
                 "camera_objective_version": "hierarchical_visible_part_alignment/v9",
                 "camera_selection_policy_version": (
-                    "alignment_gate_then_canonical_camera_signature/v1"
+                    "alignment_gate_then_canonical_camera_signature_with_view_fallback/v2"
                 ),
                 "calibration_input_contract": input_contract,
                 "calibration_input_fingerprint": canonical_sha256(input_contract),

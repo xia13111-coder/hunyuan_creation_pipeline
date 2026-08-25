@@ -37,7 +37,7 @@
     "quality_lighting_profile": "material-neutral",
     "analysis_up_axis": "z",
     "analysis_front_axis": "-y",
-    "camera_fast_search": "disabled",
+    "camera_fast_search": "auto",
     "final_visual_gate": {
       "maximum_score_regression": 0.01,
       "maximum_group_recall_regression": 0.01,

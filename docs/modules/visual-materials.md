@@ -30,19 +30,26 @@ occlusion buffers. It never moves an individual Mesh or uses material and
 lighting appearance. The highest-ranked candidates are still rendered at final
 resolution by Isaac Sim.
 
-`calibrate-cameras --fast-search` accepts `auto` (the default, with fallback
-when the optional runtime is unavailable), `required` (fail if the fast backend
-is unavailable), and `disabled` (the legacy all-Isaac candidate search). The
-report binds asset hashes, triangle and candidate counts, timings, and every
-fast candidate to its full-resolution Isaac verification under
-`candidate_search`.
+`calibrate-cameras --fast-search` accepts `auto` (the production-safe hybrid
+mode), `required` (fail unless both the fast backend and its verification pass),
+and `disabled` (the legacy all-Isaac candidate search). Production profiles use
+`camera_fast_search: auto`. Twelve fast finalists per view are rendered by
+Isaac at final resolution, then checked per view for candidate coverage,
+provenance, IoU, objective, and boundary agreement. A missing or inconsistent
+view alone is rerun with the complete legacy Isaac search; verified views stay
+on the fast result. Four-view evidence therefore remains mandatory without
+requiring human selection or forcing all views onto the slow path.
 
-The production material profiles set `camera_fast_search: disabled` and use
-the complete Isaac candidate search. Material identity depends on every
-registered reference view surviving camera and spatial registration; losing a
-view turns visible small parts into false hidden-part fallbacks. Fast search
-therefore remains available for explicit experiments, while the default
-material path prioritizes complete four-view evidence.
+The low-resolution pass exports its three best Isaac-verified cameras for each
+reference view. The high-resolution pass refines all three seeds independently,
+then performs one shared Isaac rerank over their combined finalists. This
+multi-start handoff avoids committing the expensive pass to a single local
+optimum while retaining deterministic, geometry-only selection.
+
+The report binds asset hashes, triangle and candidate counts, timings, and
+every fast candidate to its full-resolution Isaac verification. It also records
+the selected backend and any fallback reason for each view under
+`candidate_search`.
 
 Global camera seeds and per-phase candidates use the same geometry-gate
 ordering: candidates that require out-of-contract 2-D scale, rotation, or

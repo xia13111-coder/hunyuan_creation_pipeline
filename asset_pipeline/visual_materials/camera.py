@@ -20,8 +20,9 @@ CAMERA_ALIGNMENT_LOCAL_BOX_MINIMUM_RECALL = 0.90
 CAMERA_ALIGNMENT_LOCAL_BOX_MINIMUM_STRUCTURE_SCORE = 0.60
 CAMERA_OBJECTIVE_VERSION = "hierarchical_visible_part_alignment/v9"
 CAMERA_SELECTION_POLICY_VERSION = (
-    "alignment_gate_then_canonical_camera_signature/v1"
+    "alignment_gate_then_canonical_camera_signature_with_view_fallback/v2"
 )
+CAMERA_CALIBRATION_SCHEMA_VERSION = "qwen-whole-asset-camera-calibration/v10"
 
 
 def _sha256_file(path: Path) -> str:
@@ -155,7 +156,7 @@ def validate_live_camera_registration_provenance(
     """Reject stale, legacy, spatial-map or per-Part camera reuse in live mode."""
 
     report = read_object(report_path, "live camera calibration report")
-    if report.get("schema_version") != "qwen-whole-asset-camera-calibration/v9":
+    if report.get("schema_version") != CAMERA_CALIBRATION_SCHEMA_VERSION:
         raise RuntimeError(
             "Live camera calibration was not produced by the current from-zero "
             "whole-asset registration contract"

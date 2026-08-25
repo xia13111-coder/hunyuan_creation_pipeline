@@ -27,14 +27,21 @@ USD。
 Part-ID、轮廓和遮挡关系，不移动任何单独 Mesh，也不使用材质或灯光信息。每个视角排名最高
 的候选仍会交给 Isaac Sim 以最终分辨率重新渲染。
 
-`calibrate-cameras --fast-search` 支持三种模式：`auto` 默认启用并在可选运行时不可用时回退，
-`required` 要求快速后端可用，否则停止，`disabled` 完整使用旧 Isaac 候选搜索。报告中的
-`candidate_search.fast_raster_audit` 记录资产哈希、三角形数量、候选数量和耗时；
-`candidate_search.full_resolution_verification` 绑定快速候选与 Isaac 最终复核结果。
+`calibrate-cameras --fast-search` 支持三种模式：`auto` 默认启用安全混合搜索，`required` 要求
+快速后端以及快速结果的最终验证都通过，否则停止，`disabled` 完整使用旧 Isaac 候选搜索。
+正式材质主线使用 `camera_fast_search: auto`。每个视角会保留 12 个快速候选，由 Isaac 以最终
+分辨率统一复核；系统逐视角检查候选数量、来源、IoU、综合目标和边界残差的一致性。某个视角
+缺失或两种渲染器不一致时，只对这个视角自动重跑完整 Isaac 搜索，其余安全视角继续使用快速
+结果。因此四视角证据仍是硬约束，不需要人工选择，也不会因单个坏视角让整个搜索退回慢速。
 
-正式材质主线的生产配置固定为 `camera_fast_search: disabled`。原因是 Part-ID 材质身份依赖
-四个参考视角都通过相机和空间配准；快速候选缺失一个视角时，后续小零件会被错误当作不可见
-零件。生产主线因此优先保证证据完整性，快速模式只保留给独立实验和明确选择它的配置。
+低清搜索会为每个参考视角输出经过 Isaac 复核的前三个相机；高分精调分别从这三个种子继续
+优化，最后只启动一次 Isaac，对合并后的候选统一重排。这样不会让高成本阶段被单个局部最优
+锁死，整个选择过程仍只依赖通用几何指标且结果可复现。
+
+报告中的 `candidate_search.fast_raster_audit` 记录资产哈希、三角形数量、候选数量和耗时；
+`candidate_search.full_resolution_verification` 绑定快速候选与 Isaac 最终复核结果，
+`candidate_search.per_view_selected_backend` 和 `per_view_fallback` 记录每个视角最终采用的后端
+及回退原因。
 
 相机的全局种子和各阶段候选使用同一套几何门禁排序：先排除需要超出合同的二维尺度、旋转
 或平移才能重合的候选，再比较轮廓 IoU、边界残差和结构分数。相机标定与空间 Part-ID 投影
