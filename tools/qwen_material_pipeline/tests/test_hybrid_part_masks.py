@@ -17,6 +17,7 @@ from qwen_material_pipeline.segmentation.hybrid_part_masks import (
     _connected_component_count,
     _entity_aligned_cad_seed,
     _entity_rejection_reasons,
+    _filamentary_shape_audit,
     _full_resolution_similarity_fallback,
     _iterative_shape_guided_refinement,
     _model_domain_shape_references,
@@ -278,7 +279,7 @@ def test_relation_cad_fallback_can_leave_its_self_derived_support_mask() -> None
     )
     assert registration["location_prior_only"] is True
     assert registration["candidate_support_role"] == (
-        "search_regularizer_not_acceptance_floor"
+        "location_hint_not_search_or_acceptance_floor"
     )
     assert registration["proposal_candidate_support"] < (
         registration["original_cad_candidate_support_floor"]
@@ -288,6 +289,48 @@ def test_relation_cad_fallback_can_leave_its_self_derived_support_mask() -> None
     )
     assert registration["selection_rejection_reasons"] == []
     assert np.array_equal(refined, image[:, :, 0] > 0)
+
+
+def test_filamentary_relation_fallback_uses_photo_centerline_not_its_old_mask() -> None:
+    image = np.full((96, 128, 3), (35, 105, 45), dtype=np.uint8)
+    target_points = np.asarray(
+        [(28, 34), (28, 58), (42, 70), (84, 70), (98, 58)], np.int32
+    )
+    cv2.polylines(image, [target_points], False, (205, 210, 205), 5, cv2.LINE_AA)
+
+    relation_seed = np.zeros(image.shape[:2], dtype=np.uint8)
+    old_points = target_points + np.asarray((0, -5), dtype=np.int32)
+    cv2.polylines(relation_seed, [old_points], False, 1, 5, cv2.LINE_8)
+    model_shape = relation_seed[20:76, 20:106] > 0
+
+    geometry = _filamentary_shape_audit(model_shape)
+    assert geometry["filamentary"] is True
+
+    refined, audit, _support = _iterative_shape_guided_refinement(
+        image=image,
+        visible_seed=relation_seed > 0,
+        amodal_seed=None,
+        model_visible_shape=model_shape,
+        candidate_masks=[("relation_cad_location_fallback", relation_seed > 0)],
+        primary_candidate_source="relation_cad_location_fallback",
+        complete_target_shape_variants=True,
+    )
+
+    registration = audit["model_domain_photo_registration"]
+    assert registration["accepted"] is True
+    assert registration["registration_evidence_mode"] == (
+        "filamentary_bright_achromatic_ridge_boundary_and_assembly"
+    )
+    assert registration["photo_evidence_metric"] == (
+        "filamentary_bright_achromatic_ridge_boundary_geometric_mean"
+    )
+    assert registration["proposal_photo_evidence"] > (
+        registration["baseline_photo_evidence"]
+    )
+    assert registration["local_translation_xy_pixels"][1] > 0
+    assert registration["cad_mesh_transform_changed"] is False
+    assert registration["assembly_camera_changed"] is False
+    assert not np.array_equal(refined, relation_seed > 0)
 
 
 def test_iterative_refinement_removes_current_view_occluder_and_snaps_edges() -> None:

@@ -107,6 +107,14 @@ similarity transform is selected by joint photograph-edge gain and assembly-
 neighbour clearance. Genuine SAM3, EntitySeg, or prior-fusion image candidates
 retain their stricter non-regression contract. Insufficient anchors preserve
 the audited first-pass result instead of aborting the batch.
+For filamentary parts such as tubes, hoses, cables, rods, and thin rails, an
+ordinary edge score can lock onto only one side or a nearby metal edge. The
+workflow detects this geometry automatically from CAD-mask compactness,
+skeleton length, and bounding-box fill, without a Part-ID list or material
+prompt. It then selects the bounded 2-D similarity transform using multiscale
+bright centreline ridges, achromatic brightness, both boundaries, and neighbour
+clearance. The new position is accepted only when both photograph-structure
+evidence and the assembly-safety joint score strictly improve.
 Production SAM3 and EntitySeg entry points use one fixed inference seed and seal
 that seed together with request and model hashes. A retry with identical inputs
 therefore cannot silently change Part-ID evidence through random initialization.
@@ -121,7 +129,7 @@ run instead of silently continuing with a two-view material decision.
 | SAM3 | Whole-workpiece foreground and per-part initialization candidates. |
 | EntitySeg / CropFormer | Class-agnostic initialization candidates accepted only inside the CAD safety contract. |
 | Neighbour-relation localizer | Excludes the target's own old mask and infers its position from multiple automatic anchors plus CAD assembly relations. |
-| Iterative boundary optimizer | Combines the complete model-image target shape, neighbour exclusion, both segmentation passes, prior masks, and image edges; it transforms only 2-D proposals and never moves an individual mesh. |
+| Iterative boundary optimizer | Combines the complete model-image target shape, neighbour exclusion, both segmentation passes, and prior masks. Ordinary parts use image edges; automatically detected filamentary parts also use centreline ridges and both boundaries. It transforms only 2-D proposals and never moves an individual mesh. |
 | MVInverse | Albedo, roughness, and metallic estimates inside accepted masks. |
 | SigLIP2 | Retrieve visually related MDLs from NVIDIA `Materials/Base`. |
 | DINOv2 | Compare local surface and texture appearance. |

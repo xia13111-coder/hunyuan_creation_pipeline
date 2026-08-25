@@ -23,7 +23,7 @@ from .entityseg_regions import EntitySegRegionError, _boundary_metrics
 from .sam3_regions import _normalized_shape_agreement
 
 
-SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v7"
+SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v8"
 MODEL_SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v5"
 LEGACY_SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v2"
 MAXIMUM_ENTITY_TO_CAD_AREA_RATIO = 1.85
@@ -1016,6 +1016,119 @@ def _mask_edge_support(edge_field: np.ndarray, mask: np.ndarray) -> float:
     return float(np.mean(values >= 0.25)) if values.size else 0.0
 
 
+def _morphological_skeleton(mask: np.ndarray) -> np.ndarray:
+    """Return a deterministic one-pixel-ish skeleton using core OpenCV only."""
+
+    work = np.asarray(mask, dtype=np.uint8).copy()
+    skeleton = np.zeros_like(work)
+    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    for _iteration in range(max(work.shape)):
+        opened = cv2.morphologyEx(work, cv2.MORPH_OPEN, kernel)
+        skeleton |= work & ~opened
+        work = cv2.erode(work, kernel)
+        if not np.any(work):
+            break
+    return skeleton > 0
+
+
+def _filamentary_shape_audit(mask: np.ndarray) -> dict[str, float | int | bool]:
+    """Identify line-like masks from dimensionless shape geometry.
+
+    This covers transparent tubes, opaque hoses, cables, rods, and thin rails
+    without using a material label or Part-ID allowlist.
+    """
+
+    binary = np.asarray(mask, dtype=bool)
+    pixels = int(np.count_nonzero(binary))
+    contours, _hierarchy = cv2.findContours(
+        binary.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
+    )
+    perimeter = float(sum(cv2.arcLength(contour, True) for contour in contours))
+    compactness = perimeter * perimeter / max(4.0 * math.pi * pixels, 1.0)
+    skeleton = _morphological_skeleton(binary)
+    skeleton_pixels = int(np.count_nonzero(skeleton))
+    equivalent_diameter = 2.0 * math.sqrt(max(float(pixels), 1.0) / math.pi)
+    skeleton_to_equivalent_diameter = skeleton_pixels / max(equivalent_diameter, 1.0)
+    ys, xs = np.where(binary)
+    bbox_pixels = int(np.ptp(xs) + 1) * int(np.ptp(ys) + 1) if len(xs) else 0
+    bbox_fill_fraction = pixels / max(bbox_pixels, 1)
+    filamentary = bool(
+        compactness >= 4.0
+        and skeleton_to_equivalent_diameter >= 3.0
+        and bbox_fill_fraction <= 0.55
+    )
+    return {
+        "filamentary": filamentary,
+        "mask_pixels": pixels,
+        "perimeter_pixels": perimeter,
+        "compactness": compactness,
+        "skeleton_pixels": skeleton_pixels,
+        "skeleton_to_equivalent_diameter": skeleton_to_equivalent_diameter,
+        "bbox_fill_fraction": bbox_fill_fraction,
+    }
+
+
+def _normalized_centerline_ridge_fields(
+    image: np.ndarray,
+    *,
+    half_width_pixels: float,
+    normalization_mask: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return multiscale bright/dark Hessian ridge fields for thin parts."""
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+    base_sigma = max(1.0, float(half_width_pixels))
+    bright_responses: list[np.ndarray] = []
+    dark_responses: list[np.ndarray] = []
+    for multiplier in (0.75, 1.0, 1.5):
+        sigma = max(1.0, base_sigma * multiplier)
+        smoothed = cv2.GaussianBlur(gray, (0, 0), sigma)
+        dxx = cv2.Sobel(smoothed, cv2.CV_32F, 2, 0, ksize=3)
+        dyy = cv2.Sobel(smoothed, cv2.CV_32F, 0, 2, ksize=3)
+        dxy = cv2.Sobel(smoothed, cv2.CV_32F, 1, 1, ksize=3)
+        eigen_delta = np.sqrt(np.maximum((dxx - dyy) ** 2 + 4.0 * dxy ** 2, 0.0))
+        first = 0.5 * (dxx + dyy + eigen_delta)
+        second = 0.5 * (dxx + dyy - eigen_delta)
+        small = np.where(np.abs(first) <= np.abs(second), first, second)
+        large = np.where(np.abs(first) > np.abs(second), first, second)
+        anisotropy = np.abs(small) / (np.abs(large) + 1e-6)
+        vesselness = np.exp(-(anisotropy ** 2) / (2.0 * 0.5 ** 2))
+        bright_responses.append(np.maximum(-large, 0.0) * vesselness)
+        dark_responses.append(np.maximum(large, 0.0) * vesselness)
+
+    selected_mask = np.asarray(normalization_mask, dtype=bool)
+
+    def normalized(responses: list[np.ndarray]) -> np.ndarray:
+        response = np.max(responses, axis=0)
+        selected = response[selected_mask]
+        normalizer = float(np.percentile(selected, 95.0)) if selected.size else 0.0
+        return np.clip(response / max(normalizer, 1e-6), 0.0, 1.0)
+
+    return normalized(bright_responses), normalized(dark_responses)
+
+
+def _normalized_achromatic_brightness(
+    image: np.ndarray,
+    *,
+    normalization_mask: np.ndarray,
+) -> np.ndarray:
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV).astype(np.float32)
+    saturation = hsv[:, :, 1] / 255.0
+    value = hsv[:, :, 2] / 255.0
+    response = value * (1.0 - saturation)
+    selected = response[np.asarray(normalization_mask, dtype=bool)]
+    normalizer = float(np.percentile(selected, 95.0)) if selected.size else 0.0
+    return np.clip(response / max(normalizer, 1e-6), 0.0, 1.0)
+
+
+def _mask_centerline_support(
+    contrast_field: np.ndarray,
+    skeleton: np.ndarray,
+) -> float:
+    values = contrast_field[np.asarray(skeleton, dtype=bool)]
+    return float(np.mean(values)) if values.size else 0.0
+
+
 def _register_visible_template_to_photo(
     *,
     image: np.ndarray,
@@ -1324,6 +1437,7 @@ def _register_model_shape_to_photo(
     candidate_masks: list[np.ndarray],
     assembly_neighbor_context: np.ndarray | None = None,
     complete_target_shape_variants: bool = False,
+    location_prior_only: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Register the model-image Part-ID shape as a photo-space proposal only."""
 
@@ -1413,10 +1527,99 @@ def _register_model_shape_to_photo(
         local_neighbors = neighbor_context[top:bottom, left:right]
         center = (float(xs.mean()) - left, float(ys.mean()) - top)
         output_size = (local_mapped.shape[1], local_mapped.shape[0])
+        shape_geometry = _filamentary_shape_audit(local_mapped)
+        filamentary = bool(shape_geometry["filamentary"])
+        local_skeleton = _morphological_skeleton(local_mapped)
+        distance = cv2.distanceTransform(local_mapped.astype(np.uint8), cv2.DIST_L2, 3)
+        skeleton_distances = distance[local_skeleton]
+        half_width = (
+            float(np.median(skeleton_distances)) if skeleton_distances.size else 1.0
+        )
+        if filamentary and location_prior_only:
+            normalization_mask = (
+                cv2.dilate(
+                    (mapped | candidate_union).astype(np.uint8),
+                    cv2.getStructuringElement(
+                        cv2.MORPH_ELLIPSE,
+                        (2 * margin + 1, 2 * margin + 1),
+                    ),
+                )
+                > 0
+            )
+            bright_ridge, _dark_ridge = _normalized_centerline_ridge_fields(
+                image,
+                half_width_pixels=half_width,
+                normalization_mask=normalization_mask,
+            )
+            achromatic_brightness = _normalized_achromatic_brightness(
+                image,
+                normalization_mask=normalization_mask,
+            )
+            local_centerline_field = bright_ridge[top:bottom, left:right]
+            local_achromatic_field = achromatic_brightness[top:bottom, left:right]
+            centerline_ridge_polarity = "bright_achromatic"
+        else:
+            local_centerline_field = np.zeros_like(local_edges)
+            local_achromatic_field = np.zeros_like(local_edges)
+            centerline_ridge_polarity = "not_applicable"
+
+        initial_candidate_support = int(
+            np.count_nonzero(local_mapped & local_candidates)
+        ) / max(int(np.count_nonzero(local_mapped)), 1)
+        initial_edge_support = _mask_edge_support(local_edges, local_mapped)
+        initial_neighbor_overlap = int(
+            np.count_nonzero(local_mapped & local_neighbors)
+        ) / max(int(np.count_nonzero(local_mapped)), 1)
+        initial_centerline_support = (
+            _mask_centerline_support(local_centerline_field, local_skeleton)
+            if filamentary and location_prior_only
+            else initial_edge_support
+        )
+        initial_achromatic_support = (
+            _mask_centerline_support(local_achromatic_field, local_skeleton)
+            if filamentary and location_prior_only
+            else initial_edge_support
+        )
+        initial_photo_structure_support = (
+            np.power(
+                max(initial_edge_support, 1e-9)
+                * max(initial_centerline_support, 1e-9)
+                * max(initial_achromatic_support, 1e-9),
+                1.0 / 3.0,
+            )
+            if filamentary and location_prior_only
+            else initial_edge_support
+        )
+        initial_neighbor_clearance = max(1e-9, 1.0 - initial_neighbor_overlap)
+        initial_registration_score = float(
+            np.power(
+                max(initial_photo_structure_support, 1e-9) * initial_neighbor_clearance,
+                0.5,
+            )
+            if location_prior_only
+            else np.power(
+                max(initial_candidate_support, 1e-9)
+                * max(initial_edge_support, 1e-9)
+                * initial_neighbor_clearance,
+                1.0 / 3.0,
+            )
+        )
+        initial_metrics = {
+            "candidate_support": initial_candidate_support,
+            "image_edge_support": initial_edge_support,
+            "centerline_ridge_support": initial_centerline_support,
+            "centerline_achromatic_support": initial_achromatic_support,
+            "photo_structure_support": initial_photo_structure_support,
+            "assembly_position_score": 1.0,
+            "assembly_centroid_shift_fraction": 0.0,
+            "assembly_neighbor_overlap_fraction": initial_neighbor_overlap,
+            "assembly_neighbor_clearance_score": initial_neighbor_clearance,
+            "registration_score": initial_registration_score,
+        }
 
         top_candidates: list[
             tuple[
-                tuple[float, float, float, float, float],
+                tuple[float, ...],
                 np.ndarray,
                 int,
                 int,
@@ -1445,6 +1648,17 @@ def _register_model_shape_to_photo(
                             )
                             > 0
                         )
+                        transformed_skeleton = (
+                            cv2.warpAffine(
+                                local_skeleton.astype(np.uint8),
+                                matrix,
+                                output_size,
+                                flags=cv2.INTER_NEAREST,
+                                borderMode=cv2.BORDER_CONSTANT,
+                                borderValue=0,
+                            )
+                            > 0
+                        )
                         pixels = int(np.count_nonzero(transformed))
                         if pixels == 0:
                             continue
@@ -1453,6 +1667,30 @@ def _register_model_shape_to_photo(
                             / pixels
                         )
                         edge_support = _mask_edge_support(local_edges, transformed)
+                        centerline_support = (
+                            _mask_centerline_support(
+                                local_centerline_field, transformed_skeleton
+                            )
+                            if filamentary and location_prior_only
+                            else edge_support
+                        )
+                        achromatic_support = (
+                            _mask_centerline_support(
+                                local_achromatic_field, transformed_skeleton
+                            )
+                            if filamentary and location_prior_only
+                            else edge_support
+                        )
+                        photo_structure_support = (
+                            np.power(
+                                max(edge_support, 1e-9)
+                                * max(centerline_support, 1e-9)
+                                * max(achromatic_support, 1e-9),
+                                1.0 / 3.0,
+                            )
+                            if filamentary and location_prior_only
+                            else edge_support
+                        )
                         neighbor_overlap = (
                             int(np.count_nonzero(transformed & local_neighbors))
                             / pixels
@@ -1461,15 +1699,21 @@ def _register_model_shape_to_photo(
                             float(np.hypot(maximum_translation, maximum_translation)),
                             1.0,
                         )
-                        # Assembly context constrains the centroid. Rotation
-                        # and uniform scale correct the target silhouette
-                        # without moving it onto another model part.
+                        # The relation-derived, scale-bounded search window
+                        # constrains the centroid.  This score is retained as
+                        # a deterministic tie-break; neighbour clearance is
+                        # the actual assembly safety evidence.
                         assembly_position_score = float(
                             np.exp(-0.25 * shift_fraction * shift_fraction)
                         )
                         neighbor_clearance = max(1e-9, 1.0 - neighbor_overlap)
                         score = float(
                             np.power(
+                                max(photo_structure_support, 1e-9) * neighbor_clearance,
+                                0.5,
+                            )
+                            if location_prior_only
+                            else np.power(
                                 max(candidate_support, 1e-9)
                                 * max(edge_support, 1e-9)
                                 * neighbor_clearance,
@@ -1477,15 +1721,30 @@ def _register_model_shape_to_photo(
                             )
                         )
                         key = (
-                            score,
-                            candidate_support,
-                            edge_support,
-                            assembly_position_score,
-                            -abs(scale - 1.0),
+                            (
+                                score,
+                                photo_structure_support,
+                                centerline_support,
+                                achromatic_support,
+                                edge_support,
+                                assembly_position_score,
+                                -abs(scale - 1.0),
+                            )
+                            if location_prior_only
+                            else (
+                                score,
+                                candidate_support,
+                                edge_support,
+                                assembly_position_score,
+                                -abs(scale - 1.0),
+                            )
                         )
                         metrics = {
                             "candidate_support": candidate_support,
                             "image_edge_support": edge_support,
+                            "centerline_ridge_support": centerline_support,
+                            "centerline_achromatic_support": achromatic_support,
+                            "photo_structure_support": photo_structure_support,
                             "assembly_position_score": assembly_position_score,
                             "assembly_centroid_shift_fraction": shift_fraction,
                             "assembly_neighbor_overlap_fraction": neighbor_overlap,
@@ -1534,7 +1793,9 @@ def _register_model_shape_to_photo(
             agreement = _best_model_domain_shape_agreement(full_candidate, variant)
             model_score = float(agreement["model_shape_score"])
             joint_score = float(
-                np.power(
+                candidate_metrics["registration_score"]
+                if location_prior_only
+                else np.power(
                     max(candidate_metrics["candidate_support"], 1e-9)
                     * max(candidate_metrics["image_edge_support"], 1e-9)
                     * max(model_score, 1e-9)
@@ -1549,8 +1810,16 @@ def _register_model_shape_to_photo(
                 (
                     (
                         joint_score,
-                        model_score,
-                        float(candidate_metrics["registration_score"]),
+                        (
+                            float(candidate_metrics["photo_structure_support"])
+                            if location_prior_only
+                            else model_score
+                        ),
+                        (
+                            float(candidate_metrics["assembly_position_score"])
+                            if location_prior_only
+                            else float(candidate_metrics["registration_score"])
+                        ),
                         float(candidate_metrics["assembly_position_score"]),
                     ),
                     full_candidate,
@@ -1597,6 +1866,16 @@ def _register_model_shape_to_photo(
             "maximum_scale_delta": maximum_scale_delta,
             "evaluated_transform_count": evaluated,
             "selected_metrics": selected_metrics,
+            "initial_metrics": initial_metrics,
+            "shape_geometry": shape_geometry,
+            "registration_evidence_mode": (
+                "filamentary_bright_achromatic_ridge_boundary_and_assembly"
+                if location_prior_only and filamentary
+                else "boundary_and_assembly"
+                if location_prior_only
+                else "candidate_boundary_model_shape_and_assembly"
+            ),
+            "centerline_ridge_polarity": centerline_ridge_polarity,
             "model_domain_shape_score": model_score,
             "assembly_context_used": assembly_neighbor_context is not None,
             "model_to_photo_affine_2x3": [
@@ -1607,8 +1886,16 @@ def _register_model_shape_to_photo(
             (
                 (
                     float(selected_metrics["joint_model_edge_candidate_score"]),
-                    model_score,
-                    float(selected_metrics["candidate_support"]),
+                    (
+                        float(selected_metrics["photo_structure_support"])
+                        if location_prior_only
+                        else model_score
+                    ),
+                    (
+                        float(selected_metrics["assembly_position_score"])
+                        if location_prior_only
+                        else float(selected_metrics["candidate_support"])
+                    ),
                     -variant_index,
                 ),
                 selected,
@@ -1952,6 +2239,9 @@ def _iterative_shape_guided_refinement(
         )
 
     if model_visible_shape is not None and _enable_model_shape_proposal:
+        location_prior_only = set(candidate_by_source) == {
+            "relation_cad_location_fallback"
+        }
         baseline = _iterative_shape_guided_refinement(
             image=image,
             visible_seed=visible,
@@ -1971,6 +2261,7 @@ def _iterative_shape_guided_refinement(
             candidate_masks=list(candidate_by_source.values()),
             assembly_neighbor_context=neighbor_context,
             complete_target_shape_variants=complete_target_shape_variants,
+            location_prior_only=location_prior_only,
         )
         candidate_values = list(candidate_by_source.values())
         candidate_union = np.logical_or.reduce(candidate_values)
@@ -2003,18 +2294,27 @@ def _iterative_shape_guided_refinement(
             if neighbor_context is not None
             else 0.0
         )
-        location_prior_only = set(candidate_by_source) == {
-            "relation_cad_location_fallback"
-        }
+        registration_initial_metrics = model_registration["initial_metrics"]
+        registration_selected_metrics = model_registration["selected_metrics"]
+        baseline_photo_evidence = float(
+            registration_initial_metrics["photo_structure_support"]
+            if location_prior_only
+            else baseline_metrics["image_edge_support"]
+        )
+        proposal_photo_evidence = float(
+            registration_selected_metrics["photo_structure_support"]
+            if location_prior_only
+            else proposal_metrics["image_edge_support"]
+        )
         baseline_photo_assembly_score = float(
             math.sqrt(
-                max(float(baseline_metrics["image_edge_support"]), 1e-9)
+                max(baseline_photo_evidence, 1e-9)
                 * max(1.0 - seed_neighbor_overlap, 1e-9)
             )
         )
         proposal_photo_assembly_score = float(
             math.sqrt(
-                max(float(proposal_metrics["image_edge_support"]), 1e-9)
+                max(proposal_photo_evidence, 1e-9)
                 * max(1.0 - proposal_neighbor_overlap, 1e-9)
             )
         )
@@ -2030,17 +2330,11 @@ def _iterative_shape_guided_refinement(
             # itself is a transformed complete model Part-ID silhouette, so a
             # location-invariant re-score of that same silhouette is not an
             # independent rejection signal either.
-            if (
-                float(proposal_metrics["image_edge_support"])
-                <= float(baseline_metrics["image_edge_support"]) + 1e-12
-            ):
+            if proposal_photo_evidence <= baseline_photo_evidence + 1e-12:
                 rejection_reasons.append(
-                    "photo_edge_support_did_not_strictly_improve"
+                    "photo_structure_support_did_not_strictly_improve"
                 )
-            if (
-                proposal_photo_assembly_score
-                <= baseline_photo_assembly_score + 1e-12
-            ):
+            if proposal_photo_assembly_score <= baseline_photo_assembly_score + 1e-12:
                 rejection_reasons.append(
                     "photo_edge_and_assembly_clearance_did_not_improve"
                 )
@@ -2066,9 +2360,7 @@ def _iterative_shape_guided_refinement(
         if not location_prior_only:
             alias_tolerance = 1.0 / max(proposal_pixels, 1)
             if proposal_neighbor_overlap > seed_neighbor_overlap + alias_tolerance:
-                rejection_reasons.append(
-                    "assembly_neighbor_context_overlap_increased"
-                )
+                rejection_reasons.append("assembly_neighbor_context_overlap_increased")
             if not (
                 float(proposal_metrics["image_edge_support"])
                 > float(baseline_metrics["image_edge_support"]) + 1e-12
@@ -2135,20 +2427,29 @@ def _iterative_shape_guided_refinement(
             {
                 "accepted": not rejection_reasons,
                 "selection_contract": (
-                    "provenance_aware_photo_edges_model_shape_candidate_support_"
-                    "and_assembly_safety"
+                    "provenance_aware_photo_structure_model_shape_candidate_"
+                    "support_and_assembly_safety"
                     if complete_target_shape_variants
                     else "photo_edges_model_shape_candidate_support_and_assembly_"
                     "neighbor_nonregression"
                 ),
                 "location_prior_only": location_prior_only,
                 "candidate_support_role": (
-                    "search_regularizer_not_acceptance_floor"
+                    "location_hint_not_search_or_acceptance_floor"
                     if location_prior_only
                     else "independent_photo_candidate_nonregression"
                 ),
                 "baseline_photo_assembly_score": baseline_photo_assembly_score,
                 "proposal_photo_assembly_score": proposal_photo_assembly_score,
+                "baseline_photo_evidence": baseline_photo_evidence,
+                "proposal_photo_evidence": proposal_photo_evidence,
+                "photo_evidence_metric": (
+                    "filamentary_bright_achromatic_ridge_boundary_geometric_mean"
+                    if location_prior_only
+                    and model_registration.get("registration_evidence_mode")
+                    == "filamentary_bright_achromatic_ridge_boundary_and_assembly"
+                    else "boundary_edge_support"
+                ),
                 "selected_final_branch": selected_branch,
                 "selection_rejection_reasons": rejection_reasons,
                 "original_cad_candidate_support_floor": seed_candidate_support,
@@ -3214,13 +3515,16 @@ def build_hybrid_masks(
             "model_shape_photo_proposal_warp_applied": bool(model_shape_references),
             "model_image_shape_photo_proposal": (
                 "bounded_similarity_registration_from_model_image_via_sealed_cad_"
-                "assembly_context_then_photo_edges"
+                "assembly_context_then_photo_structure"
+                if relation_guided
+                else "bounded_similarity_registration_from_model_image_via_sealed_"
+                "cad_assembly_context_then_photo_edges"
                 if model_shape_references
                 else None
             ),
             "model_shape_proposal_selection_contract": (
-                "provenance_aware_photo_edges_model_shape_candidate_support_and_"
-                "assembly_safety"
+                "provenance_aware_photo_structure_model_shape_candidate_support_"
+                "and_assembly_safety"
                 if relation_guided
                 else "photo_edges_model_shape_candidate_support_and_assembly_"
                 "neighbor_nonregression"
@@ -3253,10 +3557,23 @@ def build_hybrid_masks(
             "relation_second_pass_segmentation": relation_guided,
             "prior_hybrid_candidate_preserved": bool(prior_records),
             "neural_rejection_fallback": (
-                "relation_located_cad_shape_photo_edge_refinement"
+                "relation_located_cad_shape_photo_structure_refinement"
                 if relation_guided
                 else None
             ),
+            "filamentary_shape_detection": (
+                "cad_mask_compactness_skeleton_length_and_bbox_fill"
+                if relation_guided
+                else None
+            ),
+            "filamentary_photo_evidence": (
+                "multiscale_bright_centerline_ridge_achromatic_brightness_"
+                "two_sided_boundary_and_neighbor_clearance"
+                if relation_guided
+                else None
+            ),
+            "filamentary_part_id_allowlist_used": (False if relation_guided else None),
+            "filamentary_material_prompt_used": False if relation_guided else None,
             "relation_neighbor_exclusion_authority": (
                 "target_specific_cad_assembly_warp_from_non_target_anchor_votes"
                 if relation_guided
@@ -3277,7 +3594,10 @@ def build_hybrid_masks(
                 "joint_iterative_optimization_not_single_model_arbitration"
             ),
             "optimization_objective": (
-                "unweighted_geometric_mean_of_photo_edges_model_domain_"
+                "provenance_aware_photo_structure_model_domain_shape_and_assembly_"
+                "safety"
+                if relation_guided
+                else "unweighted_geometric_mean_of_photo_edges_model_domain_"
                 "normalized_shape_and_prior_candidate_agreement"
                 if model_shape_references
                 else "legacy_unweighted_geometric_mean_of_photo_edges_visible_"

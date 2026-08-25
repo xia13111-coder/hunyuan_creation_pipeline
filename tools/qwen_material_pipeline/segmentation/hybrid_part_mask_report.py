@@ -312,6 +312,7 @@ def build_report(
     amodal_manifest_path: Path | None = None,
     baseline_hybrid_manifest_path: Path | None = None,
     only_edge_improved: bool = False,
+    only_filamentary_improved: bool = False,
     output_dir: Path,
 ) -> dict[str, Any]:
     sam_manifest_path = sam_manifest_path.expanduser().resolve(strict=True)
@@ -328,6 +329,7 @@ def build_report(
     relation_guided = hybrid_document.get("schema_version") in {
         "qwen-cad-sam3-entityseg-hybrid/v6",
         "qwen-cad-sam3-entityseg-hybrid/v7",
+        "qwen-cad-sam3-entityseg-hybrid/v8",
     }
     hybrid = _all_records(hybrid_document, "hybrid")
     if set(sam) != set(entity) or set(sam) != set(hybrid):
@@ -348,6 +350,10 @@ def build_report(
     if only_edge_improved and not baseline_hybrid:
         raise EntitySegRegionError(
             "only-edge-improved report requires a baseline hybrid manifest"
+        )
+    if only_edge_improved and only_filamentary_improved:
+        raise EntitySegRegionError(
+            "edge-improved and filamentary-improved report filters are exclusive"
         )
     amodal_records: dict[tuple[str, str], Mapping[str, Any]] = {}
     model_views: dict[str, Mapping[str, Any]] = {}
@@ -396,20 +402,43 @@ def build_report(
     rows: list[dict[str, Any]] = []
     for key in sorted(hybrid):
         final_row = hybrid[key]
+        current_refinement = final_row.get("iterative_refinement")
+        current_model_registration = (
+            current_refinement.get("model_domain_photo_registration")
+            if isinstance(current_refinement, Mapping)
+            else None
+        )
+        if only_filamentary_improved:
+            if (
+                not isinstance(current_model_registration, Mapping)
+                or current_model_registration.get("accepted") is not True
+                or current_model_registration.get("registration_evidence_mode")
+                != "filamentary_bright_achromatic_ridge_boundary_and_assembly"
+                or not isinstance(
+                    current_model_registration.get("baseline_photo_evidence"),
+                    (int, float),
+                )
+                or not isinstance(
+                    current_model_registration.get("proposal_photo_evidence"),
+                    (int, float),
+                )
+                or float(current_model_registration["proposal_photo_evidence"])
+                <= float(current_model_registration["baseline_photo_evidence"]) + 1e-12
+            ):
+                continue
         baseline_edge_support: float | None = None
         edge_support_improvement: float | None = None
         if baseline_hybrid:
             baseline_row = baseline_hybrid[key]
-            if (
-                baseline_row.get("source_image") != final_row.get("source_image")
-                or baseline_row.get("source_image_sha256")
-                != final_row.get("source_image_sha256")
+            if baseline_row.get("source_image") != final_row.get(
+                "source_image"
+            ) or baseline_row.get("source_image_sha256") != final_row.get(
+                "source_image_sha256"
             ):
                 raise EntitySegRegionError(
                     f"baseline comparison source image differs: {key}"
                 )
             baseline_refinement = baseline_row.get("iterative_refinement")
-            current_refinement = final_row.get("iterative_refinement")
             baseline_metrics = (
                 baseline_refinement.get("final_metrics")
                 if isinstance(baseline_refinement, Mapping)
@@ -428,8 +457,7 @@ def build_report(
                 )
             baseline_edge_support = float(baseline_metrics["image_edge_support"])
             edge_support_improvement = (
-                float(current_metrics["image_edge_support"])
-                - baseline_edge_support
+                float(current_metrics["image_edge_support"]) - baseline_edge_support
             )
             if only_edge_improved and edge_support_improvement <= 1e-12:
                 continue
@@ -644,9 +672,7 @@ def build_report(
             details: list[str] = []
             edge_support_improvement = row.get("edge_support_improvement")
             if isinstance(edge_support_improvement, (int, float)):
-                details.append(
-                    "相对上一版边缘支持 " f"{float(edge_support_improvement):+.3f}"
-                )
+                details.append("相对上一版边缘支持 " f"{float(edge_support_improvement):+.3f}")
             if "entity_edge_improvement" in metrics:
                 details.append(f"边缘增益 {metrics['entity_edge_improvement']:+.3f}")
             if "entity_cad_direct_iou" in metrics:
@@ -676,6 +702,27 @@ def build_report(
                         f"({int(model_translation[0]):+d}, {int(model_translation[1]):+d}) px；"
                         f"整机邻件位置约束{model_status}"
                     )
+                    baseline_photo_evidence = model_registration.get(
+                        "baseline_photo_evidence"
+                    )
+                    proposal_photo_evidence = model_registration.get(
+                        "proposal_photo_evidence"
+                    )
+                    if isinstance(baseline_photo_evidence, (int, float)) and isinstance(
+                        proposal_photo_evidence, (int, float)
+                    ):
+                        evidence_label = (
+                            "细长件中心线/双侧边界结构证据"
+                            if model_registration.get("photo_evidence_metric")
+                            == "filamentary_bright_achromatic_ridge_boundary_"
+                            "geometric_mean"
+                            else "照片边界证据"
+                        )
+                        details.append(
+                            f"{evidence_label} "
+                            f"{float(baseline_photo_evidence):.3f}→"
+                            f"{float(proposal_photo_evidence):.3f}"
+                        )
                 local_registration = refinement.get(
                     "reference_space_local_registration"
                 )
@@ -747,27 +794,37 @@ def build_report(
                 f'<img src="{html.escape(row["asset"])}" loading="lazy"></a>'
                 f"<p>{html.escape(' · '.join(details))}</p></article>"
             )
-        if cards or not only_edge_improved:
+        if cards or not (only_edge_improved or only_filamentary_improved):
             sections.append(
                 f'<section id="{decision}"><h2>{labels[decision]} ({len(cards)})</h2>'
                 f'<div class="grid">{"".join(cards)}</div></section>'
             )
 
     summary = hybrid_document["summary"]
-    visible_decisions = {
-        str(row["decision"])
-        for row in rows
-    }
+    visible_decisions = {str(row["decision"]) for row in rows}
     navigation_labels = (
-        {
-            key: value
-            for key, value in labels.items()
-            if key in visible_decisions
-        }
-        if only_edge_improved
+        {key: value for key, value in labels.items() if key in visible_decisions}
+        if only_edge_improved or only_filamentary_improved
         else labels
     )
-    if only_edge_improved:
+    if only_filamentary_improved:
+        page_title = "细长管线结构证据确认改善的 Part-ID"
+        page_lead = (
+            "本页只显示由 CAD 模型形状自动判定为细长结构、并且中心线亮脊、双侧边界和"
+            "低饱和亮度联合证据严格提高后才采用新位置的零件。筛选不使用 Part-ID 名单、"
+            "材质标签或人工提示。"
+        )
+        page_stats = (
+            f'<div class="stat">有效改善 <b>{len(rows)}</b> / {summary["region_count"]}</div>'
+            + "".join(
+                f'<div class="stat">{view_id} <b>{sum(row["view_id"] == view_id for row in rows)}</b></div>'
+                for view_id in ("front", "iso", "side", "top")
+            )
+        )
+        page_note = (
+            "改善条件：模型 mask 的无量纲几何被判定为细长结构；新位置的中心线/边界联合" "照片证据及其邻件安全联合分数均严格高于关系定位初值。"
+        )
+    elif only_edge_improved:
         page_title = "相对上一版有改善的 Part-ID"
         page_lead = (
             "本页只显示最终照片边缘支持严格高于上一版的零件。未变化、仅重新封存以及边缘支持"
@@ -782,8 +839,7 @@ def build_report(
             )
         )
         page_note = (
-            "改善条件：当前最终 mask 的 image_edge_support 严格大于基线最终 mask。"
-            "卡片中的增量由两份封存清单自动计算。"
+            "改善条件：当前最终 mask 的 image_edge_support 严格大于基线最终 mask。" "卡片中的增量由两份封存清单自动计算。"
         )
     else:
         page_title = "SAM3 + EntitySeg 辅助分割"
@@ -821,6 +877,7 @@ h1{{margin:.1em 0}}h2{{margin-top:42px}}.lead,.card p{{color:var(--muted)}}.stat
         "summary": summary,
         "filter": {
             "only_edge_improved": only_edge_improved,
+            "only_filamentary_improved": only_filamentary_improved,
             "baseline_hybrid_manifest": (
                 str(baseline_hybrid_manifest_path)
                 if baseline_hybrid_manifest_path is not None
@@ -845,6 +902,7 @@ def main() -> int:
     parser.add_argument("--amodal-manifest", type=Path)
     parser.add_argument("--baseline-hybrid-manifest", type=Path)
     parser.add_argument("--only-edge-improved", action="store_true")
+    parser.add_argument("--only-filamentary-improved", action="store_true")
     parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args()
     result = build_report(
@@ -854,6 +912,7 @@ def main() -> int:
         amodal_manifest_path=args.amodal_manifest,
         baseline_hybrid_manifest_path=args.baseline_hybrid_manifest,
         only_edge_improved=args.only_edge_improved,
+        only_filamentary_improved=args.only_filamentary_improved,
         output_dir=args.output_dir,
     )
     print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
