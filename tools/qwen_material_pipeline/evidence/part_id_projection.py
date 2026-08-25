@@ -852,6 +852,7 @@ def _load_part_id_refinement_manifest(
             "qwen-cad-sam3-entityseg-hybrid/v4",
             "qwen-cad-sam3-entityseg-hybrid/v5",
             "qwen-cad-sam3-entityseg-hybrid/v6",
+            "qwen-cad-sam3-entityseg-hybrid/v7",
         }
         if hybrid
         else {"qwen-sam3-region-result/v1"}
@@ -879,6 +880,7 @@ def _load_part_id_refinement_manifest(
                 "qwen-cad-sam3-entityseg-hybrid/v4",
                 "qwen-cad-sam3-entityseg-hybrid/v5",
                 "qwen-cad-sam3-entityseg-hybrid/v6",
+                "qwen-cad-sam3-entityseg-hybrid/v7",
             }
             else "boundary_candidate_only"
         )
@@ -899,6 +901,7 @@ def _load_part_id_refinement_manifest(
             "qwen-cad-sam3-entityseg-hybrid/v4",
             "qwen-cad-sam3-entityseg-hybrid/v5",
             "qwen-cad-sam3-entityseg-hybrid/v6",
+            "qwen-cad-sam3-entityseg-hybrid/v7",
         } and (
             policy.get("sam3_role") != "probable_foreground_initialization_only"
             or policy.get("final_boundary_method")
@@ -915,6 +918,7 @@ def _load_part_id_refinement_manifest(
             "qwen-cad-sam3-entityseg-hybrid/v4",
             "qwen-cad-sam3-entityseg-hybrid/v5",
             "qwen-cad-sam3-entityseg-hybrid/v6",
+            "qwen-cad-sam3-entityseg-hybrid/v7",
         } and (
             policy.get("shape_authority")
             != "cad_model_render_target_part_id_normalized_shape"
@@ -935,6 +939,7 @@ def _load_part_id_refinement_manifest(
             "qwen-cad-sam3-entityseg-hybrid/v4",
             "qwen-cad-sam3-entityseg-hybrid/v5",
             "qwen-cad-sam3-entityseg-hybrid/v6",
+            "qwen-cad-sam3-entityseg-hybrid/v7",
         } and (
             policy.get("reference_space_cad_role")
             != "initial_roi_and_visibility_for_bounded_2d_mask_registration"
@@ -970,13 +975,21 @@ def _load_part_id_refinement_manifest(
             raise PartIdProjectionError(
                 "Part-ID hybrid v5 manifest does not seal its model-shape proposal"
             )
-        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v6" and (
+        if schema_version in {
+            "qwen-cad-sam3-entityseg-hybrid/v6",
+            "qwen-cad-sam3-entityseg-hybrid/v7",
+        } and (
             policy.get("model_image_shape_photo_proposal")
             != "bounded_similarity_registration_from_model_image_via_sealed_cad_"
             "assembly_context_then_photo_edges"
             or policy.get("model_shape_proposal_selection_contract")
-            != "photo_edges_model_shape_candidate_support_and_assembly_neighbor_"
-            "nonregression"
+            != (
+                "provenance_aware_photo_edges_model_shape_candidate_support_and_"
+                "assembly_safety"
+                if schema_version == "qwen-cad-sam3-entityseg-hybrid/v7"
+                else "photo_edges_model_shape_candidate_support_and_assembly_"
+                "neighbor_nonregression"
+            )
             or policy.get("model_shape_photo_proposal_warp_applied") is not True
             or policy.get("assembly_context_position_authority")
             != "leave_one_target_out_multi_anchor_cad_part_relations"
@@ -998,7 +1011,7 @@ def _load_part_id_refinement_manifest(
             "photo_mapping"
         ):
             raise PartIdProjectionError(
-                "Part-ID hybrid v6 manifest does not seal relation-guided location"
+                "Part-ID hybrid relation manifest does not seal guided location"
             )
         if refinement_path is None:
             raise PartIdProjectionError(
@@ -1014,9 +1027,13 @@ def _load_part_id_refinement_manifest(
             "qwen-cad-sam3-entityseg-hybrid/v4",
             "qwen-cad-sam3-entityseg-hybrid/v5",
             "qwen-cad-sam3-entityseg-hybrid/v6",
+            "qwen-cad-sam3-entityseg-hybrid/v7",
         }:
             input_names.append("cad_model_templates")
-        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v6":
+        if schema_version in {
+            "qwen-cad-sam3-entityseg-hybrid/v6",
+            "qwen-cad-sam3-entityseg-hybrid/v7",
+        }:
             input_names.append("prior_hybrid_manifest")
         for input_name in input_names:
             binding = inputs.get(input_name)
@@ -1095,7 +1112,10 @@ def _load_part_id_refinement_manifest(
             raise PartIdProjectionError(
                 f"{label} records disagree on shared alignment for {identity[0]}"
             )
-        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v6":
+        if schema_version in {
+            "qwen-cad-sam3-entityseg-hybrid/v6",
+            "qwen-cad-sam3-entityseg-hybrid/v7",
+        }:
             relation = raw.get("relation_guidance")
             relation_accepted = (
                 relation.get("accepted") if isinstance(relation, Mapping) else None
@@ -1180,7 +1200,11 @@ def _load_part_id_refinement_manifest(
                     "relation_entityseg",
                     "relation_cad_location_fallback",
                 }
-                if schema_version == "qwen-cad-sam3-entityseg-hybrid/v6"
+                if schema_version
+                in {
+                    "qwen-cad-sam3-entityseg-hybrid/v6",
+                    "qwen-cad-sam3-entityseg-hybrid/v7",
+                }
                 else {"sam3", "entityseg"}
             )
             if (
@@ -1201,6 +1225,7 @@ def _load_part_id_refinement_manifest(
                 "qwen-cad-sam3-entityseg-hybrid/v4",
                 "qwen-cad-sam3-entityseg-hybrid/v5",
                 "qwen-cad-sam3-entityseg-hybrid/v6",
+                "qwen-cad-sam3-entityseg-hybrid/v7",
             }:
                 model_reference = raw.get("model_domain_shape_reference")
                 final_metrics = iterative.get("final_metrics")
@@ -1229,6 +1254,7 @@ def _load_part_id_refinement_manifest(
                     "qwen-cad-sam3-entityseg-hybrid/v4",
                     "qwen-cad-sam3-entityseg-hybrid/v5",
                     "qwen-cad-sam3-entityseg-hybrid/v6",
+                    "qwen-cad-sam3-entityseg-hybrid/v7",
                 }:
                     local_registration = iterative.get(
                         "reference_space_local_registration"
@@ -1328,6 +1354,7 @@ def _load_part_id_refinement_manifest(
                 if schema_version in {
                     "qwen-cad-sam3-entityseg-hybrid/v5",
                     "qwen-cad-sam3-entityseg-hybrid/v6",
+                    "qwen-cad-sam3-entityseg-hybrid/v7",
                 }:
                     model_registration = iterative.get(
                         "model_domain_photo_registration"
@@ -1412,14 +1439,29 @@ def _load_part_id_refinement_manifest(
                         if isinstance(proposal_final_metrics, Mapping)
                         else None
                     )
+                    provenance_aware_registration = schema_version == (
+                        "qwen-cad-sam3-entityseg-hybrid/v7"
+                    )
+                    expected_selection_contract = (
+                        "provenance_aware_photo_edges_model_shape_candidate_support_"
+                        "and_assembly_safety"
+                        if provenance_aware_registration
+                        else "photo_edges_model_shape_candidate_support_and_assembly_"
+                        "neighbor_nonregression"
+                    )
+                    baseline_photo_assembly_score = model_registration.get(
+                        "baseline_photo_assembly_score"
+                    ) if isinstance(model_registration, Mapping) else None
+                    proposal_photo_assembly_score = model_registration.get(
+                        "proposal_photo_assembly_score"
+                    ) if isinstance(model_registration, Mapping) else None
                     if (
                         not isinstance(model_registration, Mapping)
                         or model_registration.get("method")
                         != "model_image_part_id_similarity_registration_to_photo"
                         or not isinstance(model_registration.get("accepted"), bool)
                         or model_registration.get("selection_contract")
-                        != "photo_edges_model_shape_candidate_support_and_assembly_"
-                        "neighbor_nonregression"
+                        != expected_selection_contract
                         or model_registration.get("transformed_object")
                         != "model_image_part_id_mask_proposal_only"
                         or model_registration.get("cad_mesh_transform_changed")
@@ -1434,7 +1476,11 @@ def _load_part_id_refinement_manifest(
                         != (
                             "complete_target_part_id_union_plus_all_model_components_"
                             "without_photo_mapping"
-                            if schema_version == "qwen-cad-sam3-entityseg-hybrid/v6"
+                            if schema_version
+                            in {
+                                "qwen-cad-sam3-entityseg-hybrid/v6",
+                                "qwen-cad-sam3-entityseg-hybrid/v7",
+                            }
                             else "union_of_all_model_components_associated_with_local_"
                             "observation"
                         )
@@ -1477,17 +1523,90 @@ def _load_part_id_refinement_manifest(
                         or not isinstance(proposal_pixels, int)
                         or proposal_pixels <= 0
                         or (
+                            provenance_aware_registration
+                            and (
+                                not isinstance(
+                                    model_registration.get("location_prior_only"),
+                                    bool,
+                                )
+                                or model_registration.get("location_prior_only")
+                                != (
+                                    primary_candidate_source
+                                    == "relation_cad_location_fallback"
+                                )
+                                or model_registration.get("candidate_support_role")
+                                != (
+                                    "search_regularizer_not_acceptance_floor"
+                                    if primary_candidate_source
+                                    == "relation_cad_location_fallback"
+                                    else "independent_photo_candidate_nonregression"
+                                )
+                                or isinstance(baseline_photo_assembly_score, bool)
+                                or not isinstance(
+                                    baseline_photo_assembly_score, (int, float)
+                                )
+                                or not 0.0
+                                <= float(baseline_photo_assembly_score)
+                                <= 1.0
+                                or isinstance(proposal_photo_assembly_score, bool)
+                                or not isinstance(
+                                    proposal_photo_assembly_score, (int, float)
+                                )
+                                or not 0.0
+                                <= float(proposal_photo_assembly_score)
+                                <= 1.0
+                            )
+                        )
+                        or (
                             model_registration.get("accepted") is True
                             and (
                                 model_registration.get("selected_final_branch")
                                 != "registered_model_image_shape_proposal"
                                 or iterative.get("selected_optimization_lane")
                                 != "model_image_shape_similarity_proposal"
-                                or float(proposal_support)
-                                < float(support_floor) - 1e-12
-                                or float(proposal_neighbor_overlap)
-                                > float(original_neighbor_overlap)
-                                + 1.0 / proposal_pixels
+                                or (
+                                    not provenance_aware_registration
+                                    and (
+                                        float(proposal_support)
+                                        < float(support_floor) - 1e-12
+                                        or float(proposal_neighbor_overlap)
+                                        > float(original_neighbor_overlap)
+                                        + 1.0 / proposal_pixels
+                                    )
+                                )
+                                or (
+                                    provenance_aware_registration
+                                    and primary_candidate_source
+                                    != "relation_cad_location_fallback"
+                                    and (
+                                        float(proposal_support)
+                                        < float(support_floor) - 1e-12
+                                        or float(proposal_neighbor_overlap)
+                                        > float(original_neighbor_overlap)
+                                        + 1.0 / proposal_pixels
+                                    )
+                                )
+                                or (
+                                    provenance_aware_registration
+                                    and primary_candidate_source
+                                    == "relation_cad_location_fallback"
+                                    and (
+                                        float(proposal_photo_assembly_score)
+                                        <= float(baseline_photo_assembly_score)
+                                        + 1e-12
+                                        or float(
+                                            proposal_final_metrics[
+                                                "image_edge_support"
+                                            ]
+                                        )
+                                        <= float(
+                                            model_registration[
+                                                "baseline_final_metrics"
+                                            ]["image_edge_support"]
+                                        )
+                                        + 1e-12
+                                    )
+                                )
                             )
                         )
                         or (

@@ -101,8 +101,12 @@ complete CAD shape, neighbour exclusion region, and photograph edges are then
 optimized jointly; the workflow neither chooses one segmenter verbatim nor
 treats the old target projection as location truth. If both neural candidates
 are rejected, the neighbour-located CAD shape still undergoes edge refinement
-and produces a result. Insufficient anchors preserve the audited first-pass
-result instead of aborting the batch.
+and produces a result. In that fallback, the CAD shape is only a location prior
+and cannot create a 1.0 self-overlap acceptance floor. A bounded local
+similarity transform is selected by joint photograph-edge gain and assembly-
+neighbour clearance. Genuine SAM3, EntitySeg, or prior-fusion image candidates
+retain their stricter non-regression contract. Insufficient anchors preserve
+the audited first-pass result instead of aborting the batch.
 Production SAM3 and EntitySeg entry points use one fixed inference seed and seal
 that seed together with request and model hashes. A retry with identical inputs
 therefore cannot silently change Part-ID evidence through random initialization.

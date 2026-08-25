@@ -255,6 +255,41 @@ def test_iterative_refinement_keeps_zero_branch_without_registration_evidence() 
     assert np.array_equal(refined, visible)
 
 
+def test_relation_cad_fallback_can_leave_its_self_derived_support_mask() -> None:
+    image = np.zeros((80, 100, 3), dtype=np.uint8)
+    image[22:62, 32:72] = (80, 150, 90)
+    relation_seed = np.zeros((80, 100), dtype=bool)
+    relation_seed[20:60, 30:70] = True
+
+    refined, audit, _support = _iterative_shape_guided_refinement(
+        image=image,
+        visible_seed=relation_seed,
+        amodal_seed=None,
+        model_visible_shape=np.ones((40, 40), dtype=bool),
+        candidate_masks=[("relation_cad_location_fallback", relation_seed)],
+        primary_candidate_source="relation_cad_location_fallback",
+        complete_target_shape_variants=True,
+    )
+
+    registration = audit["model_domain_photo_registration"]
+    assert registration["accepted"] is True
+    assert registration["selected_final_branch"] == (
+        "registered_model_image_shape_proposal"
+    )
+    assert registration["location_prior_only"] is True
+    assert registration["candidate_support_role"] == (
+        "search_regularizer_not_acceptance_floor"
+    )
+    assert registration["proposal_candidate_support"] < (
+        registration["original_cad_candidate_support_floor"]
+    )
+    assert registration["proposal_photo_assembly_score"] > (
+        registration["baseline_photo_assembly_score"]
+    )
+    assert registration["selection_rejection_reasons"] == []
+    assert np.array_equal(refined, image[:, :, 0] > 0)
+
+
 def test_iterative_refinement_removes_current_view_occluder_and_snaps_edges() -> None:
     image = np.zeros((96, 128, 3), dtype=np.uint8)
     image[20:76, 24:104] = (30, 130, 40)

@@ -23,7 +23,7 @@ from .entityseg_regions import EntitySegRegionError, _boundary_metrics
 from .sam3_regions import _normalized_shape_agreement
 
 
-SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v6"
+SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v7"
 MODEL_SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v5"
 LEGACY_SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v2"
 MAXIMUM_ENTITY_TO_CAD_AREA_RATIO = 1.85
@@ -2003,35 +2003,81 @@ def _iterative_shape_guided_refinement(
             if neighbor_context is not None
             else 0.0
         )
+        location_prior_only = set(candidate_by_source) == {
+            "relation_cad_location_fallback"
+        }
+        baseline_photo_assembly_score = float(
+            math.sqrt(
+                max(float(baseline_metrics["image_edge_support"]), 1e-9)
+                * max(1.0 - seed_neighbor_overlap, 1e-9)
+            )
+        )
+        proposal_photo_assembly_score = float(
+            math.sqrt(
+                max(float(proposal_metrics["image_edge_support"]), 1e-9)
+                * max(1.0 - proposal_neighbor_overlap, 1e-9)
+            )
+        )
         rejection_reasons: list[str] = []
-        if (
-            float(proposal_metrics["image_edge_support"])
-            < float(baseline_metrics["image_edge_support"]) - 1e-12
-        ):
-            rejection_reasons.append("photo_edge_support_did_not_improve")
-        if (
-            float(proposal_metrics["model_domain_shape_score"])
-            < float(baseline_metrics["model_domain_shape_score"]) - 1e-12
-        ):
-            rejection_reasons.append("model_domain_shape_did_not_improve")
-        if proposal_candidate_support < seed_candidate_support - 1e-12:
-            rejection_reasons.append("candidate_support_below_cad_location_floor")
+        if location_prior_only:
+            # The fallback CAD seed is a location prior inferred from other
+            # parts, not an independent photo observation.  Requiring a new
+            # transform to preserve overlap with that same seed makes the
+            # support floor exactly 1.0 and locks every correction at the
+            # inferred centroid.  For this provenance, use the seed only to
+            # bound the search; select with current-photo boundary evidence
+            # jointly softened by overlap with other CAD parts.  The proposal
+            # itself is a transformed complete model Part-ID silhouette, so a
+            # location-invariant re-score of that same silhouette is not an
+            # independent rejection signal either.
+            if (
+                float(proposal_metrics["image_edge_support"])
+                <= float(baseline_metrics["image_edge_support"]) + 1e-12
+            ):
+                rejection_reasons.append(
+                    "photo_edge_support_did_not_strictly_improve"
+                )
+            if (
+                proposal_photo_assembly_score
+                <= baseline_photo_assembly_score + 1e-12
+            ):
+                rejection_reasons.append(
+                    "photo_edge_and_assembly_clearance_did_not_improve"
+                )
+        else:
+            if (
+                float(proposal_metrics["image_edge_support"])
+                < float(baseline_metrics["image_edge_support"]) - 1e-12
+            ):
+                rejection_reasons.append("photo_edge_support_did_not_improve")
+            if (
+                float(proposal_metrics["model_domain_shape_score"])
+                < float(baseline_metrics["model_domain_shape_score"]) - 1e-12
+            ):
+                rejection_reasons.append("model_domain_shape_did_not_improve")
+            if proposal_candidate_support < seed_candidate_support - 1e-12:
+                rejection_reasons.append("candidate_support_below_cad_location_floor")
         if not (
             MINIMUM_REFINED_TO_VISIBLE_AREA_RATIO
             <= proposal_area_ratio
             <= MAXIMUM_FINAL_TO_CAD_AREA_RATIO
         ):
             rejection_reasons.append("model_shape_proposal_area_outside_cad_bound")
-        alias_tolerance = 1.0 / max(proposal_pixels, 1)
-        if proposal_neighbor_overlap > seed_neighbor_overlap + alias_tolerance:
-            rejection_reasons.append("assembly_neighbor_context_overlap_increased")
-        if not (
-            float(proposal_metrics["image_edge_support"])
-            > float(baseline_metrics["image_edge_support"]) + 1e-12
-            or float(proposal_metrics["model_domain_shape_score"])
-            > float(baseline_metrics["model_domain_shape_score"]) + 1e-12
-        ):
-            rejection_reasons.append("model_shape_proposal_did_not_strictly_improve")
+        if not location_prior_only:
+            alias_tolerance = 1.0 / max(proposal_pixels, 1)
+            if proposal_neighbor_overlap > seed_neighbor_overlap + alias_tolerance:
+                rejection_reasons.append(
+                    "assembly_neighbor_context_overlap_increased"
+                )
+            if not (
+                float(proposal_metrics["image_edge_support"])
+                > float(baseline_metrics["image_edge_support"]) + 1e-12
+                or float(proposal_metrics["model_domain_shape_score"])
+                > float(baseline_metrics["model_domain_shape_score"]) + 1e-12
+            ):
+                rejection_reasons.append(
+                    "model_shape_proposal_did_not_strictly_improve"
+                )
 
         selected = baseline
         selected_branch = "iterative_reference_projection_baseline"
@@ -2089,9 +2135,20 @@ def _iterative_shape_guided_refinement(
             {
                 "accepted": not rejection_reasons,
                 "selection_contract": (
-                    "photo_edges_model_shape_candidate_support_and_assembly_"
+                    "provenance_aware_photo_edges_model_shape_candidate_support_"
+                    "and_assembly_safety"
+                    if complete_target_shape_variants
+                    else "photo_edges_model_shape_candidate_support_and_assembly_"
                     "neighbor_nonregression"
                 ),
+                "location_prior_only": location_prior_only,
+                "candidate_support_role": (
+                    "search_regularizer_not_acceptance_floor"
+                    if location_prior_only
+                    else "independent_photo_candidate_nonregression"
+                ),
+                "baseline_photo_assembly_score": baseline_photo_assembly_score,
+                "proposal_photo_assembly_score": proposal_photo_assembly_score,
                 "selected_final_branch": selected_branch,
                 "selection_rejection_reasons": rejection_reasons,
                 "original_cad_candidate_support_floor": seed_candidate_support,
@@ -3162,8 +3219,11 @@ def build_hybrid_masks(
                 else None
             ),
             "model_shape_proposal_selection_contract": (
-                "photo_edges_model_shape_candidate_support_and_assembly_neighbor_"
-                "nonregression"
+                "provenance_aware_photo_edges_model_shape_candidate_support_and_"
+                "assembly_safety"
+                if relation_guided
+                else "photo_edges_model_shape_candidate_support_and_assembly_"
+                "neighbor_nonregression"
                 if model_shape_references
                 else None
             ),

@@ -323,9 +323,10 @@ def build_report(
         _read_manifest(entity_manifest_path, "EntitySeg manifest"), "EntitySeg"
     )
     hybrid_document = _read_manifest(hybrid_manifest_path, "hybrid manifest")
-    relation_guided = hybrid_document.get("schema_version") == (
-        "qwen-cad-sam3-entityseg-hybrid/v6"
-    )
+    relation_guided = hybrid_document.get("schema_version") in {
+        "qwen-cad-sam3-entityseg-hybrid/v6",
+        "qwen-cad-sam3-entityseg-hybrid/v7",
+    }
     hybrid = _all_records(hybrid_document, "hybrid")
     if set(sam) != set(entity) or set(sam) != set(hybrid):
         raise EntitySegRegionError("comparison manifests have different region sets")
