@@ -211,6 +211,9 @@ from qwen_material_pipeline.workflows.part_id_qwen import (
 from qwen_material_pipeline.scripts.build_part_id_sam3_request import (
     build_request as build_part_id_sam3_request,
 )
+from qwen_material_pipeline.segmentation.part_relation_guidance import (
+    build_relation_guided_request,
+)
 
 
 def _require_complete_part_id_reference_views(
@@ -1903,6 +1906,14 @@ def _run_policy_part_id_stage(
     part_id_sam3_manifest = part_id_paths.sam3_manifest
     part_id_entityseg_dir = part_id_paths.entityseg_dir
     part_id_entityseg_manifest = part_id_paths.entityseg_manifest
+    part_id_initial_hybrid_mask_dir = part_id_paths.initial_hybrid_mask_dir
+    part_id_initial_hybrid_mask_manifest = part_id_paths.initial_hybrid_mask_manifest
+    part_id_relation_guidance_dir = part_id_paths.relation_guidance_dir
+    part_id_relation_guided_request = part_id_paths.relation_guided_request
+    part_id_relation_sam3_dir = part_id_paths.relation_sam3_dir
+    part_id_relation_sam3_manifest = part_id_paths.relation_sam3_manifest
+    part_id_relation_entityseg_dir = part_id_paths.relation_entityseg_dir
+    part_id_relation_entityseg_manifest = part_id_paths.relation_entityseg_manifest
     part_id_hybrid_mask_dir = part_id_paths.hybrid_mask_dir
     part_id_hybrid_mask_manifest = part_id_paths.hybrid_mask_manifest
     part_id_retrieval_request = part_id_paths.retrieval_request
@@ -2262,7 +2273,14 @@ def _run_policy_part_id_stage(
                 raise RuntimeError(
                     "EntitySeg fusion is enabled but its runtime is incomplete"
                 )
-            for stale_dir in (part_id_entityseg_dir, part_id_hybrid_mask_dir):
+            for stale_dir in (
+                part_id_entityseg_dir,
+                part_id_initial_hybrid_mask_dir,
+                part_id_relation_guidance_dir,
+                part_id_relation_sam3_dir,
+                part_id_relation_entityseg_dir,
+                part_id_hybrid_mask_dir,
+            ):
                 if stale_dir.exists() or stale_dir.is_symlink():
                     archived = unique_path(
                         analysis_dir / "recovery_archive" / f"stale_{stale_dir.name}"
@@ -2295,7 +2313,7 @@ def _run_policy_part_id_stage(
                 required_files=(part_id_entityseg_manifest,),
             )
             _run_stage(
-                "part_id_sam3_entityseg_fusion",
+                "part_id_initial_sam3_entityseg_fusion",
                 [
                     str(config.sam3_python),
                     "-m",
@@ -2306,6 +2324,96 @@ def _run_policy_part_id_stage(
                     str(part_id_entityseg_manifest),
                     "--amodal-manifest",
                     str(part_id_amodal_template_manifest),
+                    "--output-dir",
+                    str(part_id_initial_hybrid_mask_dir),
+                ],
+                log_cb,
+                command_runner=_command_runner,
+                required_files=(part_id_initial_hybrid_mask_manifest,),
+            )
+            write_object(
+                part_id_relation_guided_request,
+                build_relation_guided_request(
+                    initial_request_path=part_id_sam3_request,
+                    sam_manifest_path=part_id_sam3_manifest,
+                    entity_manifest_path=part_id_entityseg_manifest,
+                    amodal_manifest_path=part_id_amodal_template_manifest,
+                    output_dir=part_id_relation_guidance_dir,
+                ),
+            )
+            _run_stage(
+                "part_id_relation_guided_sam3_refinement",
+                [
+                    str(config.sam3_python),
+                    str(
+                        ProjectLayout.from_root(root_dir()).material_pipeline
+                        / "segmentation"
+                        / "sam3_regions.py"
+                    ),
+                    "--request",
+                    str(part_id_relation_guided_request),
+                    "--repository",
+                    str(config.sam3_repository),
+                    "--checkpoint",
+                    str(config.sam3_checkpoint),
+                    "--output-dir",
+                    str(part_id_relation_sam3_dir),
+                    "--device",
+                    config.sam3_device,
+                    "--minimum-model-score",
+                    str(config.sam3_minimum_model_score),
+                    "--minimum-prompt-overlap",
+                    str(config.sam3_minimum_prompt_overlap),
+                    "--maximum-image-fraction",
+                    str(config.sam3_maximum_image_fraction),
+                    "--minimum-mask-pixels",
+                    str(config.sam3_minimum_mask_pixels),
+                    "--seed",
+                    "0",
+                ],
+                log_cb,
+                command_runner=_command_runner,
+                required_files=(part_id_relation_sam3_manifest,),
+            )
+            _run_stage(
+                "part_id_relation_guided_entityseg_boundaries",
+                [
+                    str(config.entityseg_python),
+                    "-m",
+                    "qwen_material_pipeline.segmentation.entityseg_regions",
+                    "--request",
+                    str(part_id_relation_guided_request),
+                    "--cropformer-root",
+                    str(config.entityseg_cropformer_root),
+                    "--config",
+                    str(config.entityseg_config),
+                    "--checkpoint",
+                    str(config.entityseg_checkpoint),
+                    "--output-dir",
+                    str(part_id_relation_entityseg_dir),
+                    "--minimum-model-score",
+                    str(config.entityseg_minimum_model_score),
+                    "--seed",
+                    "0",
+                ],
+                log_cb,
+                command_runner=_command_runner,
+                required_files=(part_id_relation_entityseg_manifest,),
+            )
+            _run_stage(
+                "part_id_relation_guided_iterative_fusion",
+                [
+                    str(config.sam3_python),
+                    "-m",
+                    "qwen_material_pipeline.segmentation.hybrid_part_masks",
+                    "--sam-manifest",
+                    str(part_id_relation_sam3_manifest),
+                    "--entity-manifest",
+                    str(part_id_relation_entityseg_manifest),
+                    "--amodal-manifest",
+                    str(part_id_amodal_template_manifest),
+                    "--prior-hybrid-manifest",
+                    str(part_id_initial_hybrid_mask_manifest),
                     "--output-dir",
                     str(part_id_hybrid_mask_dir),
                 ],

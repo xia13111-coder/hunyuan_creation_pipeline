@@ -201,6 +201,14 @@ class PartIdArtifacts:
     sam3_manifest: Path
     entityseg_dir: Path
     entityseg_manifest: Path
+    initial_hybrid_mask_dir: Path
+    initial_hybrid_mask_manifest: Path
+    relation_guidance_dir: Path
+    relation_guided_request: Path
+    relation_sam3_dir: Path
+    relation_sam3_manifest: Path
+    relation_entityseg_dir: Path
+    relation_entityseg_manifest: Path
     hybrid_mask_dir: Path
     hybrid_mask_manifest: Path
     retrieval_request: Path
@@ -234,10 +242,24 @@ class PartIdArtifacts:
             entityseg_manifest=(
                 analysis / "part_id_entityseg_regions" / "manifest.json"
             ),
-            hybrid_mask_dir=analysis / "part_id_hybrid_masks",
-            hybrid_mask_manifest=(
-                analysis / "part_id_hybrid_masks" / "manifest.json"
+            initial_hybrid_mask_dir=analysis / "part_id_hybrid_masks_initial",
+            initial_hybrid_mask_manifest=(
+                analysis / "part_id_hybrid_masks_initial" / "manifest.json"
             ),
+            relation_guidance_dir=analysis / "part_id_relation_guidance",
+            relation_guided_request=(
+                analysis / "part_id_relation_guidance" / "request.json"
+            ),
+            relation_sam3_dir=analysis / "part_id_relation_sam3_regions",
+            relation_sam3_manifest=(
+                analysis / "part_id_relation_sam3_regions" / "manifest.json"
+            ),
+            relation_entityseg_dir=(analysis / "part_id_relation_entityseg_regions"),
+            relation_entityseg_manifest=(
+                analysis / "part_id_relation_entityseg_regions" / "manifest.json"
+            ),
+            hybrid_mask_dir=analysis / "part_id_hybrid_masks",
+            hybrid_mask_manifest=(analysis / "part_id_hybrid_masks" / "manifest.json"),
             retrieval_request=analysis / "part_id_retrieval_request.json",
             retrieval_dir=retrieval_dir,
             retrieval_result=retrieval_dir / "visual_retrieval.json",

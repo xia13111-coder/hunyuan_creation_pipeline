@@ -851,6 +851,7 @@ def _load_part_id_refinement_manifest(
             "qwen-cad-sam3-entityseg-hybrid/v3",
             "qwen-cad-sam3-entityseg-hybrid/v4",
             "qwen-cad-sam3-entityseg-hybrid/v5",
+            "qwen-cad-sam3-entityseg-hybrid/v6",
         }
         if hybrid
         else {"qwen-sam3-region-result/v1"}
@@ -867,8 +868,8 @@ def _load_part_id_refinement_manifest(
     policy = refinement.get("policy")
     if not isinstance(policy, Mapping):
         raise PartIdProjectionError(f"{label} has no policy")
+    schema_version = refinement.get("schema_version")
     if hybrid:
-        schema_version = refinement.get("schema_version")
         expected_entity_role = (
             "probable_foreground_initialization_only"
             if schema_version
@@ -877,6 +878,7 @@ def _load_part_id_refinement_manifest(
                 "qwen-cad-sam3-entityseg-hybrid/v3",
                 "qwen-cad-sam3-entityseg-hybrid/v4",
                 "qwen-cad-sam3-entityseg-hybrid/v5",
+                "qwen-cad-sam3-entityseg-hybrid/v6",
             }
             else "boundary_candidate_only"
         )
@@ -896,6 +898,7 @@ def _load_part_id_refinement_manifest(
             "qwen-cad-sam3-entityseg-hybrid/v3",
             "qwen-cad-sam3-entityseg-hybrid/v4",
             "qwen-cad-sam3-entityseg-hybrid/v5",
+            "qwen-cad-sam3-entityseg-hybrid/v6",
         } and (
             policy.get("sam3_role") != "probable_foreground_initialization_only"
             or policy.get("final_boundary_method")
@@ -911,6 +914,7 @@ def _load_part_id_refinement_manifest(
             "qwen-cad-sam3-entityseg-hybrid/v3",
             "qwen-cad-sam3-entityseg-hybrid/v4",
             "qwen-cad-sam3-entityseg-hybrid/v5",
+            "qwen-cad-sam3-entityseg-hybrid/v6",
         } and (
             policy.get("shape_authority")
             != "cad_model_render_target_part_id_normalized_shape"
@@ -930,6 +934,7 @@ def _load_part_id_refinement_manifest(
         if schema_version in {
             "qwen-cad-sam3-entityseg-hybrid/v4",
             "qwen-cad-sam3-entityseg-hybrid/v5",
+            "qwen-cad-sam3-entityseg-hybrid/v6",
         } and (
             policy.get("reference_space_cad_role")
             != "initial_roi_and_visibility_for_bounded_2d_mask_registration"
@@ -965,6 +970,36 @@ def _load_part_id_refinement_manifest(
             raise PartIdProjectionError(
                 "Part-ID hybrid v5 manifest does not seal its model-shape proposal"
             )
+        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v6" and (
+            policy.get("model_image_shape_photo_proposal")
+            != "bounded_similarity_registration_from_model_image_via_sealed_cad_"
+            "assembly_context_then_photo_edges"
+            or policy.get("model_shape_proposal_selection_contract")
+            != "photo_edges_model_shape_candidate_support_and_assembly_neighbor_"
+            "nonregression"
+            or policy.get("model_shape_photo_proposal_warp_applied") is not True
+            or policy.get("assembly_context_position_authority")
+            != "leave_one_target_out_multi_anchor_cad_part_relations"
+            or policy.get("target_location_method")
+            != "robust_similarity_plus_nearby_anchor_residual_voting"
+            or policy.get("target_first_pass_mask_used_for_own_location") is not False
+            or policy.get("target_direct_cad_projection_used_when_relation_accepted")
+            is not False
+            or policy.get("relation_second_pass_segmentation") is not True
+            or policy.get("prior_hybrid_candidate_preserved") is not True
+            or policy.get("neural_rejection_fallback")
+            != "relation_located_cad_shape_photo_edge_refinement"
+            or policy.get("relation_failure_policy")
+            != "preserve_prior_hybrid_then_original_cad_edge_fallback"
+            or policy.get("relation_neighbor_exclusion_authority")
+            != "target_specific_cad_assembly_warp_from_non_target_anchor_votes"
+            or policy.get("model_shape_proposal_component_policy")
+            != "complete_target_part_id_union_plus_all_model_components_without_"
+            "photo_mapping"
+        ):
+            raise PartIdProjectionError(
+                "Part-ID hybrid v6 manifest does not seal relation-guided location"
+            )
         if refinement_path is None:
             raise PartIdProjectionError(
                 "in-memory Part-ID hybrid manifest cannot resolve its sealed inputs"
@@ -978,8 +1013,11 @@ def _load_part_id_refinement_manifest(
             "qwen-cad-sam3-entityseg-hybrid/v3",
             "qwen-cad-sam3-entityseg-hybrid/v4",
             "qwen-cad-sam3-entityseg-hybrid/v5",
+            "qwen-cad-sam3-entityseg-hybrid/v6",
         }:
             input_names.append("cad_model_templates")
+        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v6":
+            input_names.append("prior_hybrid_manifest")
         for input_name in input_names:
             binding = inputs.get(input_name)
             if not isinstance(binding, Mapping):
@@ -1057,6 +1095,39 @@ def _load_part_id_refinement_manifest(
             raise PartIdProjectionError(
                 f"{label} records disagree on shared alignment for {identity[0]}"
             )
+        if schema_version == "qwen-cad-sam3-entityseg-hybrid/v6":
+            relation = raw.get("relation_guidance")
+            relation_accepted = (
+                relation.get("accepted") if isinstance(relation, Mapping) else None
+            )
+            if (
+                not isinstance(relation, Mapping)
+                or relation.get("method")
+                != "leave_one_target_out_multi_anchor_relation_voting"
+                or relation.get("target_part_id") != identity[1]
+                or relation.get("target_first_pass_mask_used") is not False
+                or relation.get("whole_asset_transform_changed") is not False
+                or relation.get("assembly_camera_changed") is not False
+                or relation.get("per_mesh_pose_change_allowed") is not False
+                or not isinstance(relation_accepted, bool)
+                or (
+                    relation_accepted
+                    and (
+                        relation.get("target_direct_cad_projection_used_for_location")
+                        is not False
+                        or not isinstance(relation.get("inlier_anchor_part_ids"), list)
+                        or len(relation.get("inlier_anchor_part_ids")) < 3
+                        or identity[1] in relation.get("inlier_anchor_part_ids")
+                    )
+                )
+                or (
+                    not relation_accepted
+                    and relation.get("fallback") != "initial_sealed_cad_request"
+                )
+            ):
+                raise PartIdProjectionError(
+                    f"Part-ID hybrid record {identity} has unsafe relation guidance"
+                )
         if raw.get("accepted") is not True:
             continue
         if refinement_path is None:
@@ -1102,6 +1173,16 @@ def _load_part_id_refinement_manifest(
             iterative = raw.get("iterative_refinement")
             candidate_sources = raw.get("candidate_sources")
             primary_candidate_source = raw.get("primary_candidate_source")
+            allowed_candidate_sources = (
+                {
+                    "prior_iterative_hybrid",
+                    "relation_sam3",
+                    "relation_entityseg",
+                    "relation_cad_location_fallback",
+                }
+                if schema_version == "qwen-cad-sam3-entityseg-hybrid/v6"
+                else {"sam3", "entityseg"}
+            )
             if (
                 not isinstance(iterative, Mapping)
                 or iterative.get("method") != "iterative_visible_mesh_edge_optimization"
@@ -1109,7 +1190,7 @@ def _load_part_id_refinement_manifest(
                 or not isinstance(candidate_sources, list)
                 or primary_candidate_source not in candidate_sources
                 or not all(
-                    source in {"sam3", "entityseg"} for source in candidate_sources
+                    source in allowed_candidate_sources for source in candidate_sources
                 )
             ):
                 raise PartIdProjectionError(
@@ -1119,6 +1200,7 @@ def _load_part_id_refinement_manifest(
                 "qwen-cad-sam3-entityseg-hybrid/v3",
                 "qwen-cad-sam3-entityseg-hybrid/v4",
                 "qwen-cad-sam3-entityseg-hybrid/v5",
+                "qwen-cad-sam3-entityseg-hybrid/v6",
             }:
                 model_reference = raw.get("model_domain_shape_reference")
                 final_metrics = iterative.get("final_metrics")
@@ -1146,6 +1228,7 @@ def _load_part_id_refinement_manifest(
                 if schema_version in {
                     "qwen-cad-sam3-entityseg-hybrid/v4",
                     "qwen-cad-sam3-entityseg-hybrid/v5",
+                    "qwen-cad-sam3-entityseg-hybrid/v6",
                 }:
                     local_registration = iterative.get(
                         "reference_space_local_registration"
@@ -1242,7 +1325,10 @@ def _load_part_id_refinement_manifest(
                             f"Part-ID hybrid record {identity} has an unsafe local "
                             "mask registration"
                         )
-                if schema_version == "qwen-cad-sam3-entityseg-hybrid/v5":
+                if schema_version in {
+                    "qwen-cad-sam3-entityseg-hybrid/v5",
+                    "qwen-cad-sam3-entityseg-hybrid/v6",
+                }:
                     model_registration = iterative.get(
                         "model_domain_photo_registration"
                     )
@@ -1345,8 +1431,13 @@ def _load_part_id_refinement_manifest(
                         or model_registration.get("assembly_context_used") is not True
                         or model_registration.get("variant_index") != 0
                         or model_registration.get("proposal_component_policy")
-                        != "union_of_all_model_components_associated_with_local_"
-                        "observation"
+                        != (
+                            "complete_target_part_id_union_plus_all_model_components_"
+                            "without_photo_mapping"
+                            if schema_version == "qwen-cad-sam3-entityseg-hybrid/v6"
+                            else "union_of_all_model_components_associated_with_local_"
+                            "observation"
+                        )
                         or model_registration.get("model_shape_variant_count")
                         != variant_count
                         or model_registration.get("selected_final_branch")

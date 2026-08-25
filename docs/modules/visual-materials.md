@@ -90,19 +90,19 @@ scale. If local refinement is unreliable, the workflow uses the
 global projection or marks the part as unobserved. These adjustments affect
 evidence extraction only, never CAD geometry.
 The target Part-ID also retains its coordinates and neighbour relationships in
-the full-assembly CAD render. The sealed assembly projection first registers
-the model-image target shape as a photograph-space proposal. A bounding-box-
-scaled similarity search then compares photograph edges, SAM3/EntitySeg
-support, and model shape while preventing entry into the scale-eroded interior
-of neighbouring CAD parts. A proposal replaces the baseline only when photo
-edges and model shape do not regress and candidate support remains above the
-original CAD-location floor. If fast registration erases a tiny part during
-downsampling, a full-resolution centroid, principal-axis, and area fallback is
-used; proposal failure falls back to the audited baseline instead of aborting
-the batch.
-When occlusion splits one Part-ID into several visible components, individual
-components may aid scoring, but the final proposal must retain the union of all
-CAD components associated with the current observation.
+the full-assembly CAD render. First-pass SAM3/EntitySeg masks are used only to
+discover automatic assembly anchors. When locating one target, that target's
+own first-pass mask is excluded. A robust 2-D similarity model is fitted in the
+common CAD-model image coordinates, then several nearest non-target anchors
+vote on the target's photograph position. Only after that location is fixed is
+the complete model-image Part-ID silhouette used to build a new prompt and run
+SAM3 and EntitySeg a second time. The second-pass masks, prior hybrid result,
+complete CAD shape, neighbour exclusion region, and photograph edges are then
+optimized jointly; the workflow neither chooses one segmenter verbatim nor
+treats the old target projection as location truth. If both neural candidates
+are rejected, the neighbour-located CAD shape still undergoes edge refinement
+and produces a result. Insufficient anchors preserve the audited first-pass
+result instead of aborting the batch.
 Production SAM3 and EntitySeg entry points use one fixed inference seed and seal
 that seed together with request and model hashes. A retry with identical inputs
 therefore cannot silently change Part-ID evidence through random initialization.
@@ -116,7 +116,8 @@ run instead of silently continuing with a two-view material decision.
 | --- | --- |
 | SAM3 | Whole-workpiece foreground and per-part initialization candidates. |
 | EntitySeg / CropFormer | Class-agnostic initialization candidates accepted only inside the CAD safety contract. |
-| Iterative boundary optimizer | Combines model-image target shape, assembly-relative neighbour position, visibility, prior masks, and image edges; it transforms only 2-D proposals and never moves an individual mesh. |
+| Neighbour-relation localizer | Excludes the target's own old mask and infers its position from multiple automatic anchors plus CAD assembly relations. |
+| Iterative boundary optimizer | Combines the complete model-image target shape, neighbour exclusion, both segmentation passes, prior masks, and image edges; it transforms only 2-D proposals and never moves an individual mesh. |
 | MVInverse | Albedo, roughness, and metallic estimates inside accepted masks. |
 | SigLIP2 | Retrieve visually related MDLs from NVIDIA `Materials/Base`. |
 | DINOv2 | Compare local surface and texture appearance. |

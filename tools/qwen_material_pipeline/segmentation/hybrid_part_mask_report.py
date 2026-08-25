@@ -323,6 +323,9 @@ def build_report(
         _read_manifest(entity_manifest_path, "EntitySeg manifest"), "EntitySeg"
     )
     hybrid_document = _read_manifest(hybrid_manifest_path, "hybrid manifest")
+    relation_guided = hybrid_document.get("schema_version") == (
+        "qwen-cad-sam3-entityseg-hybrid/v6"
+    )
     hybrid = _all_records(hybrid_document, "hybrid")
     if set(sam) != set(entity) or set(sam) != set(hybrid):
         raise EntitySegRegionError("comparison manifests have different region sets")
@@ -444,9 +447,10 @@ def build_report(
                 raise EntitySegRegionError(
                     f"model image does not match isolated Part-ID projection: {key}"
                 )
-            if not isinstance(amodal_doc, Mapping) or amodal_doc.get(
-                "sha256"
-            ) != aligned_amodal_doc.get("sha256"):
+            if not relation_guided and (
+                not isinstance(amodal_doc, Mapping)
+                or amodal_doc.get("sha256") != aligned_amodal_doc.get("sha256")
+            ):
                 raise EntitySegRegionError(
                     f"reference-space amodal template differs from model projection: {key}"
                 )
@@ -530,6 +534,7 @@ def build_report(
                 "cad_support_trim": final_row.get("cad_support_trim"),
                 "iterative_refinement": final_row.get("iterative_refinement"),
                 "aligned_cad_template": final_row.get("aligned_cad_template"),
+                "relation_guidance": final_row.get("relation_guidance"),
                 "accepted": final_row.get("accepted") is True,
                 "model_space_projection": (
                     final_row.get("model_domain_shape_reference", {}).get(
@@ -555,6 +560,15 @@ def build_report(
         )
 
     labels = {
+        "iterative_refinement_from_prior_and_relation_candidates": (
+            "上一版结果 + 邻件关系定位候选联合优化"
+        ),
+        "iterative_refinement_from_relation_cad_fallback": ("邻件关系定位 CAD + 照片边缘优化"),
+        "iterative_refinement_from_relation_sam3_entityseg": (
+            "邻件重定位后的 SAM3 + EntitySeg 联合优化"
+        ),
+        "iterative_refinement_from_relation_sam3": ("邻件重定位后的 SAM3 + CAD 优化"),
+        "iterative_refinement_from_relation_entityseg": ("邻件重定位后的 EntitySeg + CAD 优化"),
         "iterative_refinement_from_sam3_entityseg": "SAM3 + EntitySeg 联合迭代优化",
         "iterative_refinement_from_sam3": "SAM3 + mesh/可见性迭代优化",
         "iterative_refinement_from_entityseg": "EntitySeg + mesh/可见性迭代优化",
@@ -644,6 +658,21 @@ def build_report(
                     "整件相机模板残差平移 "
                     f"({float(translation[0]):+.1f}, {float(translation[1]):+.1f}) px"
                 )
+            relation = row.get("relation_guidance")
+            if isinstance(relation, Mapping):
+                anchor_ids = relation.get("local_anchor_votes", [])
+                anchor_names = [
+                    str(anchor.get("part_id"))
+                    for anchor in anchor_ids
+                    if isinstance(anchor, Mapping)
+                ]
+                target = relation.get("relation_target_centroid_xy", [0.0, 0.0])
+                details.append(
+                    "目标自身旧 mask 未参与定位；邻件 "
+                    + ", ".join(anchor_names)
+                    + " 推断中心 "
+                    + f"({float(target[0]):.1f}, {float(target[1]):.1f}) px"
+                )
             reasons = row["entityseg_rejection_reasons"]
             if reasons:
                 details.append("拒绝原因：" + ", ".join(reasons))
@@ -669,9 +698,9 @@ h1{{margin:.1em 0}}h2{{margin-top:42px}}.lead,.card p{{color:var(--muted)}}.stat
 .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(590px,1fr));gap:14px}}.card{{padding:12px;overflow:hidden}}.card h3{{margin:0 0 8px}}
 .card img{{display:block;width:100%;height:auto;border-radius:7px}}.card p{{margin:8px 2px 0}}@media(max-width:650px){{main{{padding:14px}}.grid{{grid-template-columns:1fr}}}}
 </style></head><body><main><h1>SAM3 + EntitySeg 辅助分割</h1>
-<p class="lead">第一栏是在 CAD 整机渲染图上高亮目标 Part-ID，显示它相对其他零件的真实位置。第二栏把该模型形状通过整机位置锚点自动注册到参考图；第三栏是整机 CAD 的可见投影。模型形状只允许在由当前零件尺度自动确定的小范围内校正，并以周围 CAD 零件作为禁入约束，不修改 USD、相机或任何 mesh 变换。绿色和青色是 SAM3 与 EntitySeg 候选；紫色是综合模型形状、整机相对位置、候选与照片边缘优化出的结果。</p>
-<div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">联合候选迭代 <b>{summary['decision_counts'].get('iterative_refinement_from_sam3_entityseg', 0)}</b></div><div class="stat">单候选 + mesh 迭代 <b>{summary['decision_counts'].get('iterative_refinement_from_sam3', 0) + summary['decision_counts'].get('iterative_refinement_from_entityseg', 0)}</b></div><div class="stat">最终边界：迭代优化 <b>{summary['selected_source_counts'].get('shape_guided_iterative', 0)}</b></div></div>
-<p class="lead">这是正式 Part-ID 材质证据使用的边界融合结果；无安全候选时会回退到已审计的 CAD 投影，不会猜测零件边界。点击图片可查看原始像素。</p>
+<p class="lead">第一栏只显示 CAD 模型图中的目标 Part-ID 及其真实装配位置。目标在参考图中的位置由多个非目标邻件自动投票推断，目标自身旧 mask 和旧直接映射不参与定位；随后在新区域重新运行 SAM3 与 EntitySeg。紫色结果联合上一版安全候选、完整 CAD 目标形状、邻件禁入区域和照片边缘优化得到；不修改 USD、相机或任何 mesh 变换。</p>
+<div class="stats"><div class="stat">最终通过 <b>{summary['accepted_region_count']}</b> / {summary['region_count']}</div><div class="stat">保留上一版并联合优化 <b>{summary['decision_counts'].get('iterative_refinement_from_prior_and_relation_candidates', 0)}</b></div><div class="stat">邻件定位 CAD 回退 <b>{summary['decision_counts'].get('iterative_refinement_from_relation_cad_fallback', 0)}</b></div><div class="stat">最终边界：迭代优化 <b>{summary['selected_source_counts'].get('shape_guided_iterative', 0)}</b></div></div>
+<p class="lead">这是正式 Part-ID 材质证据使用的边界融合结果；神经分割拒绝时仍由邻件定位的 CAD 形状继续做照片边缘优化，因此每个可见 Part-ID 都有结果。点击图片可查看原始像素。</p>
 <nav>{''.join(f'<a href="#{key}">{value}</a>' for key,value in labels.items())}</nav>{''.join(sections)}</main></body></html>"""
     (output_dir / "index.html").write_text(page, encoding="utf-8")
     result = {"summary": summary, "records": rows}

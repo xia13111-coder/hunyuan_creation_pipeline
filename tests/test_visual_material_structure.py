@@ -45,9 +45,21 @@ def test_workspace_centralizes_the_existing_artifact_layout(tmp_path: Path) -> N
         destination / "analysis" / "part_id_material_audit.json"
     )
     assert workspace.part_id.amodal_template_manifest == (
+        destination / "analysis" / "part_id_cad_amodal_templates" / "manifest.json"
+    )
+    assert workspace.part_id.initial_hybrid_mask_manifest == (
+        destination / "analysis" / "part_id_hybrid_masks_initial" / "manifest.json"
+    )
+    assert workspace.part_id.relation_guided_request == (
+        destination / "analysis" / "part_id_relation_guidance" / "request.json"
+    )
+    assert workspace.part_id.relation_sam3_manifest == (
+        destination / "analysis" / "part_id_relation_sam3_regions" / "manifest.json"
+    )
+    assert workspace.part_id.relation_entityseg_manifest == (
         destination
         / "analysis"
-        / "part_id_cad_amodal_templates"
+        / "part_id_relation_entityseg_regions"
         / "manifest.json"
     )
     assert workspace.source.camera_acceptance == (

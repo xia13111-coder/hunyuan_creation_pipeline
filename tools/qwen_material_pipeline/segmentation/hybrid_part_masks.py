@@ -23,7 +23,8 @@ from .entityseg_regions import EntitySegRegionError, _boundary_metrics
 from .sam3_regions import _normalized_shape_agreement
 
 
-SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v5"
+SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v6"
+MODEL_SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v5"
 LEGACY_SCHEMA_VERSION = "qwen-cad-sam3-entityseg-hybrid/v2"
 MAXIMUM_ENTITY_TO_CAD_AREA_RATIO = 1.85
 MINIMUM_ENTITY_CAD_DIRECT_IOU = 0.50
@@ -100,6 +101,127 @@ def _records(
             raise EntitySegRegionError(f"duplicate {label} region: {key}")
         output[key] = row
     return output
+
+
+def _bound_request(
+    document: Mapping[str, Any], *, label: str
+) -> tuple[Path, dict[str, Any]]:
+    binding = document.get("request")
+    if not isinstance(binding, Mapping):
+        raise EntitySegRegionError(f"{label} has no request binding")
+    value = binding.get("path")
+    expected_sha256 = binding.get("sha256")
+    expected_document_sha256 = binding.get("document_sha256")
+    if not all(
+        isinstance(value, str)
+        for value in (value, expected_sha256, expected_document_sha256)
+    ):
+        raise EntitySegRegionError(f"{label} request binding is malformed")
+    path = Path(str(value)).expanduser().resolve(strict=True)
+    if _sha256_file(path) != expected_sha256:
+        raise EntitySegRegionError(f"{label} request hash mismatch")
+    try:
+        request = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise EntitySegRegionError(f"unable to read {label} request") from exc
+    if (
+        not isinstance(request, dict)
+        or _canonical_sha256(request) != expected_document_sha256
+    ):
+        raise EntitySegRegionError(f"{label} request document hash mismatch")
+    return path, request
+
+
+def _relation_request_records(
+    *,
+    request: Mapping[str, Any],
+    expected_keys: set[tuple[str, str]],
+    amodal_manifest_path: Path | None,
+) -> tuple[
+    dict[tuple[str, str], Mapping[str, Any]],
+    dict[tuple[str, str], Mapping[str, Any]],
+]:
+    relation = request.get("relation_guidance")
+    if relation is None:
+        return {}, {}
+    if not isinstance(relation, Mapping) or relation.get("schema_version") != (
+        "qwen-part-relation-guidance/v1"
+    ):
+        raise EntitySegRegionError("relation-guided request contract is malformed")
+    integrity = relation.get("integrity")
+    unsigned_relation = dict(relation)
+    unsigned_relation.pop("integrity", None)
+    if not isinstance(integrity, Mapping) or integrity.get(
+        "document_sha256"
+    ) != _canonical_sha256(unsigned_relation):
+        raise EntitySegRegionError("relation-guided request integrity mismatch")
+    policy = relation.get("policy")
+    if (
+        not isinstance(policy, Mapping)
+        or policy.get("target_first_pass_mask_used_for_own_location") is not False
+        or policy.get("target_direct_cad_projection_used_when_relation_accepted")
+        is not False
+        or policy.get("per_mesh_pose_change_allowed") is not False
+        or policy.get("whole_asset_transform_changed") is not False
+        or policy.get("assembly_camera_changed") is not False
+    ):
+        raise EntitySegRegionError("relation-guided request policy is unsafe")
+    if amodal_manifest_path is not None:
+        inputs = relation.get("inputs")
+        amodal_binding = (
+            inputs.get("cad_amodal_templates") if isinstance(inputs, Mapping) else None
+        )
+        resolved_amodal = amodal_manifest_path.expanduser().resolve(strict=True)
+        if (
+            not isinstance(amodal_binding, Mapping)
+            or amodal_binding.get("path") != str(resolved_amodal)
+            or amodal_binding.get("sha256") != _sha256_file(resolved_amodal)
+        ):
+            raise EntitySegRegionError(
+                "relation-guided request CAD model authority differs"
+            )
+    audits: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for index, row in enumerate(relation.get("records", [])):
+        if not isinstance(row, Mapping):
+            raise EntitySegRegionError(f"relation record {index} is malformed")
+        key = (str(row.get("view_id")), str(row.get("part_id")))
+        if key in audits:
+            raise EntitySegRegionError(f"duplicate relation record: {key}")
+        if (
+            row.get("target_first_pass_mask_used") is not False
+            or row.get("whole_asset_transform_changed") is not False
+            or row.get("assembly_camera_changed") is not False
+            or row.get("per_mesh_pose_change_allowed") is not False
+        ):
+            raise EntitySegRegionError(f"unsafe relation record: {key}")
+        audits[key] = row
+    regions: dict[tuple[str, str], Mapping[str, Any]] = {}
+    for index, row in enumerate(request.get("regions", [])):
+        if not isinstance(row, Mapping):
+            raise EntitySegRegionError(f"relation request region {index} is malformed")
+        key = (str(row.get("view_id")), str(row.get("group_id")))
+        if key in regions:
+            raise EntitySegRegionError(f"duplicate relation request region: {key}")
+        regions[key] = row
+    if set(audits) != expected_keys or set(regions) != expected_keys:
+        raise EntitySegRegionError(
+            "relation guidance does not exactly cover the segmentation regions"
+        )
+    for key, audit in audits.items():
+        if audit.get("accepted") is True:
+            region_audit = regions[key].get("relation_guidance")
+            neighbor = regions[key].get("cad_assembly_neighbor_context")
+            if (
+                not isinstance(region_audit, Mapping)
+                or region_audit.get("accepted") is not True
+                or region_audit.get("target_first_pass_mask_used") is not False
+                or not isinstance(neighbor, Mapping)
+            ):
+                raise EntitySegRegionError(
+                    f"accepted relation request is incomplete: {key}"
+                )
+            _load_document_mask(neighbor, label=f"relation neighbor context {key}")
+    return audits, regions
 
 
 def _model_template_records(
@@ -435,6 +557,19 @@ def _model_domain_shape_references(
             )
             > 0
         )
+        full_visible_shape = np.rot90(
+            visible_shape.astype(np.uint8), quarter_turns % 4
+        ).astype(bool)
+        relation_shape_variants = [full_visible_shape]
+        for component_index in range(1, component_count):
+            component_variant = np.rot90(
+                component_labels == component_index, quarter_turns % 4
+            ).copy()
+            if not any(
+                np.array_equal(component_variant, prior)
+                for prior in relation_shape_variants
+            ):
+                relation_shape_variants.append(component_variant)
         comparison_variants = [np.rot90(local_visible_shape, quarter_turns % 4).copy()]
         for component_index in selected_components:
             component_variant = np.rot90(
@@ -447,6 +582,14 @@ def _model_domain_shape_references(
                 comparison_variants.append(component_variant)
         references[key] = {
             "visible_shape": comparison_variants,
+            # This is the complete target Part-ID silhouette in the CAD render.
+            # It deliberately does not use the old photo-space projection to
+            # select connected components.  Cross-part relation localization
+            # needs every part centroid in one common model-image coordinate
+            # system, including targets whose former direct mapping was wrong.
+            "relation_visible_shape": full_visible_shape,
+            "relation_visible_shape_variants": relation_shape_variants,
+            "relation_assembly_shape": rotated_assembly.astype(bool),
             "display_visible_shape": local_visible_shape,
             "complete_shape": np.rot90(complete_shape, quarter_turns % 4).copy(),
             "assembly_neighbor_context": assembly_neighbor_context,
@@ -466,6 +609,10 @@ def _model_domain_shape_references(
                     "sha256": part_ids_sha256,
                 },
                 "model_visible_part_pixels": visible_pixels,
+                "relation_visible_shape_pixels": int(
+                    np.count_nonzero(full_visible_shape)
+                ),
+                "relation_shape_variant_count": len(relation_shape_variants),
                 "model_local_visible_part_pixels": int(
                     np.count_nonzero(local_visible_shape)
                 ),
@@ -542,7 +689,20 @@ def _sam_aligned_cad_seed(
     sam_row: Mapping[str, Any],
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Replay the bounded shared-camera residual used to prompt SAM3."""
-
+    shared = sam_row.get("view_shared_alignment")
+    translation = (
+        shared.get("translation_xy_pixels") if isinstance(shared, Mapping) else None
+    )
+    if (
+        not isinstance(translation, list)
+        or len(translation) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in translation
+        )
+        or shared.get("part_specific_translation_allowed") is not False
+    ):
+        raise EntitySegRegionError("SAM3 shared CAD translation is malformed")
     for box_audit in sam_row.get("box_audits", []):
         if not isinstance(box_audit, Mapping):
             continue
@@ -553,81 +713,20 @@ def _sam_aligned_cad_seed(
         ):
             continue
         prompt = refinement.get("prompt_audit")
-        translation = (
+        prompt_translation = (
             prompt.get("translation_xy_pixels") if isinstance(prompt, Mapping) else None
         )
         if (
-            not isinstance(translation, list)
-            or len(translation) != 2
+            not isinstance(prompt_translation, list)
+            or len(prompt_translation) != 2
             or any(
                 isinstance(value, bool) or not isinstance(value, (int, float))
-                for value in translation
+                for value in prompt_translation
             )
+            or [float(value) for value in prompt_translation]
+            != [float(value) for value in translation]
         ):
-            raise EntitySegRegionError("SAM3 aligned CAD translation is malformed")
-        matrix = np.asarray(
-            [
-                [1.0, 0.0, float(translation[0])],
-                [0.0, 1.0, float(translation[1])],
-            ],
-            dtype=np.float32,
-        )
-        aligned = (
-            cv2.warpAffine(
-                seed.astype(np.uint8),
-                matrix,
-                (seed.shape[1], seed.shape[0]),
-                flags=cv2.INTER_NEAREST,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=0,
-            )
-            > 0
-        )
-        return aligned, {
-            "source": "sam3_same_view_cad_template_prompt",
-            "translation_xy_pixels": [float(translation[0]), float(translation[1])],
-            "per_mesh_pose_change_allowed": False,
-        }
-    return seed, {
-        "source": "registered_shared_camera_projection",
-        "translation_xy_pixels": [0.0, 0.0],
-        "per_mesh_pose_change_allowed": False,
-    }
-
-
-def _entity_aligned_cad_seed(
-    seed: np.ndarray,
-    entity_row: Mapping[str, Any],
-) -> tuple[np.ndarray, dict[str, Any]]:
-    """Replay the selected EntitySeg candidate's bounded camera residual."""
-
-    selected = entity_row.get("selected_candidate")
-    alignment = (
-        selected.get("cad_template_alignment")
-        if isinstance(selected, Mapping)
-        else None
-    )
-    translation = (
-        alignment.get("translation_xy_pixels")
-        if isinstance(alignment, Mapping)
-        else None
-    )
-    if translation is None:
-        return seed, {
-            "source": "registered_shared_camera_projection",
-            "translation_xy_pixels": [0.0, 0.0],
-            "per_mesh_pose_change_allowed": False,
-        }
-    if (
-        not isinstance(translation, list)
-        or len(translation) != 2
-        or any(
-            isinstance(value, bool) or not isinstance(value, (int, float))
-            for value in translation
-        )
-        or alignment.get("per_mesh_pose_change_allowed") is not False
-    ):
-        raise EntitySegRegionError("EntitySeg aligned CAD translation is malformed")
+            raise EntitySegRegionError("SAM3 prompt and shared CAD translations differ")
     matrix = np.asarray(
         [
             [1.0, 0.0, float(translation[0])],
@@ -647,7 +746,81 @@ def _entity_aligned_cad_seed(
         > 0
     )
     return aligned, {
-        "source": "entityseg_selected_candidate_bounded_camera_residual",
+        "source": "sam3_view_shared_camera_projection",
+        "translation_xy_pixels": [float(translation[0]), float(translation[1])],
+        "per_mesh_pose_change_allowed": False,
+    }
+
+
+def _entity_aligned_cad_seed(
+    seed: np.ndarray,
+    entity_row: Mapping[str, Any],
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Replay the selected EntitySeg candidate's bounded camera residual."""
+    shared = entity_row.get("view_shared_alignment")
+    shared_translation = (
+        shared.get("translation_xy_pixels") if isinstance(shared, Mapping) else None
+    )
+    if (
+        not isinstance(shared_translation, list)
+        or len(shared_translation) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in shared_translation
+        )
+        or shared.get("part_specific_translation_allowed") is not False
+    ):
+        raise EntitySegRegionError("EntitySeg shared CAD translation is malformed")
+    selected = entity_row.get("selected_candidate")
+    alignment = (
+        selected.get("cad_template_alignment")
+        if isinstance(selected, Mapping)
+        else None
+    )
+    translation = (
+        alignment.get("translation_xy_pixels")
+        if isinstance(alignment, Mapping)
+        else None
+    )
+    if translation is None:
+        translation = shared_translation
+    if (
+        not isinstance(translation, list)
+        or len(translation) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, (int, float))
+            for value in translation
+        )
+        or (
+            isinstance(alignment, Mapping)
+            and alignment.get("per_mesh_pose_change_allowed") is not False
+        )
+        or [float(value) for value in translation]
+        != [float(value) for value in shared_translation]
+    ):
+        raise EntitySegRegionError(
+            "EntitySeg candidate and shared CAD translations differ"
+        )
+    matrix = np.asarray(
+        [
+            [1.0, 0.0, float(translation[0])],
+            [0.0, 1.0, float(translation[1])],
+        ],
+        dtype=np.float32,
+    )
+    aligned = (
+        cv2.warpAffine(
+            seed.astype(np.uint8),
+            matrix,
+            (seed.shape[1], seed.shape[0]),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        > 0
+    )
+    return aligned, {
+        "source": "entityseg_view_shared_camera_projection",
         "translation_xy_pixels": [float(translation[0]), float(translation[1])],
         "per_mesh_pose_change_allowed": False,
     }
@@ -1150,6 +1323,7 @@ def _register_model_shape_to_photo(
     model_shape_variants: list[np.ndarray],
     candidate_masks: list[np.ndarray],
     assembly_neighbor_context: np.ndarray | None = None,
+    complete_target_shape_variants: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Register the model-image Part-ID shape as a photo-space proposal only."""
 
@@ -1451,7 +1625,10 @@ def _register_model_shape_to_photo(
             "method": "model_image_part_id_similarity_registration_to_photo",
             "model_shape_variant_count": len(variants),
             "proposal_component_policy": (
-                "union_of_all_model_components_associated_with_local_observation"
+                "complete_target_part_id_union_plus_all_model_components_without_"
+                "photo_mapping"
+                if complete_target_shape_variants
+                else "union_of_all_model_components_associated_with_local_observation"
             ),
             "transformed_object": "model_image_part_id_mask_proposal_only",
             "cad_mesh_transform_changed": False,
@@ -1717,6 +1894,7 @@ def _iterative_shape_guided_refinement(
     assembly_neighbor_context: np.ndarray | None = None,
     candidate_masks: list[tuple[str, np.ndarray]],
     primary_candidate_source: str,
+    complete_target_shape_variants: bool = False,
     _enable_local_registration: bool = True,
     _enable_model_shape_proposal: bool = True,
 ) -> tuple[np.ndarray, dict[str, Any], dict[str, float | int]]:
@@ -1782,6 +1960,7 @@ def _iterative_shape_guided_refinement(
             assembly_neighbor_context=neighbor_context,
             candidate_masks=list(candidate_by_source.items()),
             primary_candidate_source=primary_candidate_source,
+            complete_target_shape_variants=complete_target_shape_variants,
             _enable_local_registration=True,
             _enable_model_shape_proposal=False,
         )
@@ -1791,6 +1970,7 @@ def _iterative_shape_guided_refinement(
             model_shape_variants=model_visible_shape,
             candidate_masks=list(candidate_by_source.values()),
             assembly_neighbor_context=neighbor_context,
+            complete_target_shape_variants=complete_target_shape_variants,
         )
         candidate_values = list(candidate_by_source.values())
         candidate_union = np.logical_or.reduce(candidate_values)
@@ -1950,6 +2130,7 @@ def _iterative_shape_guided_refinement(
             assembly_neighbor_context=neighbor_context,
             candidate_masks=list(candidate_by_source.items()),
             primary_candidate_source=primary_candidate_source,
+            complete_target_shape_variants=complete_target_shape_variants,
             _enable_local_registration=False,
             _enable_model_shape_proposal=False,
         )
@@ -1968,6 +2149,7 @@ def _iterative_shape_guided_refinement(
                 assembly_neighbor_context=neighbor_context,
                 candidate_masks=list(candidate_by_source.items()),
                 primary_candidate_source=primary_candidate_source,
+                complete_target_shape_variants=complete_target_shape_variants,
                 _enable_local_registration=False,
                 _enable_model_shape_proposal=False,
             )
@@ -2395,6 +2577,7 @@ def build_hybrid_masks(
     entity_manifest_path: Path,
     output_dir: Path,
     amodal_manifest_path: Path | None = None,
+    prior_hybrid_manifest_path: Path | None = None,
 ) -> dict[str, Any]:
     sam_manifest_path = sam_manifest_path.expanduser().resolve(strict=True)
     entity_manifest_path = entity_manifest_path.expanduser().resolve(strict=True)
@@ -2408,6 +2591,15 @@ def build_hybrid_masks(
     entity_records = _records(entity_document, "EntitySeg")
     if set(sam_records) != set(entity_records):
         raise EntitySegRegionError("SAM3 and EntitySeg region sets differ")
+    request_path, request_document = _bound_request(sam_document, label="SAM3 manifest")
+    entity_request_path, entity_request_document = _bound_request(
+        entity_document, label="EntitySeg manifest"
+    )
+    if (
+        request_path != entity_request_path
+        or request_document != entity_request_document
+    ):
+        raise EntitySegRegionError("SAM3 and EntitySeg request documents differ")
     model_shape_references: dict[tuple[str, str], dict[str, Any]] = {}
     model_template_document: dict[str, Any] | None = None
     resolved_amodal_manifest: Path | None = None
@@ -2422,8 +2614,47 @@ def build_hybrid_masks(
             manifest_path=resolved_amodal_manifest,
             expected_keys=set(sam_records),
         )
+    relation_audits, relation_regions = _relation_request_records(
+        request=request_document,
+        expected_keys=set(sam_records),
+        amodal_manifest_path=resolved_amodal_manifest,
+    )
+    relation_guided = bool(relation_audits)
+    if relation_guided:
+        for reference in model_shape_references.values():
+            reference["visible_shape"] = [reference["relation_visible_shape"]]
+            reference["display_visible_shape"] = reference["relation_visible_shape"]
+            reference["audit"]["model_shape_variant_count"] = len(
+                reference["visible_shape"]
+            )
+            reference["audit"][
+                "model_component_association_role"
+            ] = "all_target_part_id_components_from_model_image_without_photo_mapping"
+    prior_records: dict[tuple[str, str], Mapping[str, Any]] = {}
+    prior_document: dict[str, Any] | None = None
+    resolved_prior_manifest: Path | None = None
+    if prior_hybrid_manifest_path is not None:
+        resolved_prior_manifest = prior_hybrid_manifest_path.expanduser().resolve(
+            strict=True
+        )
+        prior_document = _read_manifest(
+            resolved_prior_manifest, "prior hybrid manifest"
+        )
+        if prior_document.get("schema_version") not in {
+            MODEL_SCHEMA_VERSION,
+            SCHEMA_VERSION,
+        }:
+            raise EntitySegRegionError("prior hybrid manifest schema is unsupported")
+        prior_records = _records(prior_document, "prior hybrid")
+        if set(prior_records) != set(sam_records):
+            raise EntitySegRegionError(
+                "prior hybrid regions do not exactly cover relation refinement"
+            )
     sam_root = sam_manifest_path.parent
     entity_root = entity_manifest_path.parent
+    prior_root = (
+        resolved_prior_manifest.parent if resolved_prior_manifest is not None else None
+    )
     output_dir = output_dir.expanduser().resolve()
     masks_dir = output_dir / "masks"
     masks_dir.mkdir(parents=True, exist_ok=True)
@@ -2471,6 +2702,9 @@ def build_hybrid_masks(
         sam_row = sam_records[key]
         entity_row = entity_records[key]
         model_reference = model_shape_references.get(key)
+        relation_audit = relation_audits.get(key)
+        relation_region = relation_regions.get(key)
+        prior_row = prior_records.get(key)
         sam_shared = sam_row.get("view_shared_alignment")
         entity_shared = entity_row.get("view_shared_alignment")
         if (
@@ -2557,12 +2791,26 @@ def build_hybrid_masks(
             ):
                 raise EntitySegRegionError(f"CAD amodal contract mismatch: {key}")
             amodal = _load_mask(amodal_path, image.shape[:2])
-            if model_reference is not None and (
-                model_reference.get("aligned_amodal_sha256") != expected_amodal_hash
-            ):
-                raise EntitySegRegionError(
-                    f"model-domain and reference-space templates differ: {key}"
-                )
+            if model_reference is not None:
+                if relation_guided:
+                    relation_amodal = (
+                        relation_region.get("cad_amodal_template")
+                        if isinstance(relation_region, Mapping)
+                        else None
+                    )
+                    if (
+                        not isinstance(relation_amodal, Mapping)
+                        or relation_amodal.get("sha256") != expected_amodal_hash
+                    ):
+                        raise EntitySegRegionError(
+                            f"relation and segmentation amodal templates differ: {key}"
+                        )
+                elif (
+                    model_reference.get("aligned_amodal_sha256") != expected_amodal_hash
+                ):
+                    raise EntitySegRegionError(
+                        f"model-domain and reference-space templates differ: {key}"
+                    )
         sam_aligned_amodal = (
             _align_with_audit(amodal, sam_alignment_audit)
             if amodal is not None
@@ -2605,13 +2853,40 @@ def build_hybrid_masks(
         initializer_ranking: list[dict[str, float | str]] | None = None
         candidate_masks: list[tuple[str, np.ndarray]] = []
         primary_candidate_source: str | None = None
+        entity_candidate_source = (
+            "relation_entityseg" if relation_guided else "entityseg"
+        )
+        sam_candidate_source = "relation_sam3" if relation_guided else "sam3"
+        if isinstance(prior_row, Mapping) and prior_row.get("accepted") is True:
+            if prior_root is None:
+                raise EntitySegRegionError("prior hybrid root is unavailable")
+            if (
+                prior_row.get("source_image") != str(source_path)
+                or prior_row.get("source_image_sha256") != source_sha256
+            ):
+                raise EntitySegRegionError(f"prior hybrid source image differs: {key}")
+            candidate_masks.append(
+                (
+                    "prior_iterative_hybrid",
+                    _load_mask(
+                        _resolved_mask_path(prior_root, prior_row),
+                        image.shape[:2],
+                    ),
+                )
+            )
         if entity_mask is not None and not entity_reasons:
-            candidate_masks.append(("entityseg", entity_mask))
-            primary_candidate_source = "entityseg"
+            candidate_masks.append((entity_candidate_source, entity_mask))
+            primary_candidate_source = entity_candidate_source
         if sam_mask is not None:
-            candidate_masks.append(("sam3", sam_mask))
+            candidate_masks.append((sam_candidate_source, sam_mask))
             if primary_candidate_source is None:
-                primary_candidate_source = "sam3"
+                primary_candidate_source = sam_candidate_source
+        if not candidate_masks and relation_guided:
+            # A rejected neural proposal must not abort the general pipeline.
+            # The neighbour-located CAD silhouette remains a deterministic
+            # initializer and is still refined against photo edges below.
+            candidate_masks.append(("relation_cad_location_fallback", sam_aligned_seed))
+            primary_candidate_source = "relation_cad_location_fallback"
         if candidate_masks and model_reference is not None:
             (
                 primary_candidate_source,
@@ -2623,18 +2898,18 @@ def build_hybrid_masks(
             )
         aligned_seed_audit = (
             entity_alignment_audit
-            if primary_candidate_source == "entityseg"
+            if primary_candidate_source == entity_candidate_source
             else sam_alignment_audit
         )
         if primary_candidate_source is not None:
             aligned_visible = (
                 entity_aligned_seed
-                if primary_candidate_source == "entityseg"
+                if primary_candidate_source == entity_candidate_source
                 else sam_aligned_seed
             )
             aligned_amodal = (
                 entity_aligned_amodal
-                if primary_candidate_source == "entityseg"
+                if primary_candidate_source == entity_candidate_source
                 else sam_aligned_amodal
             )
             # In the v3 production lane the reference-space amodal projection
@@ -2642,14 +2917,34 @@ def build_hybrid_masks(
             # optimizer.  The visible projection remains a bounded ROI and
             # visibility constraint; shape comes from the CAD model image.
             refinement_amodal = None if model_reference is not None else aligned_amodal
-            assembly_neighbor_context = (
-                _align_with_audit(
-                    model_reference["assembly_neighbor_context"],
+            if (
+                relation_guided
+                and isinstance(relation_region, Mapping)
+                and isinstance(relation_audit, Mapping)
+                and relation_audit.get("accepted") is True
+            ):
+                neighbor_document = relation_region.get("cad_assembly_neighbor_context")
+                if not isinstance(neighbor_document, Mapping):
+                    raise EntitySegRegionError(
+                        f"relation request has no neighbor context: {key}"
+                    )
+                _neighbor_path, neighbor_context = _load_document_mask(
+                    neighbor_document,
+                    label=f"relation neighbor context {key}",
+                )
+                assembly_neighbor_context = _align_with_audit(
+                    neighbor_context,
                     aligned_seed_audit,
                 )
-                if model_reference is not None
-                else None
-            )
+            else:
+                assembly_neighbor_context = (
+                    _align_with_audit(
+                        model_reference["assembly_neighbor_context"],
+                        aligned_seed_audit,
+                    )
+                    if model_reference is not None
+                    else None
+                )
             try:
                 (
                     final_mask,
@@ -2667,6 +2962,7 @@ def build_hybrid_masks(
                     assembly_neighbor_context=assembly_neighbor_context,
                     candidate_masks=candidate_masks,
                     primary_candidate_source=primary_candidate_source,
+                    complete_target_shape_variants=relation_guided,
                 )
             except EntitySegRegionError as exc:
                 final_mask = None
@@ -2681,27 +2977,45 @@ def build_hybrid_masks(
             else:
                 selected_source = "shape_guided_iterative"
                 candidate_sources = {source for source, _mask in candidate_masks}
-                if candidate_sources == {"sam3", "entityseg"}:
+                if not relation_guided and candidate_sources == {"sam3", "entityseg"}:
                     decision = "iterative_refinement_from_sam3_entityseg"
-                elif candidate_sources == {"entityseg"}:
+                elif not relation_guided and candidate_sources == {"entityseg"}:
                     decision = "iterative_refinement_from_entityseg"
-                else:
+                elif not relation_guided:
                     decision = "iterative_refinement_from_sam3"
+                elif "relation_cad_location_fallback" in candidate_sources:
+                    decision = "iterative_refinement_from_relation_cad_fallback"
+                elif "prior_iterative_hybrid" in candidate_sources:
+                    decision = "iterative_refinement_from_prior_and_relation_candidates"
+                elif candidate_sources == {"relation_entityseg"}:
+                    decision = "iterative_refinement_from_relation_entityseg"
+                elif candidate_sources == {"relation_sam3"}:
+                    decision = "iterative_refinement_from_relation_sam3"
+                else:
+                    decision = "iterative_refinement_from_relation_sam3_entityseg"
         else:
             selected_source = "none"
             decision = "no_safe_candidate"
 
         mask_document: dict[str, Any] | None = None
         shape_candidate: dict[str, Any] | None = None
-        if primary_candidate_source == "entityseg":
+        if primary_candidate_source == entity_candidate_source:
             selected_entity = entity_row.get("selected_candidate")
             if not isinstance(selected_entity, Mapping):
                 raise EntitySegRegionError(
                     f"accepted EntitySeg region has no shape candidate: {key}"
                 )
             shape_candidate = dict(selected_entity)
-        elif primary_candidate_source == "sam3":
+        elif primary_candidate_source == sam_candidate_source:
             shape_candidate = _sam_selected_shape_candidate(sam_row)
+        elif final_mask is not None:
+            shape_candidate = {
+                "source": primary_candidate_source,
+                "selection_role": "iterative_initializer_only",
+                "final_boundary_selected_by": (
+                    "photo_edges_plus_complete_cad_model_shape_plus_candidate_agreement"
+                ),
+            }
         if final_mask is not None:
             mask_path = masks_dir / f"{key[0]}__{key[1]}.png"
             if not cv2.imwrite(str(mask_path), final_mask.astype(np.uint8) * 255):
@@ -2725,6 +3039,11 @@ def build_hybrid_masks(
                 "selected_source": selected_source,
                 "primary_candidate_source": primary_candidate_source,
                 "candidate_sources": [source for source, _mask in candidate_masks],
+                "relation_guidance": (
+                    dict(relation_audit)
+                    if isinstance(relation_audit, Mapping)
+                    else None
+                ),
                 "decision": decision,
                 "entityseg_candidate_accepted": entity_accepted,
                 "entityseg_fusion_rejection_reasons": entity_reasons,
@@ -2765,7 +3084,11 @@ def build_hybrid_masks(
 
     result: dict[str, Any] = {
         "schema_version": (
-            SCHEMA_VERSION if model_shape_references else LEGACY_SCHEMA_VERSION
+            SCHEMA_VERSION
+            if relation_guided
+            else MODEL_SCHEMA_VERSION
+            if model_shape_references
+            else LEGACY_SCHEMA_VERSION
         ),
         "inputs": {
             "sam3_manifest": {
@@ -2788,6 +3111,17 @@ def build_hybrid_masks(
                 }
                 if resolved_amodal_manifest is not None
                 and model_template_document is not None
+                else {}
+            ),
+            **(
+                {
+                    "prior_hybrid_manifest": {
+                        "path": str(resolved_prior_manifest),
+                        "sha256": _sha256_file(resolved_prior_manifest),
+                        "document_sha256": _canonical_sha256(prior_document),
+                    }
+                }
+                if resolved_prior_manifest is not None and prior_document is not None
                 else {}
             ),
         },
@@ -2834,12 +3168,45 @@ def build_hybrid_masks(
                 else None
             ),
             "assembly_context_position_authority": (
-                "whole_assembly_model_part_id_neighbor_geometry"
+                "leave_one_target_out_multi_anchor_cad_part_relations"
+                if relation_guided
+                else "whole_assembly_model_part_id_neighbor_geometry"
                 if model_shape_references
                 else None
             ),
+            "target_location_method": (
+                "robust_similarity_plus_nearby_anchor_residual_voting"
+                if relation_guided
+                else None
+            ),
+            "target_first_pass_mask_used_for_own_location": (
+                False if relation_guided else None
+            ),
+            "target_direct_cad_projection_used_when_relation_accepted": (
+                False if relation_guided else None
+            ),
+            "relation_failure_policy": (
+                "preserve_prior_hybrid_then_original_cad_edge_fallback"
+                if relation_guided
+                else None
+            ),
+            "relation_second_pass_segmentation": relation_guided,
+            "prior_hybrid_candidate_preserved": bool(prior_records),
+            "neural_rejection_fallback": (
+                "relation_located_cad_shape_photo_edge_refinement"
+                if relation_guided
+                else None
+            ),
+            "relation_neighbor_exclusion_authority": (
+                "target_specific_cad_assembly_warp_from_non_target_anchor_votes"
+                if relation_guided
+                else None
+            ),
             "model_shape_proposal_component_policy": (
-                "union_of_all_model_components_associated_with_local_observation"
+                "complete_target_part_id_union_plus_all_model_components_without_"
+                "photo_mapping"
+                if relation_guided
+                else "union_of_all_model_components_associated_with_local_observation"
                 if model_shape_references
                 else None
             ),
@@ -2926,6 +3293,14 @@ def main() -> int:
             "in the CAD model render image"
         ),
     )
+    parser.add_argument(
+        "--prior-hybrid-manifest",
+        type=Path,
+        help=(
+            "First-pass iterative hybrid masks retained as candidates while "
+            "the relation-located second pass is optimized"
+        ),
+    )
     parser.add_argument("--output-dir", required=True, type=Path)
     args = parser.parse_args()
     result = build_hybrid_masks(
@@ -2933,6 +3308,7 @@ def main() -> int:
         entity_manifest_path=args.entity_manifest,
         output_dir=args.output_dir,
         amodal_manifest_path=args.amodal_manifest,
+        prior_hybrid_manifest_path=args.prior_hybrid_manifest,
     )
     print(json.dumps(result["summary"], ensure_ascii=False, indent=2))
     return 0

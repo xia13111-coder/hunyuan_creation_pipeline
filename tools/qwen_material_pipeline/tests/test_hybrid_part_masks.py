@@ -25,10 +25,25 @@ from qwen_material_pipeline.segmentation.hybrid_part_masks import (
     _sam_aligned_cad_seed,
     _trim_entity_to_cad_support,
 )
+from qwen_material_pipeline.segmentation.part_relation_guidance import (
+    _infer_target_affine,
+)
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _canonical_sha256(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _safe_metrics() -> dict[str, float | int]:
@@ -433,6 +448,10 @@ def test_hybrid_replays_sam_shared_camera_template_translation() -> None:
     aligned, audit = _sam_aligned_cad_seed(
         seed,
         {
+            "view_shared_alignment": {
+                "translation_xy_pixels": [3.0, 2.0],
+                "part_specific_translation_allowed": False,
+            },
             "box_audits": [
                 {
                     "shape_point_refinement": {
@@ -440,7 +459,7 @@ def test_hybrid_replays_sam_shared_camera_template_translation() -> None:
                         "prompt_audit": {"translation_xy_pixels": [3.0, 2.0]},
                     }
                 }
-            ]
+            ],
         },
     )
 
@@ -456,35 +475,114 @@ def test_hybrid_replays_selected_entity_bounded_camera_translation() -> None:
     aligned, audit = _entity_aligned_cad_seed(
         seed,
         {
+            "view_shared_alignment": {
+                "translation_xy_pixels": [-2.0, 3.0],
+                "part_specific_translation_allowed": False,
+            },
             "selected_candidate": {
                 "cad_template_alignment": {
                     "translation_xy_pixels": [-2.0, 3.0],
                     "per_mesh_pose_change_allowed": False,
                 }
-            }
+            },
         },
     )
 
     expected = np.zeros_like(seed)
     expected[8:13, 5:10] = True
     assert np.array_equal(aligned, expected)
-    assert audit["source"] == "entityseg_selected_candidate_bounded_camera_residual"
+    assert audit["source"] == "entityseg_view_shared_camera_projection"
     assert audit["per_mesh_pose_change_allowed"] is False
 
 
 def test_hybrid_rejects_entity_alignment_that_changes_one_mesh_pose() -> None:
-    with pytest.raises(ValueError, match="translation is malformed"):
+    with pytest.raises(
+        ValueError, match="candidate and shared CAD translations differ"
+    ):
         _entity_aligned_cad_seed(
             np.ones((4, 4), dtype=bool),
             {
+                "view_shared_alignment": {
+                    "translation_xy_pixels": [1.0, 2.0],
+                    "part_specific_translation_allowed": False,
+                },
                 "selected_candidate": {
                     "cad_template_alignment": {
                         "translation_xy_pixels": [1.0, 2.0],
                         "per_mesh_pose_change_allowed": True,
                     }
-                }
+                },
             },
         )
+
+
+def test_rejected_candidates_still_replay_the_view_shared_camera_translation() -> None:
+    seed = np.zeros((20, 30), dtype=bool)
+    seed[5:10, 7:12] = True
+    shared = {
+        "translation_xy_pixels": [-1.0, 2.0],
+        "part_specific_translation_allowed": False,
+    }
+
+    sam_aligned, _sam_audit = _sam_aligned_cad_seed(
+        seed,
+        {"view_shared_alignment": shared, "box_audits": [], "accepted": False},
+    )
+    entity_aligned, _entity_audit = _entity_aligned_cad_seed(
+        seed,
+        {
+            "view_shared_alignment": shared,
+            "selected_candidate": None,
+            "accepted": False,
+        },
+    )
+
+    expected = np.zeros_like(seed)
+    expected[7:12, 6:11] = True
+    assert np.array_equal(sam_aligned, expected)
+    assert np.array_equal(entity_aligned, expected)
+
+
+def test_relation_location_excludes_the_targets_own_bad_first_pass_mask() -> None:
+    target = np.zeros((120, 160), dtype=bool)
+    target[45:55, 72:88] = True
+    linear = np.asarray([[1.1, -0.2], [0.2, 1.1]], dtype=np.float64)
+    translation = np.asarray([14.0, -7.0], dtype=np.float64)
+    model_points = {
+        "P0001": np.asarray([20.0, 20.0]),
+        "P0002": np.asarray([130.0, 22.0]),
+        "P0003": np.asarray([25.0, 95.0]),
+        "P0004": np.asarray([135.0, 98.0]),
+        "P0099": np.asarray([80.0, 50.0]),
+    }
+    observations = []
+    for part_id, point in model_points.items():
+        photo = linear @ point + translation
+        if part_id == "P0099":
+            photo = np.asarray([5.0, 115.0])  # deliberately wrong target mask
+        observations.append(
+            {
+                "part_id": part_id,
+                "model_centroid_xy": point,
+                "photo_centroid_xy": photo,
+                "photo_bbox_diagonal": 20.0,
+                "mask_pixels": 400,
+                "quality": 1.0,
+            }
+        )
+
+    affine, audit = _infer_target_affine(
+        target_part_id="P0099",
+        target_shape=target,
+        observations=observations,
+    )
+    inferred = affine[:, :2] @ np.asarray([79.5, 49.5]) + affine[:, 2]
+    expected = linear @ np.asarray([79.5, 49.5]) + translation
+
+    assert np.linalg.norm(inferred - expected) < 1e-6
+    assert audit["target_first_pass_mask_used"] is False
+    assert "P0099" not in audit["inlier_anchor_part_ids"]
+    assert audit["inlier_anchor_count"] == 4
 
 
 def test_hybrid_manifest_is_directly_consumable_as_part_id_evidence(
@@ -517,9 +615,17 @@ def test_hybrid_manifest_is_directly_consumable_as_part_id_evidence(
         "cad_shape_area_agreement": 1.0,
         "cad_shape_location_invariant": True,
     }
+    request_document = {"schema_version": "synthetic-request/v1"}
+    request_path = tmp_path / "request.json"
+    request_path.write_text(json.dumps(request_document), encoding="utf-8")
+    request_binding = {
+        "path": str(request_path),
+        "sha256": _sha256(request_path),
+        "document_sha256": _canonical_sha256(request_document),
+    }
     sam = {
         "schema_version": "qwen-sam3-region-result/v1",
-        "request": {"path": str(tmp_path / "request.json"), "sha256": "a" * 64},
+        "request": request_binding,
         "policy": {},
         "records": [
             {
