@@ -77,5 +77,6 @@ python -m pip install -e . -e ./tools/qwen_material_pipeline
 ```
 
 安装后可使用 `hunyuan-asset-pipeline`、`manual-material-pipeline` 和
-`qwen-material`。根目录的 `run_*.py` 脚本仅用于兼容旧命令；新的材质自动化应使用
-`manual-material-pipeline` 或 `python -m asset_pipeline.manual_material_cli`。
+`qwen-material`。仓库根目录特意不再放 Python 源文件。请使用这些已安装命令，或等价的
+`python -m asset_pipeline.cli` 和
+`python -m asset_pipeline.manual_material_cli` 模块入口。

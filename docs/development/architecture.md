@@ -37,9 +37,9 @@ not coordinate complete workflows.
 | `tools/sam3d/` | SAM3D reconstruction workers. |
 | `tools/qwen_material_pipeline/` | Segmentation, evidence, retrieval, material selection, and USD tools. |
 
-`pipeline_runner.py`, root `run_*.py` scripts, and
-`asset_pipeline/jobs/material.py` remain compatibility entry points. New code
-should import the module responsible for that behavior directly.
+The repository root contains no Python implementation files. Public Python
+imports come from `asset_pipeline`; `asset_pipeline/jobs/material.py` remains a
+package-level compatibility entry point for older material-job callers.
 
 ## Main command dispatch
 
@@ -57,7 +57,8 @@ manual-material-pipeline
 The general multi-input command remains responsible for the other workflows:
 
 ```text
-run_asset_pipeline.py
+hunyuan-asset-pipeline
+or: python -m asset_pipeline.cli
 -> asset_pipeline.cli.main
    -> runtime.configure_runtime
    -> select input workflow

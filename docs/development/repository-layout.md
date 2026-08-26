@@ -83,6 +83,7 @@ python -m pip install -e . -e ./tools/qwen_material_pipeline
 ```
 
 This installs `hunyuan-asset-pipeline`, `manual-material-pipeline`, and
-`qwen-material`. The root `run_*.py` scripts remain compatibility entry points;
-new material automation should use `manual-material-pipeline` or
-`python -m asset_pipeline.manual_material_cli`.
+`qwen-material`. The repository root intentionally contains no Python source
+files. Use these installed commands or the equivalent
+`python -m asset_pipeline.cli` and
+`python -m asset_pipeline.manual_material_cli` module entry points.

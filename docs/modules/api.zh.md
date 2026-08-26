@@ -11,7 +11,7 @@
 python -m uvicorn asset_pipeline.api:app --host 0.0.0.0 --port 8000
 ```
 
-根目录 `serve_api.py` 只保留兼容 ASGI 导出，旧命令 `uvicorn serve_api:app` 仍可使用。
+`asset_pipeline.api:app` 是唯一 ASGI 应用路径；仓库根目录不再保留重复的 API 包装文件。
 
 ## 接口
 

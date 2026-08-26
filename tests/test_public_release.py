@@ -33,6 +33,9 @@ class PublicReleaseTests(unittest.TestCase):
         missing = sorted(name for name in required if not (ROOT / name).is_file())
         self.assertEqual(missing, [])
 
+    def test_repository_root_has_no_python_source_files(self) -> None:
+        self.assertEqual(sorted(path.name for path in ROOT.glob("*.py")), [])
+
     def test_public_source_audit_passes(self) -> None:
         completed = subprocess.run(
             [sys.executable, str(ROOT / "tools/release/check_public_tree.py")],

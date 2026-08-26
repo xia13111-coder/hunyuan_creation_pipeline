@@ -17,7 +17,6 @@ import yaml
 import asset_pipeline
 import asset_pipeline.cli as pipeline_cli
 import asset_pipeline.manual_cad as manual_cad
-import pipeline_runner
 from asset_pipeline import runtime
 from asset_pipeline.jobs.hunyuan import run_hunyuan_job
 from asset_pipeline.jobs.isaac import run_add_physics_job
@@ -410,15 +409,12 @@ class PipelineStructureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"\.env:1"):
                 runtime.load_environment_file(env_file)
 
-    def test_compatibility_module_exports_new_owners(self) -> None:
-        self.assertIs(
-            pipeline_runner.run_refine_mesh_job, asset_pipeline.run_refine_mesh_job
+    def test_public_package_exports_new_owners(self) -> None:
+        self.assertEqual(
+            asset_pipeline.run_refine_mesh_job.__module__, "asset_pipeline.jobs.refine"
         )
         self.assertEqual(
-            pipeline_runner.run_refine_mesh_job.__module__, "asset_pipeline.jobs.refine"
-        )
-        self.assertEqual(
-            pipeline_runner.run_process_model_job.__module__, "asset_pipeline.workflows"
+            asset_pipeline.run_process_model_job.__module__, "asset_pipeline.workflows"
         )
 
     def test_materials_use_explicit_presets_only(self) -> None:

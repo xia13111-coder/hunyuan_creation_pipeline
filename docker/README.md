@@ -224,7 +224,7 @@ same GPU at the same time.
 Existing GLB:
 
 ```bash
-docker exec hunyuan-pipeline-601 python run_asset_pipeline.py \
+docker exec hunyuan-pipeline-601 python -m asset_pipeline.cli \
   --existing-glb /workspace/assets/input/model.glb \
   --refine-config-path configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --intermediate-output-dir /workspace/assets/glb/intermediate \
@@ -239,7 +239,7 @@ Add `--skip-refine` when refinement is not required.
 Manual STEP/STP without automatic visual materials:
 
 ```bash
-docker exec hunyuan-pipeline-601 python run_asset_pipeline.py \
+docker exec hunyuan-pipeline-601 python -m asset_pipeline.cli \
   --manual-stp /workspace/assets/input/manual_asset.stp \
   --cad-usd-output-dir /workspace/assets/manual/cad_usd \
   --intermediate-output-dir /workspace/assets/manual/intermediate \
@@ -251,7 +251,7 @@ docker exec hunyuan-pipeline-601 python run_asset_pipeline.py \
 SAM3D images:
 
 ```bash
-docker exec hunyuan-pipeline-601 python run_asset_pipeline.py \
+docker exec hunyuan-pipeline-601 python -m asset_pipeline.cli \
   --sam3d-input /workspace/assets/input/sam3d_images \
   --sam3d-mode auto --sam3d-prompt "storage shelves" \
   --output-dir /workspace/assets/sam3d/work \

@@ -12,7 +12,8 @@ same functions as the CLI.
 python -m uvicorn asset_pipeline.api:app --host 0.0.0.0 --port 8000
 ```
 
-The root `serve_api.py` contains a compatibility ASGI export, so the old `uvicorn serve_api:app` command still works.
+`asset_pipeline.api:app` is the only ASGI application path; no duplicate API
+wrapper is kept at the repository root.
 
 ## Endpoints
 

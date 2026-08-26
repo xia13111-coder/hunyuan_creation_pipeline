@@ -160,6 +160,11 @@ def audit(root: Path) -> list[str]:
     for name in REQUIRED_FILES:
         if not (root / name).is_file():
             issues.append(f"missing required public-release file: {name}")
+    for path in sorted(root.glob("*.py")):
+        issues.append(
+            "Python source must be owned by a package or tool directory, not "
+            f"the repository root: {path.name}"
+        )
 
     try:
         candidates = _source_candidates(root)

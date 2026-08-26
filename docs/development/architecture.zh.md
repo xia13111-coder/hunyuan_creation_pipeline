@@ -37,8 +37,8 @@ CLI / HTTP API
 | `tools/sam3d/` | SAM3D 重建脚本。 |
 | `tools/qwen_material_pipeline/` | 分割、图像分析、检索、材质选择与 USD 工具。 |
 
-`pipeline_runner.py`、根目录 `run_*.py` 和 `asset_pipeline/jobs/material.py`
-用于兼容旧入口。新代码应直接导入实际负责该功能的模块。
+仓库根目录不再放 Python 实现文件。Python 公共接口统一从 `asset_pipeline` 导入；
+`asset_pipeline/jobs/material.py` 只保留包内旧材质 Job 的兼容入口。
 
 ## 主命令分发
 
@@ -56,7 +56,8 @@ manual-material-pipeline
 其他工作流：
 
 ```text
-run_asset_pipeline.py
+hunyuan-asset-pipeline
+或：python -m asset_pipeline.cli
 -> asset_pipeline.cli.main
    -> runtime.configure_runtime
    -> 根据输入选择工作流
