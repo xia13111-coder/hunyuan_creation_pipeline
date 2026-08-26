@@ -23,7 +23,8 @@ STEP/STP
 
 1. 归一后的 USD 是只读几何输入；材质写入新的 USD 图层或目录。
 2. Qwen、MVInverse 和检索模型只提供分析结果或候选，不能直接写 USD。
-3. 选中的 Base MDL 保持原始参数，并保存到 `material_selection_lock.json`。
+3. 精确库预设保持原始参数；只有身份已锁定的“对应材质”可写入审核过的颜色接口。最终
+   身份和参数都保存到 `material_selection_lock.json`。
 4. 输入、模型、配置和关键产物都用哈希绑定，变化后不能误用旧缓存。
 
 视觉材质与物理属性相互独立。赋材质不得改变尺寸、姿态、拓扑、碰撞、质量或关节。
@@ -37,6 +38,7 @@ tools/qwen_material_pipeline/
 ├── core/          # 通用数据结构和阶段合并
 ├── evidence/      # 相机配准、颜色、Part-ID 和置信度分析
 ├── materials/     # NVIDIA MDL 目录、候选和完整覆盖
+├── segmentation/  # SAM3、EntitySeg、邻件关系引导和 hybrid mask
 ├── mvinverse/     # MVInverse 调度与 PBR 分析
 ├── qwen/          # 本地/远程视觉模型调用
 ├── usd/           # 零件索引、渲染、绑定和验证
@@ -53,8 +55,9 @@ tools/qwen_material_pipeline/
 └── workspace/     # 临时工作目录
 ```
 
-主仓库通过 `asset_pipeline/visual_materials/orchestrator.py` 调用本包；收集后的验收由
-`asset_pipeline/jobs/delivery.py` 完成。
+主仓库通过 `asset_pipeline/visual_materials/orchestrator.py` 调用本包；
+`asset_pipeline/visual_materials/stages/part_id_evidence.py` 是逐 Part-ID 两遍分割与融合顺序的
+唯一 owner。收集后的验收由 `asset_pipeline/jobs/delivery.py` 完成。
 
 `third_party/` 和 `models/` 中的内容仍遵循各自许可。把它们放在项目目录中只是为了固定
 版本和路径，不代表它们属于本项目代码。
@@ -79,7 +82,9 @@ flowchart TD
     REG --> RENDER[RGB / Part-ID 渲染]
     PHOTO[参考图 + SAM3 前景] --> CAMERA[相机配准]
     RENDER --> CAMERA
-    CAMERA --> PART[逐 Part-ID 照片信息]
+    CAMERA --> TEMPLATE[isolated 模型图 Part-ID 模板]
+    TEMPLATE --> SEG[两遍 SAM3 / EntitySeg + 邻件关系引导]
+    SEG --> PART[迭代融合后的逐 Part-ID 照片信息]
     PHOTO --> MV[MVInverse]
     PART --> RETRIEVE[SigLIP2 / DINOv2 检索]
     MV --> RETRIEVE
@@ -102,12 +107,15 @@ flowchart TD
 
 1. 为归一 USD 建立稳定的装配实例和 Part-ID 索引。
 2. 渲染 RGB、轮廓和 Part-ID 图，并把虚拟相机配准到每张参考图。
-3. 从 SAM3 前景中提取每个可见 Part-ID 的颜色与局部外观；不可见零件单独标记。
+3. 为每个可见 Part-ID 生成 isolated 模型图模板；先运行第一遍 SAM3/EntitySeg，再排除目标
+   自身旧 mask，利用装配邻件关系推断位置并运行第二遍，最后联合 CAD 形状、遮挡、两遍
+   候选和照片边缘迭代融合。不可见零件单独标记。
 4. 运行 MVInverse，得到 albedo、metallic、roughness、normal 和 shading 观测。
 5. 用 SigLIP2、DINOv2 和数值外观从 `NVIDIA/Materials/Base` 检索候选。
-6. Qwen 在有限候选中排序；候选再绑定到真实 CAD 零件并重渲染比较。
-7. 为每个 Part-ID 生成一条分配。缺少可靠照片信息的零件使用可追溯的预设默认材质。
-8. 保存最终材质记录、绑定 USD、重新渲染并验证收集后的结果。
+6. Qwen 在有限候选中排序；候选再绑定到真实 CAD 零件并重渲染比较，先锁定材质身份。
+7. 精确预设保持不变；“对应材质”只在身份固定后进入实际 CAD 自动校色。
+8. 为每个 Part-ID 生成一条分配。缺少可靠照片信息的零件使用可追溯的预设默认材质。
+9. 保存最终材质记录、绑定 USD、重新渲染并验证收集后的结果。
 
 同一连续外观跨越多个 Part-ID 时，
 [同外观零件组件](./appearance_components.zh.md) 可以约束这些零件使用同一个 MDL；每个
@@ -115,12 +123,13 @@ Part-ID 仍保留独立绑定和选择记录。
 
 ## 6. 恢复与失败处理
 
-`--resume` 会校验输入图片、CAD、配置、模型身份、数据格式和内容哈希。全部一致才会复用；
-缺失或不匹配的阶段重新运行。格式错误、候选越界或图像信息不足会停止当前阶段，不会自动
-补写模型输出或放宽门槛。
+`--resume` 只用于同一份 `live` 输入。可复用的视觉阶段会校验输入图片、CAD、配置、模型
+身份、数据格式和内容哈希；全部一致才会复用。格式错误、候选越界或图像信息不足会停止当前
+阶段，不会自动补写模型输出或放宽门槛。
 
-单张参考图失败时，该视图记录为不可用；可用视图数量不足时，整次材质推理停止。相机
-配准结果也会分级使用：高质量视图作为全局锚点，较弱但可信的视图只提供局部零件信息。
+正式身份优先主线要求所有已注册参考视角都贡献真实 observation，任何视角不能静默丢失。
+局部颜色质量未达标时例外：流程保留实际 CAD 渲染中实测最好的候选，记录 `REVIEW` 后继续；
+哈希、身份和覆盖合同仍严格失败。
 
 ## 7. 关键产物
 
@@ -128,6 +137,9 @@ Part-ID 仍保留独立绑定和选择记录。
 | --- | --- |
 | `part_registry.rendered.json` | Part-ID、prim 路径、可见性及渲染文件 |
 | `camera_calibration_report.json` | 每个参考视图的相机与对齐质量 |
+| `part_id_cad_amodal_templates/manifest.json` | 模型图 isolated Part-ID 形状模板 |
+| `part_id_relation_guidance/request.json` | 排除目标自身后由邻件推断的第二遍请求 |
+| `part_id_hybrid_masks/manifest.json` | 两遍分割和迭代融合后的最终 mask 清单 |
 | `part_id_reference_evidence.json` | 逐 Part-ID 的照片信息 |
 | `mvinverse_inference_ledger.json` | MVInverse 输入、版本、权重和输出哈希 |
 | `part_id_qwen_choices.json` | 每个可见 Part-ID 的候选选择 |

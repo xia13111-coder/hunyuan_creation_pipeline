@@ -37,8 +37,9 @@ and `disabled` (the legacy all-Isaac candidate search). Production profiles use
 Isaac at final resolution, then checked per view for candidate coverage,
 provenance, IoU, objective, and boundary agreement. A missing or inconsistent
 view alone is rerun with the complete legacy Isaac search; verified views stay
-on the fast result. Four-view evidence therefore remains mandatory without
-requiring human selection or forcing all views onto the slow path.
+on the fast result. Every supplied view remains mandatory: a run may contain
+2–4 registered views, and none may silently disappear. This needs no human
+selection and does not force every view onto the slow path.
 
 The low-resolution pass exports its three best Isaac-verified cameras for each
 reference view. The high-resolution pass refines all three seeds independently,
@@ -72,6 +73,10 @@ hash. Changed inputs trigger explicit recalibration instead of silently mixing
 old cameras, masks, or Part-ID evidence into a new run.
 
 `asset_pipeline/visual_materials/` coordinates the workflow.
+`asset_pipeline/visual_materials/stages/part_id_evidence.py` owns the complete
+per-Part-ID model-template, two-pass segmentation, relation-guidance, and
+fusion sequence. Keeping that sequence out of `orchestrator.py` gives it one
+testable owner without changing any artifact path or stage name.
 `tools/qwen_material_pipeline/` provides segmentation, evidence extraction,
 retrieval, model calls, and USD workers. Isaac Sim handles CAD/USD, MDL
 rendering, physics, and final validation. See [Architecture](../architecture.md).
@@ -226,16 +231,22 @@ The YAPF pin is required by MMCV 1.x. A successful import only from
 
 | Mode | Use |
 | --- | --- |
-| `live` | Run inference for a new workpiece. |
-| `auto` | Reuse an exactly matching recorded result; otherwise run generic inference. |
-| `bundled` | Require an exact recorded-result match and stop if none exists. |
+| `live` | Canonical mainline for a new workpiece; requires the fully verified human foreground annotation. |
+| `bundled` | Require an exact sealed-project match and stop if none exists. |
 
-`--resume` continues the same hash-verified run. Use a new output directory to
-start from zero.
+The dedicated `manual-material-pipeline` CLI exposes only these unambiguous
+modes. The lower-level Python API retains `auto` as a compatibility mode for
+sealed-project discovery, but it is not the production new-workpiece command.
 
-The annotation JSON always identifies the reference images. Its manually
-accepted foreground masks are used only by `live`; `auto` and `bundled` use the
-recorded project's own data when a match exists.
+`--resume` applies to `live` and continues the same request. Reusable visual
+stages verify their current inputs, configuration, model revisions, and output
+hashes. Use a new output directory to start from zero.
+
+Before CAD conversion starts, the CLI verifies the annotation document hash,
+every image hash, decoded image pixels, mask hash, decoded binary mask, image
+dimensions, ordered point events, and all-view confirmation. The manually
+accepted foreground masks are used by `live`; `bundled` uses the sealed
+project's immutable evidence after an exact match.
 
 ## Troubleshooting
 
@@ -249,6 +260,9 @@ Find the first failed `[PROGRESS]` stage, then inspect its output:
 | Qwen output is rejected | `.raw`, `.parse.json`, and the schema error. |
 | The expected MDL is not selected | Candidate retrieval and MDL render scores. |
 | Final USD looks different | Recorded material selection and final render comparison. |
+| `CUDA out of memory` | Stop competing GPU jobs, then resume the same run; SAM3, MVInverse, Qwen, and EntitySeg are separate sequential processes. |
+| `cumsum_cuda_kernel ... deterministic implementation` | This is an EntitySeg `warn_only` reproducibility warning, not a failed inference; use the following `[PROGRESS]` or traceback line to find a real failure. |
+| `No space left on device` | Free space or move the run root to a larger filesystem, then use `--resume`; renders, recovery archives, and model caches can be much larger than the final USD. |
 
 Outputs are under
 `RUN_ROOT/visual_material/{renders,analysis,visual_quality,final_visual_acceptance}`.

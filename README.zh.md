@@ -167,8 +167,8 @@ manual-material-pipeline \
   --output ./outputs/manual/asset_run
 ```
 
-STEP/STP 保留原始尺寸。从零运行应使用新输出目录；`--resume` 只恢复同一个任务，并重新
-验证产物哈希。
+STEP/STP 保留原始尺寸。从零运行应使用新输出目录；`--resume` 只恢复同一份 `live` 输入，
+可复用的视觉阶段必须重新通过哈希校验。
 
 详细说明见 [Hunyuan](./docs/modules/hunyuan.zh.md)、[SAM3D](./docs/modules/sam3d.zh.md)、
 [CAD](./docs/modules/cad.zh.md)、[生成方式选择](./docs/generation-guide.zh.md)和

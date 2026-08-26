@@ -678,15 +678,18 @@ def test_dtn100_sealed_profiles_match_public_v18_library_default_lock() -> None:
     public_summary = json.loads(
         public_summary_path.read_text(encoding="utf-8")
     )
+    reference_paths_by_role = {
+        item["role"]: (
+            root / "examples" / "dtn100" / "references" / item["basename"]
+        )
+        for item in project["references"]
+    }
+    if not all(path.is_file() for path in reference_paths_by_role.values()):
+        pytest.skip("private DTN100 reference photographs are unavailable")
     acceptance_evidence = validate_bundled_acceptance_evidence(
         project,
         project_file=project_dir / "project.json",
-        reference_paths_by_role={
-            item["role"]: (
-                root / "examples" / "dtn100" / "references" / item["basename"]
-            )
-            for item in project["references"]
-        },
+        reference_paths_by_role=reference_paths_by_role,
     )
 
     profiles = template["profiles"]

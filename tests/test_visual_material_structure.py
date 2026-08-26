@@ -18,6 +18,13 @@ from asset_pipeline.visual_materials.camera import (
     require_complete_live_camera_alignment,
 )
 from asset_pipeline.visual_materials.quality import evaluate_part_id_quality_gate
+from asset_pipeline.visual_materials.stages import part_id_evidence
+from asset_pipeline.visual_materials.stages.part_id_evidence import (
+    _entityseg_region_command,
+    _hybrid_mask_command,
+    _require_complete_reference_views,
+    _sam3_region_command,
+)
 from asset_pipeline.visual_materials.workspace import VisualMaterialWorkspace
 
 
@@ -167,6 +174,238 @@ def test_render_and_camera_builders_handle_optional_arguments() -> None:
         "/run/coarse-evidence.json"
     )
     assert templates[-2:] == ["--output-dir", "/run/amodal"]
+
+
+def test_part_id_evidence_commands_keep_the_two_pass_runtime_contract() -> None:
+    config = SimpleNamespace(
+        sam3_python=Path("/runtime/sam3-python"),
+        sam3_repository=Path("/models/sam3"),
+        sam3_checkpoint=Path("/models/sam3.pt"),
+        sam3_device="cuda",
+        sam3_minimum_model_score=0.45,
+        sam3_minimum_prompt_overlap=0.25,
+        sam3_maximum_image_fraction=0.8,
+        sam3_minimum_mask_pixels=32,
+        entityseg_python=Path("/runtime/entityseg-python"),
+        entityseg_cropformer_root=Path("/models/CropFormer"),
+        entityseg_config=Path("/models/entityseg.yaml"),
+        entityseg_checkpoint=Path("/models/entityseg.pth"),
+        entityseg_minimum_model_score=0.3,
+    )
+    request = Path("/run/relation/request.json")
+
+    sam3 = _sam3_region_command(
+        config,
+        request=request,
+        output_dir=Path("/run/relation/sam3"),
+    )
+    assert sam3[0] == "/runtime/sam3-python"
+    assert sam3[1].endswith("/segmentation/sam3_regions.py")
+    assert sam3[sam3.index("--request") + 1] == str(request)
+    assert sam3[-2:] == ["--seed", "0"]
+
+    entityseg = _entityseg_region_command(
+        config,
+        request=request,
+        output_dir=Path("/run/relation/entityseg"),
+    )
+    assert entityseg[:3] == [
+        "/runtime/entityseg-python",
+        "-m",
+        "qwen_material_pipeline.segmentation.entityseg_regions",
+    ]
+    assert entityseg[entityseg.index("--request") + 1] == str(request)
+    assert entityseg[-2:] == ["--seed", "0"]
+
+    hybrid = _hybrid_mask_command(
+        config,
+        sam_manifest=Path("/run/relation/sam3/manifest.json"),
+        entityseg_manifest=Path("/run/relation/entityseg/manifest.json"),
+        amodal_manifest=Path("/run/amodal/manifest.json"),
+        prior_hybrid_manifest=Path("/run/initial/manifest.json"),
+        output_dir=Path("/run/final"),
+    )
+    assert hybrid[:3] == [
+        "/runtime/sam3-python",
+        "-m",
+        "qwen_material_pipeline.segmentation.hybrid_part_masks",
+    ]
+    assert hybrid[hybrid.index("--prior-hybrid-manifest") + 1] == (
+        "/run/initial/manifest.json"
+    )
+    assert hybrid[-2:] == ["--output-dir", "/run/final"]
+
+
+def test_part_id_evidence_requires_every_registered_view() -> None:
+    evidence = {
+        "summary": {
+            "trusted_reference_view_count": 2,
+            "selected_reference_view_coverage": {
+                "front": {"visible_part_count": 1, "selected_part_count": 1},
+                "side": {"visible_part_count": 1, "selected_part_count": 1},
+            },
+        },
+        "parts": [
+            {
+                "part_id": "P0001",
+                "observations": [
+                    {
+                        "view_id": "front",
+                        "selected_for_material_inference": True,
+                    },
+                    {
+                        "view_id": "side",
+                        "selected_for_material_inference": True,
+                    },
+                ],
+            }
+        ],
+    }
+
+    _require_complete_reference_views(
+        evidence=evidence,
+        expected_view_ids={"front", "side"},
+        label="refined Part-ID evidence",
+    )
+    evidence["parts"][0]["observations"][1]["selected_for_material_inference"] = False
+    with pytest.raises(RuntimeError, match="do not use every registered"):
+        _require_complete_reference_views(
+            evidence=evidence,
+            expected_view_ids={"front", "side"},
+            label="refined Part-ID evidence",
+        )
+
+
+@pytest.mark.parametrize("entityseg_enabled", [False, True])
+def test_part_id_evidence_stage_selects_the_expected_final_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entityseg_enabled: bool,
+) -> None:
+    destination = tmp_path / "visual_material"
+    workspace = VisualMaterialWorkspace.create(
+        destination=destination,
+        source=tmp_path / "source.usd",
+    )
+    config = SimpleNamespace(
+        material_prediction_mode="catalog_family_first",
+        entityseg_enabled=entityseg_enabled,
+        sam3_python=Path("/runtime/sam3-python"),
+        sam3_repository=Path("/models/sam3"),
+        sam3_checkpoint=Path("/models/sam3.pt"),
+        sam3_device="cuda",
+        sam3_minimum_model_score=0.45,
+        sam3_minimum_prompt_overlap=0.25,
+        sam3_maximum_image_fraction=0.8,
+        sam3_minimum_mask_pixels=32,
+        entityseg_python=Path("/runtime/entityseg-python"),
+        entityseg_cropformer_root=Path("/models/CropFormer"),
+        entityseg_config=Path("/models/entityseg.yaml"),
+        entityseg_checkpoint=Path("/models/entityseg.pth"),
+        entityseg_minimum_model_score=0.3,
+    )
+    context = SimpleNamespace(
+        config=config,
+        workspace=workspace,
+        references=(("front", tmp_path / "front.png"),),
+        isaac_python=Path("/runtime/isaac-python"),
+    )
+    stage_names: list[str] = []
+    stage_commands: dict[str, list[str]] = {}
+    evidence_calls: list[dict[str, object]] = []
+
+    def fake_stage(
+        name: str,
+        command: list[str],
+        _log_cb: object,
+        **kwargs: object,
+    ) -> None:
+        stage_names.append(name)
+        stage_commands[name] = command
+        required = kwargs.get("required_files", ())
+        assert isinstance(required, tuple)
+        for path in required:
+            assert isinstance(path, Path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}\n", encoding="utf-8")
+
+    def fake_evidence(**kwargs: object) -> dict[str, object]:
+        evidence_calls.append(kwargs)
+        return {
+            "parts": [
+                {
+                    "part_id": "P0001",
+                    "observations": [
+                        {
+                            "view_id": "front",
+                            "selected_for_material_inference": True,
+                        }
+                    ],
+                }
+            ],
+            "summary": {
+                "trusted_reference_view_count": 1,
+                "selected_reference_view_coverage": {
+                    "front": {"visible_part_count": 1, "selected_part_count": 1}
+                },
+            },
+        }
+
+    monkeypatch.setattr(part_id_evidence, "_run_stage", fake_stage)
+    monkeypatch.setattr(
+        part_id_evidence,
+        "build_part_id_reference_evidence",
+        fake_evidence,
+    )
+    monkeypatch.setattr(
+        part_id_evidence,
+        "build_part_id_sam3_request",
+        lambda *_args, **_kwargs: {"regions": []},
+    )
+    monkeypatch.setattr(
+        part_id_evidence,
+        "build_relation_guided_request",
+        lambda **_kwargs: {"regions": []},
+    )
+    monkeypatch.setattr(part_id_evidence, "log_message", lambda *_args: None)
+
+    result = part_id_evidence.run_part_id_evidence_stage(
+        context,  # type: ignore[arg-type]
+        rendered_registry=tmp_path / "rendered_registry.json",
+        mvinverse_ledger=tmp_path / "mvinverse.json",
+        log_cb=lambda _message: None,
+        command_runner=lambda *_args, **_kwargs: None,
+    )
+
+    assert len(evidence_calls) == 2
+    assert result["parts"][0]["part_id"] == "P0001"
+    final_call = evidence_calls[-1]
+    if entityseg_enabled:
+        assert stage_names == [
+            "part_id_cad_amodal_templates",
+            "part_id_sam3_local_refinement",
+            "part_id_entityseg_boundary_candidates",
+            "part_id_initial_sam3_entityseg_fusion",
+            "part_id_relation_guided_sam3_refinement",
+            "part_id_relation_guided_entityseg_boundaries",
+            "part_id_relation_guided_iterative_fusion",
+        ]
+        assert final_call["part_id_sam3_manifest"] is None
+        assert (
+            final_call["part_id_hybrid_manifest"]
+            == workspace.part_id.hybrid_mask_manifest
+        )
+        assert (
+            "--prior-hybrid-manifest"
+            in stage_commands["part_id_relation_guided_iterative_fusion"]
+        )
+    else:
+        assert stage_names == [
+            "part_id_cad_amodal_templates",
+            "part_id_sam3_local_refinement",
+        ]
+        assert final_call["part_id_sam3_manifest"] == workspace.part_id.sam3_manifest
+        assert final_call["part_id_hybrid_manifest"] is None
 
 
 def test_staged_material_command_owns_the_model_runtime_contract() -> None:

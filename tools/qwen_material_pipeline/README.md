@@ -45,7 +45,9 @@ separate local dependencies and must pass preflight.
 ```text
 normalized CAD + confirmed photos
   -> registered RGB/Part-ID evidence
-  -> CAD-constrained SAM3/EntitySeg fusion + MVInverse/SigLIP2/DINOv2/Qwen3.5
+  -> isolated model-image templates
+  -> SAM3/EntitySeg first pass + neighbour-guided second pass + iterative fusion
+  -> MVInverse/SigLIP2/DINOv2/Qwen3.5
   -> Base MDL candidate renders
   -> one assignment for every Part-ID
   -> record the selected MDL, bind it in USD, and validate the result
@@ -85,6 +87,8 @@ Important run artifacts:
 visual_material/renders/
 visual_material/analysis/{reference_manifest,qwen_inference_ledger,
   part_id_reference_evidence,part_id_qwen_choices,material_selection_lock}.json
+visual_material/analysis/{part_id_cad_amodal_templates,
+  part_id_relation_guidance,part_id_hybrid_masks}/
 visual_material/analysis/mvinverse/
 visual_material/visual_quality/
 visual_material/final_visual_acceptance/

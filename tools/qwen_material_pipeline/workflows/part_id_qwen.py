@@ -89,40 +89,6 @@ MATERIAL_FINISH_OPTIONS = frozenset(
         "frosted",
     }
 )
-MATERIAL_SUBSTRATE_OPTIONS = frozenset(
-    {
-        "unknown",
-        "metal",
-        "polymer",
-        "elastomer",
-        "glass",
-        "wood",
-        "textile",
-        "leather",
-        "ceramic",
-        "mineral",
-        "stone",
-        "paper",
-        "liquid",
-    }
-)
-MATERIAL_TREATMENT_OPTIONS = frozenset(
-    {
-        "unknown",
-        "bare",
-        "paint",
-        "anodized",
-        "plated",
-        "oxidized",
-        "conversion_coating",
-        "emissive",
-    }
-)
-MATERIAL_OPTICAL_OPTIONS = frozenset(
-    {"unknown", "opaque", "transparent", "translucent", "emissive"}
-)
-
-
 # ``family=metal`` is not a material identity: it still permits copper,
 # chrome, aluminium and steel to replace one another.  Keep a deliberately
 # small, physical species ontology that can be inferred from NVIDIA's stable
@@ -363,22 +329,6 @@ def _catalog_material_species(
     if isinstance(family, str) and family.strip():
         return family.strip().casefold()
     return "unknown"
-
-
-def _catalog_family_options(
-    catalog_by_id: Mapping[str, Mapping[str, Any]],
-) -> list[str]:
-    families = sorted(
-        {
-            str(record.get("family", "")).strip().casefold()
-            for record in catalog_by_id.values()
-            if isinstance(record.get("family"), str)
-            and str(record.get("family", "")).strip()
-        }
-    )
-    if len(families) < 2:
-        raise PartIdQwenError("material catalog has too few material families")
-    return families
 
 
 def _catalog_identity_options(

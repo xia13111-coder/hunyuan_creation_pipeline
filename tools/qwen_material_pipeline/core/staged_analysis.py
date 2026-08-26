@@ -111,10 +111,6 @@ UNKNOWN_REASON_CODES = frozenset(
         "multi_material_mesh",
     }
 )
-MERGE_UNKNOWN_REASON_CODES = UNKNOWN_REASON_CODES | frozenset(
-    {"missing_material_selection", "low_combined_confidence"}
-)
-
 _GROUP_ID_RE = re.compile(r"G[0-9]{2,4}")
 _BATCH_ID_RE = re.compile(r"B[0-9]{2,4}")
 

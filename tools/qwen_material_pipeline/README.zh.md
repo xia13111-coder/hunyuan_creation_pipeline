@@ -38,7 +38,9 @@ SAM3、EntitySeg/CropFormer、MVInverse、DINOv2、NVIDIA 材质和 Base 材质�
 ```text
 归一 CAD + 已确认照片
   -> 对齐 RGB 图并提取 Part-ID 外观信息
-  -> CAD 约束的 SAM3/EntitySeg 融合 + MVInverse/SigLIP2/DINOv2/Qwen3.5
+  -> isolated 模型图 Part-ID 模板
+  -> SAM3/EntitySeg 第一遍 + 邻件引导第二遍 + 迭代融合
+  -> MVInverse/SigLIP2/DINOv2/Qwen3.5
   -> Base MDL 候选渲染
   -> 为每个 Part-ID 生成一条材质分配
   -> 记录最终 MDL、写入 USD 并做视觉验证
@@ -79,6 +81,8 @@ CAD 上自动校色，且同一照片材质组件共享一套封存参数。只�
 visual_material/renders/
 visual_material/analysis/{reference_manifest,qwen_inference_ledger,
   part_id_reference_evidence,part_id_qwen_choices,material_selection_lock}.json
+visual_material/analysis/{part_id_cad_amodal_templates,
+  part_id_relation_guidance,part_id_hybrid_masks}/
 visual_material/analysis/mvinverse/
 visual_material/visual_quality/
 visual_material/final_visual_acceptance/

@@ -20,11 +20,10 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageOps
 
 from .appearance_components import SCHEMA_VERSION as COMPONENT_SCHEMA_VERSION
 from .part_id_projection import (
-    PARAMETER_CANDIDATE_SCHEMA_VERSION,
     SCHEMA_VERSION as PART_ID_EVIDENCE_SCHEMA_VERSION,
     _build_part_id_parameter_candidates,
 )

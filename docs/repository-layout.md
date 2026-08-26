@@ -6,6 +6,8 @@
 
 ```text
 asset_pipeline/                 workflows and orchestration
+asset_pipeline/visual_materials/stages/
+                                owned material-pipeline stages
 asset_refiner/                  mesh-refinement package
 tools/{blender,isaac,sam3d}/    workers for external runtimes
 tools/qwen_material_pipeline/   material inference and USD tools
@@ -32,7 +34,7 @@ tools/qwen_material_pipeline/
 ├── evidence/        camera, Part-ID, color, PBR, and QA measurements
 ├── retrieval/       SigLIP2 and DINOv2 retrieval
 ├── materials/       MDL catalog, selection, and application rules
-├── segmentation/    SAM3 segmentation and annotation replay
+├── segmentation/    SAM3, EntitySeg, relation guidance, and hybrid masks
 ├── mvinverse/       MVInverse adapter and run records
 ├── qwen/            local and remote VLM adapters
 ├── usd/             part indexing, rendering, application, and validation
@@ -69,4 +71,6 @@ python -m pip install -e . -e ./tools/qwen_material_pipeline
 ```
 
 This installs `hunyuan-asset-pipeline`, `manual-material-pipeline`, and
-`qwen-material`. The root `run_*.py` scripts remain compatibility entry points.
+`qwen-material`. The root `run_*.py` scripts remain compatibility entry points;
+new material automation should use `manual-material-pipeline` or
+`python -m asset_pipeline.manual_material_cli`.

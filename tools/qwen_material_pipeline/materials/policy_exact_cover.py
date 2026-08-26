@@ -689,20 +689,6 @@ def _gate_decision_records(
     return result
 
 
-def _gate_decisions(
-    confidence_gate: Mapping[str, Any], *, registry_ids: set[str]
-) -> dict[str, str]:
-    """Return the legacy decision projection used by the exact-cover policy."""
-
-    return {
-        part_id: str(record["decision"])
-        for part_id, record in _gate_decision_records(
-            confidence_gate,
-            registry_ids=registry_ids,
-        ).items()
-    }
-
-
 def _effective_policy(policy: Mapping[str, Any] | None) -> dict[str, Any]:
     if policy is None:
         return copy.deepcopy(DEFAULT_POLICY)

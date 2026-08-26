@@ -192,7 +192,8 @@ manual-material-pipeline \
 ```
 
 STEP/STP dimensions are preserved. Use a new output directory for a from-zero
-run; `--resume` is only for hash-verified continuation of the same run.
+run; `--resume` is only for the same `live` request, and reusable visual stages
+must pass their hash checks.
 
 See [Hunyuan](./docs/modules/hunyuan.md), [SAM3D](./docs/modules/sam3d.md),
 [CAD](./docs/modules/cad.md), the [generation guide](./docs/generation-guide.md),

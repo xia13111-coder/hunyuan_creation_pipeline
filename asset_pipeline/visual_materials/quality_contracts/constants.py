@@ -2,11 +2,6 @@
 
 from __future__ import annotations
 
-from qwen_material_pipeline.materials.tuning import (
-    tune_selected_material_from_mvinverse,
-    tuning_profile_for_material,
-)
-
 
 MATERIAL_SELECTION_OBJECTIVE_SEMANTIC = "semantic_compatible_visual"
 MATERIAL_SELECTION_OBJECTIVE_VISUAL = "visual_similarity"

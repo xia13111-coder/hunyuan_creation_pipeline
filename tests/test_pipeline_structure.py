@@ -5,6 +5,7 @@ import ast
 import inspect
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -77,29 +78,31 @@ class PipelineStructureTests(unittest.TestCase):
         }
         leaks: list[str] = []
         absolute_links: list[str] = []
-        for current, directory_names, file_names in os.walk(
-            project,
-            topdown=True,
-        ):
-            current_path = Path(current)
-            directory_names[:] = [
-                name
-                for name in directory_names
-                if current_path / name not in excluded_roots
-            ]
-            for name in file_names:
-                path = current_path / name
-                if path in excluded_roots:
-                    continue
-                if path.is_symlink():
-                    if Path(path.readlink()).is_absolute():
-                        absolute_links.append(str(path.relative_to(project)))
-                    continue
-                if path.suffix.lower() not in text_suffixes:
-                    continue
-                content = path.read_text(encoding="utf-8", errors="ignore")
-                if any(marker in content for marker in forbidden):
-                    leaks.append(str(path.relative_to(project)))
+        tracked_output = subprocess.check_output(
+            ["git", "ls-files", "-z"],
+            cwd=project,
+        )
+        tracked_paths = [
+            project / os.fsdecode(raw_path)
+            for raw_path in tracked_output.split(b"\0")
+            if raw_path
+        ]
+        for path in tracked_paths:
+            if not path.exists() and not path.is_symlink():
+                # ``git ls-files`` includes paths deleted in the current
+                # change; those files are not part of the publishable tree.
+                continue
+            if any(path == root or root in path.parents for root in excluded_roots):
+                continue
+            if path.is_symlink():
+                if Path(path.readlink()).is_absolute():
+                    absolute_links.append(str(path.relative_to(project)))
+                continue
+            if path.suffix.lower() not in text_suffixes:
+                continue
+            content = path.read_text(encoding="utf-8", errors="ignore")
+            if any(marker in content for marker in forbidden):
+                leaks.append(str(path.relative_to(project)))
         self.assertEqual(leaks, [])
         self.assertEqual(absolute_links, [])
 

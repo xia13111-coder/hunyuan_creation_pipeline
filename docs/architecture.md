@@ -43,6 +43,19 @@ should import the module responsible for that behavior directly.
 
 ## Main command dispatch
 
+The canonical reference-driven STEP/STP material command has one owner chain:
+
+```text
+manual-material-pipeline
+-> manual_material_cli.main
+-> manual_cad.run_manual_cad_workflow
+-> visual_materials.run_assign_visual_materials_job
+-> qwen_material_pipeline / Isaac Sim workers
+```
+
+`python -m asset_pipeline.manual_material_cli` is the equivalent module entry.
+The general multi-input command remains responsible for the other workflows:
+
 ```text
 run_asset_pipeline.py
 -> asset_pipeline.cli.main
@@ -143,7 +156,14 @@ visual_materials.run_assign_visual_materials_job
    -> SAM3 foreground evidence
    -> Qwen + MVInverse analysis
    -> SigLIP2 retrieval + DINOv2 reranking
+-> stages.part_id_evidence.run_part_id_evidence_stage
+   -> isolated CAD model-image Part-ID templates
+   -> first-pass SAM3 and EntitySeg candidates
+   -> leave-target-out assembly-neighbour localization
+   -> second-pass segmentation and iterative hybrid fusion
 -> per-Part-ID candidate selection and complete assignment plan
+-> colour-blind material identity lock
+-> reviewed colour calibration for corresponding-material assignments
 -> preview USD after material assignment and render comparison
 -> bounded candidate refinement when evidence permits
 -> final MDL selection and selection record
@@ -167,6 +187,9 @@ visual_materials.run_final_visual_acceptance_job
 - `stages/runner.py` handles progress, subprocess failures, and bounded retries.
 - `stages/source_preparation.py` prepares registries, renders, and camera data.
 - `stages/material_inference.py` starts the material-analysis subprocess.
+- `stages/part_id_evidence.py` owns model-image Part-ID localization, both
+  segmentation passes, relation guidance, hybrid fusion, and all-view evidence
+  coverage checks.
 - `policy_exact_cover.py` ensures every mesh receives an applicable result.
 - `exact_mdl_cache.py` verifies cached candidate renders.
 - `tournaments.py` compares shortlisted MDLs by rendered appearance.
@@ -201,9 +224,9 @@ MVInverse, SigLIP2, and DINOv2 use the runtime recorded in the material
 configuration.
 
 GPU-heavy stages run sequentially to reduce peak memory use. Each reusable
-stage records its inputs, model revision, configuration, and output hashes.
-`--resume` reuses a stage only when those values still match; otherwise the
-stage runs again. A failed model stage receives at most one clean-process retry
-when its saved evidence is safe to reuse. Invalid schemas, mismatched hashes,
-or insufficient visual evidence stop the workflow and leave a diagnostic
-report under the run directory.
+visual stage records its inputs, model revision, configuration, and output
+hashes. `--resume` is for the same `live` request; a reusable visual stage is
+accepted only when those values still match. A failed model stage receives at
+most one clean-process retry when its saved evidence is safe to reuse. Invalid
+schemas, mismatched hashes, or insufficient visual evidence stop the workflow
+and leave a diagnostic report under the run directory.

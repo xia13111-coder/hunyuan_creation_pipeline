@@ -39,7 +39,8 @@ manual-material-pipeline \
 
 The annotation stores image hashes and view IDs. Recreate it after changing an
 image. Use a new output directory to start from zero; add `--resume` only to
-continue the same verified run.
+continue the same request. Visual-material checkpoints are reused only after
+their input and output hashes pass validation.
 
 Optional physics arguments are `--material`, `--approx`, `--sdf-resolution`,
 `--set-mass`, and `--cad-option KEY=VALUE`. STEP/STP does not use target-size
@@ -49,22 +50,42 @@ arguments.
 
 ```text
 STEP/STP -> USD and physics preparation -> camera registration
-         -> evidence for each visible Part-ID
-         -> NVIDIA Base retrieval and MDL render comparison
+         -> isolated model-image template for each visible Part-ID
+         -> SAM3 + EntitySeg first pass
+         -> neighbour-guided second pass and iterative mask fusion
+         -> colour-blind material identity selection
+         -> reviewed colour calibration where eligible
          -> apply materials to every Mesh -> final validation
 ```
 
-SAM3 foreground confirmation is the only required human step. Local image
-fitting does not modify CAD. Hidden or uncertain parts receive the configured
-default material, and selected MDL parameters are not changed. The run stops
-if alignment, assignment coverage, visual comparison, or final delivery checks
-fail.
+SAM3 foreground confirmation is the only required human step. The current
+mainline is generic: it has no asset name, Part-ID list, view-specific prompt,
+or hand-authored material mapping. All registered views must contribute real
+evidence. Local image fitting changes only 2-D proposals and never modifies
+CAD, a Mesh transform, or the delivered camera.
+
+Hidden or uncertain parts receive the configured default material. An exact
+library preset remains unchanged; a corresponding-material assignment may
+change only a reviewed colour input after material identity is fixed. A local
+colour-quality rejection keeps the best measured result and records `REVIEW`
+instead of aborting the complete run. Broken hashes, incomplete Part-ID
+coverage, identity changes, or invalid delivery data still fail closed.
 
 ## Outputs
 
 ```text
 RUN_ROOT/{cad_usd,intermediate,visual_material,final}/
 RUN_ROOT/pipeline_result.json
+```
+
+The evidence and selection audits are under `RUN_ROOT/visual_material/analysis/`:
+
+```text
+part_id_cad_amodal_templates/manifest.json
+part_id_relation_guidance/request.json
+part_id_hybrid_masks/manifest.json
+part_id_reference_evidence.json
+part_id_material_plan.json
 ```
 
 See the [detailed workflow](./modules/visual-materials.md),

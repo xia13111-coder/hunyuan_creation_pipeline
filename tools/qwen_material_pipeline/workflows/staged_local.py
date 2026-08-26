@@ -2092,20 +2092,6 @@ def _surface_candidate_context(
     }
 
 
-def _shortlist_materials(
-    group: dict[str, Any],
-    pool: list[dict[str, Any]],
-    *,
-    limit: int = 4,
-) -> list[dict[str, Any]]:
-    candidates, _audit = _shortlist_materials_with_audit(
-        group,
-        pool,
-        limit=limit,
-    )
-    return candidates
-
-
 def _material_selection_context(
     group: dict[str, Any],
     fusion_group: dict[str, Any] | None,

@@ -18,36 +18,30 @@ from .jobs.cad import validate_cad_input_path
 from .manual_cad import DEFAULT_MANUAL_SDF_RESOLUTION, run_manual_cad_workflow
 from .project_layout import SOURCE_LAYOUT
 from .visual_materials import load_visual_material_config
+from qwen_material_pipeline.segmentation.human_foreground import (
+    ANNOTATION_SCHEMA_VERSION,
+    load_annotations,
+)
 
 
 PROJECT_ROOT = runtime.project_root()
 DEFAULT_CONFIG = SOURCE_LAYOUT.manual_part_id_material_config
-ANNOTATION_SCHEMA = "sam3-human-foreground-annotations/v2"
-VISUAL_INFERENCE_MODES = ("live", "auto", "bundled")
+VISUAL_INFERENCE_MODES = ("live", "bundled")
 
 
 def log(message: str) -> None:
     print(message, flush=True)
 
 
-def _read_json_object(path: Path, label: str) -> dict[str, Any]:
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError(f"Unable to read {label} {path}: {exc}") from exc
-    if not isinstance(document, dict):
-        raise ValueError(f"{label} must contain one JSON object: {path}")
-    return document
-
-
 def references_from_annotations(annotation_path: Path) -> list[str]:
     """Return the hash-bound reference list embedded by the SAM3 point UI."""
 
-    document = _read_json_object(annotation_path, "SAM3 annotations")
-    if document.get("schema_version") != ANNOTATION_SCHEMA:
+    document, _masks = load_annotations(annotation_path)
+    if document.get("schema_version") != ANNOTATION_SCHEMA_VERSION:
         raise ValueError(
             "SAM3 annotations use an unsupported schema: "
-            f"{document.get('schema_version')!r}; expected {ANNOTATION_SCHEMA!r}"
+            f"{document.get('schema_version')!r}; "
+            f"expected {ANNOTATION_SCHEMA_VERSION!r}"
         )
     source_views = document.get("source_views")
     if not isinstance(source_views, list) or not 2 <= len(source_views) <= 4:
@@ -122,9 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
         choices=VISUAL_INFERENCE_MODES,
         default="live",
         help=(
-            "live runs the current material workflow (default); auto reuses an "
-            "exactly matching recorded project when available; bundled requires "
-            "that exact project match"
+            "live runs the current material workflow (default); bundled requires "
+            "an exact sealed-project match"
         ),
     )
     parser.add_argument(
@@ -249,3 +242,7 @@ __all__ = [
     "run",
     "VISUAL_INFERENCE_MODES",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

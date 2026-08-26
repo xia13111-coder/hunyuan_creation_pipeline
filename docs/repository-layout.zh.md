@@ -6,6 +6,8 @@
 
 ```text
 asset_pipeline/                 工作流与编排
+asset_pipeline/visual_materials/stages/
+                                具有单一 owner 的材质流水线阶段
 asset_refiner/                  网格精修包
 tools/{blender,isaac,sam3d}/    外部运行时使用的执行脚本
 tools/qwen_material_pipeline/   材质推理与 USD 工具
@@ -31,7 +33,7 @@ tools/qwen_material_pipeline/
 ├── evidence/        相机、Part-ID、颜色、PBR 与质量测量
 ├── retrieval/       SigLIP2 和 DINOv2 检索
 ├── materials/       MDL 目录、选择与应用规则
-├── segmentation/    SAM3 分割与标注重放
+├── segmentation/    SAM3、EntitySeg、邻件关系引导与 hybrid mask
 ├── mvinverse/       MVInverse 适配器和运行记录
 ├── qwen/            本地与远程 VLM 适配器
 ├── usd/             零件索引、渲染、应用与验证
@@ -64,4 +66,5 @@ python -m pip install -e . -e ./tools/qwen_material_pipeline
 ```
 
 安装后可使用 `hunyuan-asset-pipeline`、`manual-material-pipeline` 和
-`qwen-material`。根目录的 `run_*.py` 脚本仅用于兼容旧命令。
+`qwen-material`。根目录的 `run_*.py` 脚本仅用于兼容旧命令；新的材质自动化应使用
+`manual-material-pipeline` 或 `python -m asset_pipeline.manual_material_cli`。

@@ -25,12 +25,14 @@ from asset_pipeline.visual_materials.orchestrator import (
     _prepare_live_material_catalog,
     _quality_can_measure_lighting_statistics,
     _quality_has_lighting_normalized_groups,
-    _require_complete_part_id_reference_views,
     _run_qwen_mvinverse_with_recovery,
     _validate_catalog_family_first_result,
     _validated_exact_mdl_tournament_mapping,
     _verified_partial_live_resume_available,
     _verified_locked_precollection_resume_available,
+)
+from asset_pipeline.visual_materials.stages.part_id_evidence import (
+    _require_complete_reference_views,
 )
 from asset_pipeline.jobs.material import (
     CONFIG_SCHEMA_VERSION,
@@ -79,7 +81,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
     def test_family_first_evidence_requires_all_registered_views(self) -> None:
         evidence = self._complete_part_id_evidence("front", "side", "top", "iso")
 
-        _require_complete_part_id_reference_views(
+        _require_complete_reference_views(
             evidence=evidence,
             expected_view_ids={"front", "side", "top", "iso"},
             label="coarse Part-ID evidence",
@@ -87,7 +89,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
 
         missing = self._complete_part_id_evidence("side", "top", "iso")
         with self.assertRaisesRegex(RuntimeError, "does not cover every"):
-            _require_complete_part_id_reference_views(
+            _require_complete_reference_views(
                 evidence=missing,
                 expected_view_ids={"front", "side", "top", "iso"},
                 label="coarse Part-ID evidence",
@@ -100,7 +102,7 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         parts[0]["observations"] = parts[0]["observations"][:-1]
 
         with self.assertRaisesRegex(RuntimeError, "underlying observations"):
-            _require_complete_part_id_reference_views(
+            _require_complete_reference_views(
                 evidence=evidence,
                 expected_view_ids={"front", "side", "top", "iso"},
                 label="refined Part-ID evidence",
@@ -1825,32 +1827,6 @@ class VisualMaterialBridgeTests(unittest.TestCase):
             document["materials"]["prediction_mode"],
             "catalog_family_first",
         )
-        self.assertEqual(
-            document["materials"]["corresponding_color_calibration"],
-            "adaptive_actual_cad",
-        )
-        self.assertEqual(document["render"]["camera_fast_search"], "auto")
-        self.assertTrue(document["sam3"]["entityseg"]["enabled"])
-        self.assertEqual(
-            document["sam3"]["entityseg"]["python"],
-            "${ENTITYSEG_PYTHON}",
-        )
-
-    def test_family_first_profile_runs_identity_then_actual_cad_colour(self) -> None:
-        profile = (
-            Path(__file__).resolve().parents[1]
-            / "tools"
-            / "qwen_material_pipeline"
-            / "configs"
-            / "pipeline"
-            / "manual_part_id_materials_family_first.json"
-        )
-        document = json.loads(profile.read_text(encoding="utf-8"))
-
-        self.assertEqual(
-            document["materials"]["prediction_mode"],
-            "catalog_family_first",
-        )
         self.assertEqual(document["materials"]["assignment_unit"], "part_id")
         self.assertTrue(document["materials"]["immutable_after_selection"])
         self.assertEqual(
@@ -1875,6 +1851,10 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         )
         self.assertEqual(document["render"]["camera_fast_search"], "auto")
         self.assertTrue(document["sam3"]["entityseg"]["enabled"])
+        self.assertEqual(
+            document["sam3"]["entityseg"]["python"],
+            "${ENTITYSEG_PYTHON}",
+        )
 
     def test_entityseg_runtime_is_fail_closed_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

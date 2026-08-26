@@ -50,10 +50,7 @@ from .config import (
     read_object,
     write_object,
 )
-from .commands import (
-    cad_mesh_template_command,
-    policy_exact_cover_command,
-)
+from .commands import policy_exact_cover_command
 from .corresponding_color import (
     corresponding_material_eligibility,
     rebind_part_id_audit_for_corresponding_color,
@@ -127,6 +124,7 @@ from .stages.material_inference import (
     _run_qwen_mvinverse_with_recovery,
     run_material_inference,
 )
+from .stages.part_id_evidence import run_part_id_evidence_stage
 from .stages.runner import _run_stage, _visual_control_cpu_stability_guard
 from .stages.source_preparation import SourcePreparationResult, prepare_source_evidence
 from .tournaments import (
@@ -201,130 +199,12 @@ from qwen_material_pipeline.evidence.appearance_component_material import (
 )
 from qwen_material_pipeline.evidence.part_id_projection import (
     build_part_id_material_plan,
-    build_part_id_reference_evidence,
     build_part_id_retrieval_request,
 )
 from qwen_material_pipeline.workflows.part_id_qwen import (
     MINIMUM_MATERIAL_SPECIES_CONFIDENCE,
     _catalog_material_species,
 )
-from qwen_material_pipeline.scripts.build_part_id_sam3_request import (
-    build_request as build_part_id_sam3_request,
-)
-from qwen_material_pipeline.segmentation.part_relation_guidance import (
-    build_relation_guided_request,
-)
-
-
-def _require_complete_part_id_reference_views(
-    *,
-    evidence: Mapping[str, Any],
-    expected_view_ids: set[str],
-    label: str,
-) -> None:
-    """Require every registered photo view to contribute material evidence.
-
-    Family-first material inference must not silently continue when camera or
-    spatial registration drops a reference view.  Validate both the reported
-    coverage and the underlying per-Part-ID observations so a stale or
-    incomplete summary cannot turn a two-view run into an apparent four-view
-    run.
-    """
-
-    expected = {
-        view_id.strip()
-        for view_id in expected_view_ids
-        if isinstance(view_id, str) and view_id.strip()
-    }
-    if not expected or len(expected) != len(expected_view_ids):
-        raise RuntimeError(f"{label} has an invalid expected reference-view set")
-    summary = evidence.get("summary")
-    if not isinstance(summary, Mapping):
-        raise RuntimeError(f"{label} has no summary")
-    coverage = summary.get("selected_reference_view_coverage")
-    if not isinstance(coverage, Mapping) or any(
-        not isinstance(view_id, str) or not isinstance(row, Mapping)
-        for view_id, row in coverage.items()
-    ):
-        raise RuntimeError(f"{label} has invalid selected reference-view coverage")
-    actual_coverage = set(coverage)
-    if actual_coverage != expected:
-        raise RuntimeError(
-            f"{label} does not cover every registered reference view: "
-            f"expected={sorted(expected)}, actual={sorted(actual_coverage)}"
-        )
-    trusted_count = summary.get("trusted_reference_view_count")
-    if (
-        isinstance(trusted_count, bool)
-        or not isinstance(trusted_count, int)
-        or trusted_count != len(expected)
-    ):
-        raise RuntimeError(
-            f"{label} trusted reference-view count does not match the "
-            "registered reference set"
-        )
-
-    parts = evidence.get("parts")
-    if not isinstance(parts, list):
-        raise RuntimeError(f"{label} has no Part-ID observations")
-    visible_parts_by_view = {view_id: 0 for view_id in expected}
-    selected_parts_by_view = {view_id: 0 for view_id in expected}
-    observed_view_ids: set[str] = set()
-    selected_view_ids: set[str] = set()
-    for part_index, part in enumerate(parts):
-        if not isinstance(part, Mapping):
-            raise RuntimeError(f"{label} Part-ID row {part_index} is invalid")
-        observations = part.get("observations")
-        if not isinstance(observations, list):
-            raise RuntimeError(
-                f"{label} Part-ID row {part_index} has invalid observations"
-            )
-        part_visible_views: set[str] = set()
-        part_selected_views: set[str] = set()
-        for observation_index, observation in enumerate(observations):
-            if not isinstance(observation, Mapping):
-                raise RuntimeError(
-                    f"{label} observation {part_index}:{observation_index} is invalid"
-                )
-            view_id = observation.get("view_id")
-            if not isinstance(view_id, str) or not view_id:
-                raise RuntimeError(
-                    f"{label} observation {part_index}:{observation_index} has "
-                    "no view_id"
-                )
-            observed_view_ids.add(view_id)
-            part_visible_views.add(view_id)
-            if observation.get("selected_for_material_inference") is True:
-                selected_view_ids.add(view_id)
-                part_selected_views.add(view_id)
-        for view_id in part_visible_views & expected:
-            visible_parts_by_view[view_id] += 1
-        for view_id in part_selected_views & expected:
-            selected_parts_by_view[view_id] += 1
-
-    if observed_view_ids != expected or selected_view_ids != expected:
-        raise RuntimeError(
-            f"{label} underlying observations do not use every registered "
-            "reference view"
-        )
-    for view_id in sorted(expected):
-        row = coverage[view_id]
-        visible = row.get("visible_part_count")
-        selected = row.get("selected_part_count")
-        if (
-            isinstance(visible, bool)
-            or not isinstance(visible, int)
-            or visible < 1
-            or visible != visible_parts_by_view[view_id]
-            or isinstance(selected, bool)
-            or not isinstance(selected, int)
-            or selected < 1
-            or selected != selected_parts_by_view[view_id]
-        ):
-            raise RuntimeError(
-                f"{label} coverage for {view_id!r} does not match its "
-                "underlying selected observations"
-            )
 
 
 def _complete_coverage_assignment_statuses(
@@ -1892,30 +1772,9 @@ def _run_policy_part_id_stage(
     completed_inference_resume = (
         context.partial_live_resume and inference_paths.unattended_result.is_file()
     )
-    camera_calibration_dir = workspace.source.camera_dir
     quality_repair_plan = legacy_paths.quality_repair_plan
     quality_repair_audit = legacy_paths.quality_repair_audit
-    part_id_evidence_dir = part_id_paths.evidence_dir
     part_id_evidence_path = part_id_paths.evidence
-    part_id_coarse_evidence_dir = part_id_paths.coarse_evidence_dir
-    part_id_coarse_evidence_path = part_id_paths.coarse_evidence
-    part_id_amodal_template_dir = part_id_paths.amodal_template_dir
-    part_id_amodal_template_manifest = part_id_paths.amodal_template_manifest
-    part_id_sam3_request = part_id_paths.sam3_request
-    part_id_sam3_dir = part_id_paths.sam3_dir
-    part_id_sam3_manifest = part_id_paths.sam3_manifest
-    part_id_entityseg_dir = part_id_paths.entityseg_dir
-    part_id_entityseg_manifest = part_id_paths.entityseg_manifest
-    part_id_initial_hybrid_mask_dir = part_id_paths.initial_hybrid_mask_dir
-    part_id_initial_hybrid_mask_manifest = part_id_paths.initial_hybrid_mask_manifest
-    part_id_relation_guidance_dir = part_id_paths.relation_guidance_dir
-    part_id_relation_guided_request = part_id_paths.relation_guided_request
-    part_id_relation_sam3_dir = part_id_paths.relation_sam3_dir
-    part_id_relation_sam3_manifest = part_id_paths.relation_sam3_manifest
-    part_id_relation_entityseg_dir = part_id_paths.relation_entityseg_dir
-    part_id_relation_entityseg_manifest = part_id_paths.relation_entityseg_manifest
-    part_id_hybrid_mask_dir = part_id_paths.hybrid_mask_dir
-    part_id_hybrid_mask_manifest = part_id_paths.hybrid_mask_manifest
     part_id_retrieval_request = part_id_paths.retrieval_request
     part_id_retrieval_dir = part_id_paths.retrieval_dir
     part_id_retrieval_result = part_id_paths.retrieval_result
@@ -2161,315 +2020,12 @@ def _run_policy_part_id_stage(
             policy_plan,
         ):
             _require_file(required_path, "part_id_material_assignment")
-        # Layer 1 establishes one camera and one coarse CAD box per Part-ID.
-        # Layer 2 prompts local SAM3 inside those boxes.  Any image-plane
-        # residual is estimated once from the whole workpiece and shared by
-        # every Part-ID in that view; no individual mesh may move to follow a
-        # segmentation candidate. CAD/USD geometry is never moved.
-        for stale_dir in (
-            part_id_coarse_evidence_dir,
-            part_id_evidence_dir,
-            part_id_amodal_template_dir,
-        ):
-            if stale_dir.exists() or stale_dir.is_symlink():
-                archived = unique_path(
-                    analysis_dir / "recovery_archive" / f"stale_{stale_dir.name}"
-                )
-                archived.parent.mkdir(parents=True, exist_ok=True)
-                stale_dir.rename(archived)
-        coarse_evidence_document = build_part_id_reference_evidence(
-            reference_manifest=analysis_dir / "reference_manifest.json",
+        evidence_document = run_part_id_evidence_stage(
+            context,
             rendered_registry=rendered_registry,
-            spatial_mapping_report=(analysis_dir / "spatial_mapping_report.json"),
-            camera_alignment_acceptance=(
-                camera_calibration_dir / "camera_alignment_acceptance.json"
-                if (
-                    camera_calibration_dir / "camera_alignment_acceptance.json"
-                ).is_file()
-                else None
-            ),
             mvinverse_ledger=mvinverse_ledger,
-            output_dir=part_id_coarse_evidence_dir,
-        )
-        write_object(part_id_coarse_evidence_path, coarse_evidence_document)
-        if config.material_prediction_mode == "catalog_family_first":
-            _require_complete_part_id_reference_views(
-                evidence=coarse_evidence_document,
-                expected_view_ids={view_id for view_id, _path in context.references},
-                label="coarse Part-ID evidence",
-            )
-        _run_stage(
-            "part_id_cad_amodal_templates",
-            cad_mesh_template_command(
-                isaac_python=context.isaac_python,
-                registry=rendered_registry,
-                spatial_report=analysis_dir / "spatial_mapping_report.json",
-                evidence=part_id_coarse_evidence_path,
-                output_dir=part_id_amodal_template_dir,
-            ),
-            log_cb,
+            log_cb=log_cb,
             command_runner=_command_runner,
-            required_files=(part_id_amodal_template_manifest,),
-        )
-        write_object(
-            part_id_sam3_request,
-            build_part_id_sam3_request(
-                part_id_coarse_evidence_path,
-                amodal_templates_path=part_id_amodal_template_manifest,
-            ),
-        )
-        if part_id_sam3_dir.exists() or part_id_sam3_dir.is_symlink():
-            archived = unique_path(
-                analysis_dir / "recovery_archive" / "stale_part_id_sam3_regions"
-            )
-            archived.parent.mkdir(parents=True, exist_ok=True)
-            part_id_sam3_dir.rename(archived)
-        _run_stage(
-            "part_id_sam3_local_refinement",
-            [
-                str(config.sam3_python),
-                str(
-                    ProjectLayout.from_root(root_dir()).material_pipeline
-                    / "segmentation"
-                    / "sam3_regions.py"
-                ),
-                "--request",
-                str(part_id_sam3_request),
-                "--repository",
-                str(config.sam3_repository),
-                "--checkpoint",
-                str(config.sam3_checkpoint),
-                "--output-dir",
-                str(part_id_sam3_dir),
-                "--device",
-                config.sam3_device,
-                "--minimum-model-score",
-                str(config.sam3_minimum_model_score),
-                "--minimum-prompt-overlap",
-                str(config.sam3_minimum_prompt_overlap),
-                "--maximum-image-fraction",
-                str(config.sam3_maximum_image_fraction),
-                "--minimum-mask-pixels",
-                str(config.sam3_minimum_mask_pixels),
-                "--seed",
-                "0",
-            ],
-            log_cb,
-            command_runner=_command_runner,
-            required_files=(part_id_sam3_manifest,),
-        )
-        effective_refinement_manifest = part_id_sam3_manifest
-        use_hybrid_refinement = config.entityseg_enabled
-        if use_hybrid_refinement:
-            if any(
-                value is None
-                for value in (
-                    config.entityseg_python,
-                    config.entityseg_cropformer_root,
-                    config.entityseg_config,
-                    config.entityseg_checkpoint,
-                )
-            ):
-                raise RuntimeError(
-                    "EntitySeg fusion is enabled but its runtime is incomplete"
-                )
-            for stale_dir in (
-                part_id_entityseg_dir,
-                part_id_initial_hybrid_mask_dir,
-                part_id_relation_guidance_dir,
-                part_id_relation_sam3_dir,
-                part_id_relation_entityseg_dir,
-                part_id_hybrid_mask_dir,
-            ):
-                if stale_dir.exists() or stale_dir.is_symlink():
-                    archived = unique_path(
-                        analysis_dir / "recovery_archive" / f"stale_{stale_dir.name}"
-                    )
-                    archived.parent.mkdir(parents=True, exist_ok=True)
-                    stale_dir.rename(archived)
-            _run_stage(
-                "part_id_entityseg_boundary_candidates",
-                [
-                    str(config.entityseg_python),
-                    "-m",
-                    "qwen_material_pipeline.segmentation.entityseg_regions",
-                    "--request",
-                    str(part_id_sam3_request),
-                    "--cropformer-root",
-                    str(config.entityseg_cropformer_root),
-                    "--config",
-                    str(config.entityseg_config),
-                    "--checkpoint",
-                    str(config.entityseg_checkpoint),
-                    "--output-dir",
-                    str(part_id_entityseg_dir),
-                    "--minimum-model-score",
-                    str(config.entityseg_minimum_model_score),
-                    "--seed",
-                    "0",
-                ],
-                log_cb,
-                command_runner=_command_runner,
-                required_files=(part_id_entityseg_manifest,),
-            )
-            _run_stage(
-                "part_id_initial_sam3_entityseg_fusion",
-                [
-                    str(config.sam3_python),
-                    "-m",
-                    "qwen_material_pipeline.segmentation.hybrid_part_masks",
-                    "--sam-manifest",
-                    str(part_id_sam3_manifest),
-                    "--entity-manifest",
-                    str(part_id_entityseg_manifest),
-                    "--amodal-manifest",
-                    str(part_id_amodal_template_manifest),
-                    "--output-dir",
-                    str(part_id_initial_hybrid_mask_dir),
-                ],
-                log_cb,
-                command_runner=_command_runner,
-                required_files=(part_id_initial_hybrid_mask_manifest,),
-            )
-            write_object(
-                part_id_relation_guided_request,
-                build_relation_guided_request(
-                    initial_request_path=part_id_sam3_request,
-                    sam_manifest_path=part_id_sam3_manifest,
-                    entity_manifest_path=part_id_entityseg_manifest,
-                    amodal_manifest_path=part_id_amodal_template_manifest,
-                    output_dir=part_id_relation_guidance_dir,
-                ),
-            )
-            _run_stage(
-                "part_id_relation_guided_sam3_refinement",
-                [
-                    str(config.sam3_python),
-                    str(
-                        ProjectLayout.from_root(root_dir()).material_pipeline
-                        / "segmentation"
-                        / "sam3_regions.py"
-                    ),
-                    "--request",
-                    str(part_id_relation_guided_request),
-                    "--repository",
-                    str(config.sam3_repository),
-                    "--checkpoint",
-                    str(config.sam3_checkpoint),
-                    "--output-dir",
-                    str(part_id_relation_sam3_dir),
-                    "--device",
-                    config.sam3_device,
-                    "--minimum-model-score",
-                    str(config.sam3_minimum_model_score),
-                    "--minimum-prompt-overlap",
-                    str(config.sam3_minimum_prompt_overlap),
-                    "--maximum-image-fraction",
-                    str(config.sam3_maximum_image_fraction),
-                    "--minimum-mask-pixels",
-                    str(config.sam3_minimum_mask_pixels),
-                    "--seed",
-                    "0",
-                ],
-                log_cb,
-                command_runner=_command_runner,
-                required_files=(part_id_relation_sam3_manifest,),
-            )
-            _run_stage(
-                "part_id_relation_guided_entityseg_boundaries",
-                [
-                    str(config.entityseg_python),
-                    "-m",
-                    "qwen_material_pipeline.segmentation.entityseg_regions",
-                    "--request",
-                    str(part_id_relation_guided_request),
-                    "--cropformer-root",
-                    str(config.entityseg_cropformer_root),
-                    "--config",
-                    str(config.entityseg_config),
-                    "--checkpoint",
-                    str(config.entityseg_checkpoint),
-                    "--output-dir",
-                    str(part_id_relation_entityseg_dir),
-                    "--minimum-model-score",
-                    str(config.entityseg_minimum_model_score),
-                    "--seed",
-                    "0",
-                ],
-                log_cb,
-                command_runner=_command_runner,
-                required_files=(part_id_relation_entityseg_manifest,),
-            )
-            _run_stage(
-                "part_id_relation_guided_iterative_fusion",
-                [
-                    str(config.sam3_python),
-                    "-m",
-                    "qwen_material_pipeline.segmentation.hybrid_part_masks",
-                    "--sam-manifest",
-                    str(part_id_relation_sam3_manifest),
-                    "--entity-manifest",
-                    str(part_id_relation_entityseg_manifest),
-                    "--amodal-manifest",
-                    str(part_id_amodal_template_manifest),
-                    "--prior-hybrid-manifest",
-                    str(part_id_initial_hybrid_mask_manifest),
-                    "--output-dir",
-                    str(part_id_hybrid_mask_dir),
-                ],
-                log_cb,
-                command_runner=_command_runner,
-                required_files=(part_id_hybrid_mask_manifest,),
-            )
-            effective_refinement_manifest = part_id_hybrid_mask_manifest
-        evidence_document = build_part_id_reference_evidence(
-            reference_manifest=analysis_dir / "reference_manifest.json",
-            rendered_registry=rendered_registry,
-            spatial_mapping_report=(analysis_dir / "spatial_mapping_report.json"),
-            camera_alignment_acceptance=(
-                camera_calibration_dir / "camera_alignment_acceptance.json"
-                if (
-                    camera_calibration_dir / "camera_alignment_acceptance.json"
-                ).is_file()
-                else None
-            ),
-            mvinverse_ledger=mvinverse_ledger,
-            part_id_sam3_manifest=(
-                None if use_hybrid_refinement else effective_refinement_manifest
-            ),
-            part_id_hybrid_manifest=(
-                effective_refinement_manifest if use_hybrid_refinement else None
-            ),
-            output_dir=part_id_evidence_dir,
-        )
-        write_object(part_id_evidence_path, evidence_document)
-        if config.material_prediction_mode == "catalog_family_first":
-            _require_complete_part_id_reference_views(
-                evidence=evidence_document,
-                expected_view_ids={view_id for view_id, _path in context.references},
-                label="refined Part-ID evidence",
-            )
-        log_message(
-            log_cb,
-            "Two-layer one-to-one Part-ID mapping completed: every coarse box "
-            "inherits the rigid whole-asset camera and the single residual shared "
-            "by that view, then the isolated mesh, current-view CAD visibility, "
-            "SAM3/EntitySeg priors, and photo edges iteratively refine its boundary. "
-            "No CAD/USD transform was changed. "
-            f"{evidence_document['summary'].get('sam3_refined_observation_count', 0)} "
-            "observations passed local refinement ("
-            f"EntitySeg={evidence_document['summary'].get('entityseg_refined_observation_count', 0)}, "
-            f"SAM3={evidence_document['summary'].get('sam3_selected_observation_count', 0)}); "
-            f"iterative={evidence_document['summary'].get('shape_guided_iterative_refined_observation_count', 0)}; "
-            f"{evidence_document['summary'].get('global_projection_fallback_observation_count', 0)} "
-            "used the audited coarse fallback. "
-            f"{evidence_document['summary'].get('chromatic_isolated_observation_count', 0)} "
-            "single-view chromatic components were isolated, including "
-            f"{evidence_document['summary'].get('tiny_chromatic_rescue_observation_count', 0)} "
-            "small-part rescues. No Part-ID-local translation, rotation, scale, "
-            "or CAD/USD geometry change is allowed. "
-            "Selected-view coverage: "
-            f"{evidence_document['summary'].get('selected_reference_view_coverage', {})}.",
         )
         # The initial exact-cover plan is built before local Part-ID visibility
         # is known. Rebuild it deterministically from the same trusted inputs

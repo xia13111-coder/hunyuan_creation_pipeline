@@ -70,12 +70,6 @@ def _unit(value: Any, label: str) -> float:
     return float(value)
 
 
-def _srgb_channel_to_linear(value: float) -> float:
-    """Convert one display-sRGB channel to the linear color MDL expects."""
-
-    return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
-
-
 def _part_group_map(batches: Sequence[Mapping[str, Any]]) -> dict[str, str]:
     result: dict[str, str] = {}
     for batch_index, raw_batch in enumerate(batches):
@@ -255,41 +249,6 @@ def _palette_groups(document: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]
             raise MVInverseAutonomyError(f"duplicate palette group: {group_id}")
         result[group_id] = group
     return result
-
-
-def _suggestion_values(
-    group: Mapping[str, Any],
-) -> tuple[list[float], float, float, list[str]] | None:
-    suggestion = _mapping(group.get("suggestion"), "evidence group suggestion")
-    if (
-        suggestion.get("decision") != "auto"
-        or suggestion.get("auto_parameter_eligible") is not True
-    ):
-        return None
-    color_raw = _sequence(
-        suggestion.get("base_color_srgb"), "suggestion.base_color_srgb"
-    )
-    if len(color_raw) != 3:
-        raise MVInverseAutonomyError(
-            "suggestion.base_color_srgb must contain three values"
-        )
-    color_srgb = [
-        _unit(value, f"suggestion.base_color_srgb[{index}]")
-        for index, value in enumerate(color_raw)
-    ]
-    color = [_srgb_channel_to_linear(value) for value in color_srgb]
-    metallic = _unit(suggestion.get("metallic"), "suggestion.metallic")
-    roughness = _unit(suggestion.get("roughness"), "suggestion.roughness")
-    view_ids_raw = group.get("contributing_view_ids", [])
-    view_ids = [
-        _string(value, "evidence contributing_view_ids")
-        for value in _sequence(view_ids_raw, "evidence contributing_view_ids")
-    ]
-    if len(set(view_ids)) != len(view_ids):
-        raise MVInverseAutonomyError(
-            "evidence contributing_view_ids contains duplicates"
-        )
-    return color, metallic, roughness, sorted(view_ids)
 
 
 def parameterize_auto_material_plan(

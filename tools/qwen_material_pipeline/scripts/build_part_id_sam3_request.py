@@ -10,7 +10,6 @@ import math
 from pathlib import Path
 from typing import Any
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -90,108 +89,6 @@ def _box(mask_path: Path) -> tuple[list[int], dict[str, Any]]:
         "search_bbox_pixels": [left, top, right, bottom],
         "local_search_padding_fraction": padding_fraction,
         "local_search_padding_xy_pixels": [padding_x, padding_y],
-    }
-
-
-def _cad_seed_points(
-    mask_path: Path,
-) -> tuple[dict[str, list[list[int]]], dict[str, Any]]:
-    """Derive deterministic instance prompts from a projected CAD mask."""
-
-    with Image.open(mask_path) as opened:
-        mask = np.asarray(opened.convert("L"), dtype=np.uint8) >= 128
-    height, width = mask.shape
-    if int(mask.sum()) < MINIMUM_PROJECTED_MASK_PIXELS:
-        raise ValueError(
-            "projected Part-ID mask has insufficient pixels "
-            f"(<{MINIMUM_PROJECTED_MASK_PIXELS}): {mask_path}"
-        )
-    binary = mask.astype(np.uint8)
-    distance = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
-    component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
-        binary, connectivity=8
-    )
-    components = sorted(
-        range(1, component_count),
-        key=lambda label: (-int(stats[label, cv2.CC_STAT_AREA]), label),
-    )
-    positive_pixels: list[tuple[int, int]] = []
-    for label in components[:4]:
-        component_distance = np.where(labels == label, distance, -1.0)
-        y, x = np.unravel_index(
-            int(np.argmax(component_distance)), component_distance.shape
-        )
-        positive_pixels.append((int(x), int(y)))
-
-    ys, xs = np.where(mask)
-    diagonal = math.hypot(
-        int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1)
-    )
-    spacing = max(4.0, 0.22 * diagonal)
-    ranked = np.dstack(
-        np.unravel_index(np.argsort(distance.ravel())[::-1], distance.shape)
-    )[0]
-    for y, x in ranked:
-        if distance[y, x] <= 0:
-            break
-        candidate = (int(x), int(y))
-        if all(
-            math.hypot(candidate[0] - px, candidate[1] - py) >= spacing
-            for px, py in positive_pixels
-        ):
-            positive_pixels.append(candidate)
-        if len(positive_pixels) >= 4:
-            break
-
-    ring_radius = max(5, int(round(0.08 * diagonal)))
-    inner = cv2.dilate(
-        binary,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
-        iterations=1,
-    )
-    outer = cv2.dilate(
-        binary,
-        cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            (2 * ring_radius + 1, 2 * ring_radius + 1),
-        ),
-        iterations=1,
-    )
-    ring_y, ring_x = np.where((outer > 0) & (inner == 0))
-    negative_pixels: list[tuple[int, int]] = []
-    if len(ring_x):
-        center_x = float(xs.mean())
-        center_y = float(ys.mean())
-        for angle in np.linspace(0.0, 2.0 * math.pi, 8, endpoint=False):
-            target_x = center_x + math.cos(float(angle)) * (
-                0.5 * diagonal + ring_radius
-            )
-            target_y = center_y + math.sin(float(angle)) * (
-                0.5 * diagonal + ring_radius
-            )
-            index = int(
-                np.argmin(
-                    (ring_x - target_x) ** 2 + (ring_y - target_y) ** 2
-                )
-            )
-            candidate = (int(ring_x[index]), int(ring_y[index]))
-            if candidate not in negative_pixels:
-                negative_pixels.append(candidate)
-
-    def grid(point: tuple[int, int]) -> list[int]:
-        x, y = point
-        return [
-            int(round(x * 1000 / max(1, width - 1))),
-            int(round(y * 1000 / max(1, height - 1))),
-        ]
-
-    return {
-        "positive_points": [grid(point) for point in positive_pixels],
-        "negative_points": [grid(point) for point in negative_pixels],
-    }, {
-        "cad_seed_positive_point_count": len(positive_pixels),
-        "cad_seed_negative_point_count": len(negative_pixels),
-        "cad_seed_negative_ring_radius_pixels": ring_radius,
     }
 
 

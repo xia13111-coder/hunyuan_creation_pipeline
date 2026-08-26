@@ -40,6 +40,19 @@ CLI / HTTP API
 
 ## 主命令分发
 
+参考图驱动的 STEP/STP 材质正式命令只有一条 owner 调用链：
+
+```text
+manual-material-pipeline
+-> manual_material_cli.main
+-> manual_cad.run_manual_cad_workflow
+-> visual_materials.run_assign_visual_materials_job
+-> qwen_material_pipeline / Isaac Sim 执行器
+```
+
+`python -m asset_pipeline.manual_material_cli` 是等价的模块入口。通用多输入命令继续负责
+其他工作流：
+
 ```text
 run_asset_pipeline.py
 -> asset_pipeline.cli.main
@@ -136,7 +149,14 @@ visual_materials.run_assign_visual_materials_job
    -> SAM3 前景信息
    -> Qwen + MVInverse 分析
    -> SigLIP2 检索 + DINOv2 重排
+-> stages.part_id_evidence.run_part_id_evidence_stage
+   -> isolated CAD 模型图 Part-ID 模板
+   -> 第一遍 SAM3 与 EntitySeg 候选
+   -> 排除目标自身的装配邻件关系定位
+   -> 第二遍分割与迭代 hybrid 融合
 -> 逐 Part-ID 选择候选并补全所有 Mesh
+-> 不看颜色，先锁定材质身份
+-> 只为“对应材质”校准审核过的颜色参数
 -> 生成赋材质预览 USD，与参考图比较
 -> 图像信息充分时执行一次受限候选调整
 -> 确定最终 MDL 并记录选择结果
@@ -160,6 +180,8 @@ visual_materials.run_final_visual_acceptance_job
 - `stages/runner.py` 处理进度、子进程异常和有限重试。
 - `stages/source_preparation.py` 准备注册表、渲染图和相机数据。
 - `stages/material_inference.py` 启动材质分析子进程。
+- `stages/part_id_evidence.py` 统一负责模型图 Part-ID 定位、两遍分割、邻件关系引导、
+  hybrid 融合和全视角证据覆盖检查。
 - `policy_exact_cover.py` 保证每个 Mesh 都有可应用的结果。
 - `exact_mdl_cache.py` 校验候选渲染缓存。
 - `tournaments.py` 按渲染效果比较入围的 MDL。
@@ -185,7 +207,7 @@ visual_materials.run_final_visual_acceptance_job
 Qwen 可以使用配置的 Python 3.11 环境；SAM3、MVInverse、SigLIP2 和 DINOv2 使用材质
 配置中记录的运行时。
 
-占用 GPU 的阶段按顺序运行，以降低峰值显存。可复用阶段会记录输入、模型版本、配置和
-输出哈希。`--resume` 只在这些内容仍一致时复用结果，否则重新执行该阶段。模型阶段失败
-后，只有在已有分析结果可安全复用时才会用新进程重试一次。JSON 格式错误、哈希不匹配
-或图像信息不足时，流程会停止，并在本次运行目录中保留诊断报告。
+占用 GPU 的阶段按顺序运行，以降低峰值显存。可复用的视觉阶段会记录输入、模型版本、配置
+和输出哈希。`--resume` 只用于同一份 `live` 输入；只有这些内容仍一致时才复用视觉结果。
+模型阶段失败后，只有在已有分析结果可安全复用时才会用新进程重试一次。JSON 格式错误、
+哈希不匹配或图像信息不足时，流程会停止，并在本次运行目录中保留诊断报告。
