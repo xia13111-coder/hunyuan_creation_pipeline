@@ -37,7 +37,7 @@ source GLB
 
 | Option | Meaning |
 | --- | --- |
-| `--refine-config-path` | Configuration file. The default is `configs/hunyuan_reduce_local_postprocess.yaml`. |
+| `--refine-config-path` | Configuration file. The default is `configs/refinement/hunyuan_reduce_local_postprocess.yaml`. |
 | `--refine-output-dir` | Refine workspace. When omitted, `*_refined_mesh` is created next to the input. |
 | `--refine-temp-upload` | Temporary upload provider. Use `uguu` for local GLBs or `none` to disable. |
 | `--refine-fail-on-qc-error` | Fail the complete pipeline when QC reports `fail`. |
@@ -73,7 +73,9 @@ A raw SAM3D GLB may contain no image, texture, or PBR material and store appeara
 2. Otherwise interpolate source vertex colors.
 3. Use the fallback color only when neither source exists.
 
-`source_vertex_color_found: true` in `qc_report.json` confirms that the vertex-color fallback ran. `materials.json` contains PhysX properties and does not participate in visual texture migration.
+`source_vertex_color_found: true` in `qc_report.json` confirms that the
+vertex-color fallback ran. `configs/physics/materials.json` contains PhysX
+properties and does not participate in visual texture migration.
 
 ## Outputs
 

@@ -27,7 +27,7 @@ qwen-material --help
 可选的 Qwen3.5/SigLIP2 校验安装：
 
 ```bash
-bash tools/qwen_material_pipeline/scripts/setup_qwen35_runtime.sh
+bash tools/qwen_material_pipeline/scripts/qwen35/setup_qwen35_runtime.sh
 ```
 
 SAM3、EntitySeg/CropFormer、MVInverse、DINOv2、NVIDIA 材质和 Base 材质观察库是独立本机依赖，必须通过
@@ -92,7 +92,7 @@ visual_material/final_visual_acceptance/
 
 ## 文档与测试
 
-- [用户命令](../../docs/manual-part-id-materials.zh.md)
+- [用户命令](../../docs/guides/manual-part-id-materials.zh.md)
 - [行为与排错](../../docs/modules/visual-materials.zh.md)
 - [架构](./docs/architecture.zh.md)
 - [材质身份优先、真实 CAD 校色流程](./docs/material_identity_color_workflow.zh.md)
@@ -105,5 +105,8 @@ PYTHONPATH=./tools python -m pytest -q -p no:cacheprovider \
 
 ## 许可证
 
-自研代码采用 [Apache License 2.0](./LICENSE)。MVInverse 仍仅限非商业用途；模型和 NVIDIA
-资产使用独立条款，见[第三方声明](../../THIRD_PARTY_NOTICES.md)。
+自研代码采用 [Apache License 2.0](./LICENSE)。MVInverse 仍仅限非商业用途；它的
+[许可证](./third_party/mvinverse/LICENSE)和内置 DINOv2 的
+[许可证](./third_party/mvinverse/DINOV2_LICENSE)继续与第三方源码放在一起，并会进入
+Python 分发包。模型和 NVIDIA 资产使用独立条款，见仓库级
+[第三方声明](../../legal/THIRD_PARTY_NOTICES.md)。

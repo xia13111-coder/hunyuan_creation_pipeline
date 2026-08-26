@@ -24,7 +24,8 @@ asset_pipeline/jobs/isaac.py
 
 ## 物理材质
 
-`--material` 必须显式选择 [`materials.json`](../../materials.json) 中的预设。代码不会根据
+`--material` 必须显式选择
+[`configs/physics/materials.json`](../../configs/physics/materials.json) 中的预设。代码不会根据
 prim 名称或视觉外观猜测物理材质。
 
 | 字段 | 单位/类型 | 作用 |
@@ -37,7 +38,7 @@ prim 名称或视觉外观猜测物理材质。
 
 配置包含通用材质，以及更具体的金属、聚合物、弹性体、木材、玻璃、陶瓷和混凝土。
 这些值是仿真基线；已知具体牌号和接触面时，应使用实测数据。当前数值以
-`materials.json` 为准，文档不再复制一份容易过期的表格。
+`configs/physics/materials.json` 为准，文档不再复制一份容易过期的表格。
 
 ## 碰撞近似
 

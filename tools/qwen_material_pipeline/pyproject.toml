@@ -9,7 +9,11 @@ description = "Reference-driven NVIDIA MDL retrieval and USD material binding"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-license-files = ["LICENSE", "third_party/mvinverse/LICENSE"]
+license-files = [
+    "LICENSE",
+    "third_party/mvinverse/LICENSE",
+    "third_party/mvinverse/DINOV2_LICENSE",
+]
 keywords = ["USD", "NVIDIA MDL", "material retrieval", "Qwen", "MVInverse"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -48,6 +52,7 @@ qwen_material_pipeline = [
     "web/**/*.html",
     "web/**/*.js",
     "web/**/*.css",
+    "web/**/*.sh",
 ]
 
 [tool.black]

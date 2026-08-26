@@ -33,7 +33,7 @@ run_manual_cad_workflow
 
 ## 命令
 
-先按 [Part-ID 快速开始](../manual-part-id-materials.zh.md) 生成 SAM3 整机前景标注，再运行：
+先按 [Part-ID 快速开始](../guides/manual-part-id-materials.zh.md) 生成 SAM3 整机前景标注，再运行：
 
 ```bash
 hunyuan-asset-pipeline \
@@ -74,7 +74,7 @@ hunyuan-asset-pipeline \
 | `--visual-material-output-dir` | 材质分析结果和赋材质后的 USD 输出。 |
 | `--acknowledge-mvinverse-noncommercial` | 确认本次运行符合 MVInverse 许可。 |
 | `--allow-policy-material-fallback` | 为未观测或无法判断的零件使用配置中的预设默认材质。 |
-| `--material` | `materials.json` 中的物理材质。 |
+| `--material` | `configs/physics/materials.json` 中的物理材质。 |
 | `--approx` | 碰撞近似；复杂动态 CAD 推荐 `sdf`。 |
 | `--manual-sdf-resolution` | 手工建模 STEP/STP 的 SDF 分辨率，默认 `32`。 |
 | `--set-mass` | 总质量，单位 kg；不传时按体积和密度估算。 |

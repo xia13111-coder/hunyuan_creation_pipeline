@@ -81,6 +81,7 @@ part_id_reference_evidence.json
 part_id_material_plan.json
 ```
 
-详细说明见[参考图赋材质流程](./modules/visual-materials.zh.md)、
-[环境变量模板](../.env.example)和[第三方声明](../THIRD_PARTY_NOTICES.md)。MVInverse 仅限
+详细说明见[参考图赋材质流程](../modules/visual-materials.zh.md)、
+[环境变量模板](../../.env.example)和
+[第三方声明](../../legal/THIRD_PARTY_NOTICES.md)。MVInverse 仅限
 非商业用途。

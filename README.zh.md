@@ -82,7 +82,7 @@ hunyuan-asset-pipeline \
   --intermediate-output-dir "$RUN/intermediate" \
   --final-output-dir "$RUN/final" \
   --result-json "$RUN/pipeline_result.json" \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --len-x 0.4 --len-y 0.3 --len-z 0.3 \
   --material plastic --approx sdf
@@ -105,7 +105,7 @@ hunyuan-asset-pipeline \
   --intermediate-output-dir "$RUN/intermediate" \
   --final-output-dir "$RUN/final" \
   --result-json "$RUN/pipeline_result.json" \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --len-x 0.4 --len-y 0.3 --len-z 0.8 \
   --material steel --approx sdf
@@ -120,7 +120,7 @@ hunyuan-asset-pipeline \
   --intermediate-output-dir "$RUN/intermediate" \
   --final-output-dir "$RUN/final" \
   --result-json "$RUN/pipeline_result.json" \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --len-x 0.4 --len-y 0.3 --len-z 0.8 \
   --material plastic --approx sdf
@@ -171,8 +171,9 @@ STEP/STP 保留原始尺寸。从零运行应使用新输出目录；`--resume` 
 可复用的视觉阶段必须重新通过哈希校验。
 
 详细说明见 [Hunyuan](./docs/modules/hunyuan.zh.md)、[SAM3D](./docs/modules/sam3d.zh.md)、
-[CAD](./docs/modules/cad.zh.md)、[生成方式选择](./docs/generation-guide.zh.md)和
-[CAD 视觉材质](./docs/manual-part-id-materials.zh.md)。
+[CAD](./docs/modules/cad.zh.md)、
+[生成方式选择](./docs/guides/generation-guide.zh.md)和
+[CAD 视觉材质](./docs/guides/manual-part-id-materials.zh.md)。
 
 ## 输出
 
@@ -198,7 +199,11 @@ asset_refiner/                  网格精修
 tools/{blender,isaac,sam3d}/    Blender、Isaac Sim 和 SAM3D 执行脚本
 tools/qwen_material_pipeline/   材质推理和 USD 工具
 configs/                        版本化配置
-docs/                           详细文档
+requirements/                   按用途拆分的依赖增量
+docs/{guides,development,release,modules}/
+                                详细文档
+legal/                          第三方版权与许可证清单
+.github/                        贡献与安全策略
 tests/                          测试
 outputs/                        生成结果
 ```
@@ -206,9 +211,9 @@ outputs/                        生成结果
 主要文档：
 
 - [文档索引](./docs/README.zh.md)
-- [架构](./docs/architecture.zh.md)
+- [架构](./docs/development/architecture.zh.md)
 - [视觉材质](./docs/modules/visual-materials.zh.md)
-- [公开发布检查表](./docs/public-release-checklist.zh.md)
+- [公开发布检查表](./docs/release/public-release-checklist.zh.md)
 - [变更记录](./CHANGELOG.md)
 
 ## 测试
@@ -224,5 +229,6 @@ python ./tools/release/check_public_tree.py
 
 自研代码和文档采用 [Apache License 2.0](./LICENSE)。MVInverse 仅限非商业用途；模型、
 NVIDIA 软件、MDL 材质和生成资产使用各自条款。见
-[THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)、
-[CONTRIBUTING.md](./CONTRIBUTING.md)和[SECURITY.md](./SECURITY.md)。
+[法律文件索引](./legal/README.zh.md)、
+[第三方声明](./legal/THIRD_PARTY_NOTICES.md)、
+[贡献指南](./.github/CONTRIBUTING.md)和[安全策略](./.github/SECURITY.md)。

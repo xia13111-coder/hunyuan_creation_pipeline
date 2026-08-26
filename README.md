@@ -104,7 +104,7 @@ hunyuan-asset-pipeline \
   --intermediate-output-dir "$RUN/intermediate" \
   --final-output-dir "$RUN/final" \
   --result-json "$RUN/pipeline_result.json" \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --len-x 0.4 --len-y 0.3 --len-z 0.3 \
   --material plastic --approx sdf
@@ -128,7 +128,7 @@ hunyuan-asset-pipeline \
   --intermediate-output-dir "$RUN/intermediate" \
   --final-output-dir "$RUN/final" \
   --result-json "$RUN/pipeline_result.json" \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --len-x 0.4 --len-y 0.3 --len-z 0.8 \
   --material steel --approx sdf
@@ -143,7 +143,7 @@ hunyuan-asset-pipeline \
   --intermediate-output-dir "$RUN/intermediate" \
   --final-output-dir "$RUN/final" \
   --result-json "$RUN/pipeline_result.json" \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --len-x 0.4 --len-y 0.3 --len-z 0.8 \
   --material plastic --approx sdf
@@ -196,8 +196,9 @@ run; `--resume` is only for the same `live` request, and reusable visual stages
 must pass their hash checks.
 
 See [Hunyuan](./docs/modules/hunyuan.md), [SAM3D](./docs/modules/sam3d.md),
-[CAD](./docs/modules/cad.md), the [generation guide](./docs/generation-guide.md),
-and [CAD visual materials](./docs/manual-part-id-materials.md).
+[CAD](./docs/modules/cad.md), the
+[generation guide](./docs/guides/generation-guide.md), and
+[CAD visual materials](./docs/guides/manual-part-id-materials.md).
 
 ## Outputs
 
@@ -224,7 +225,11 @@ asset_refiner/                  mesh refinement
 tools/{blender,isaac,sam3d}/    vendor-runtime workers
 tools/qwen_material_pipeline/   material inference and USD tools
 configs/                        versioned configuration
-docs/                           detailed documentation
+requirements/                   purpose-specific dependency overlays
+docs/{guides,development,release,modules}/
+                                detailed documentation
+legal/                          third-party license inventory
+.github/                        contribution and security policies
 tests/                          tests
 outputs/                        generated runs
 ```
@@ -232,9 +237,9 @@ outputs/                        generated runs
 Key references:
 
 - [Documentation index](./docs/README.md)
-- [Architecture](./docs/architecture.md)
+- [Architecture](./docs/development/architecture.md)
 - [Visual materials](./docs/modules/visual-materials.md)
-- [Public release checklist](./docs/public-release-checklist.md)
+- [Public release checklist](./docs/release/public-release-checklist.md)
 - [Changelog](./CHANGELOG.md)
 
 ## Test
@@ -251,5 +256,7 @@ python ./tools/release/check_public_tree.py
 First-party code and documentation use
 [Apache License 2.0](./LICENSE). MVInverse is non-commercial, and models,
 NVIDIA software, MDL materials, and generated assets retain separate terms.
-See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md),
-[CONTRIBUTING.md](./CONTRIBUTING.md), and [SECURITY.md](./SECURITY.md).
+See the [legal-file index](./legal/README.md),
+[third-party notices](./legal/THIRD_PARTY_NOTICES.md),
+[contribution guide](./.github/CONTRIBUTING.md), and
+[security policy](./.github/SECURITY.md).

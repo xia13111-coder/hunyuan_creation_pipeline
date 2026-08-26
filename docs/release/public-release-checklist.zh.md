@@ -1,13 +1,13 @@
 # 公开发布检查表
 
-[English](./public-release-checklist.md) | [中文](./public-release-checklist.zh.md) | [文档索引](./README.zh.md)
+[English](./public-release-checklist.md) | [中文](./public-release-checklist.zh.md) | [文档索引](../README.zh.md)
 
 每次发布源码都应执行本检查表。自动检查不能替代对文件所有权、隐私和许可证的人工审核。
 
 ## 内容与许可证
 
 - 确认所有自研文件都可以采用 Apache-2.0 发布。
-- 保留 `LICENSE`、`NOTICE`、`THIRD_PARTY_NOTICES.md`，以及随包提供的第三方源码许可证。
+- 保留 `LICENSE`、`NOTICE`、`legal/THIRD_PARTY_NOTICES.md`，以及随包提供的第三方源码许可证。
 - 不发布模型权重、NVIDIA 资产、Isaac Sim 文件、Blender 二进制和生成结果，除非对应
   许可证明确允许重新分发。
 - 公开运行结果时，记录模型来源、版本、哈希和许可证。除非另有授权，使用 MVInverse

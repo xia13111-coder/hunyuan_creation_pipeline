@@ -188,7 +188,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--material", default="plastic", help="material name in materials.json"
+        "--material",
+        default="plastic",
+        help="material name in configs/physics/materials.json",
     )
     parser.add_argument(
         "--approx",

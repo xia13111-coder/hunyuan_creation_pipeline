@@ -5,7 +5,7 @@ USER root
 
 ARG MATERIAL_PIP_INDEX_URL=https://pypi.org/simple
 
-COPY requirements-visual-materials.txt /tmp/requirements-visual-materials.txt
+COPY requirements/visual-materials.txt /tmp/requirements-visual-materials.txt
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     PIP_CACHE_DIR=/root/.cache/pip \

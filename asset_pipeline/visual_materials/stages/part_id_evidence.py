@@ -29,7 +29,7 @@ from .runner import CommandRunner, _run_stage
 from qwen_material_pipeline.evidence.part_id_projection import (
     build_part_id_reference_evidence,
 )
-from qwen_material_pipeline.scripts.build_part_id_sam3_request import (
+from qwen_material_pipeline.segmentation.part_id_request import (
     build_request as build_part_id_sam3_request,
 )
 from qwen_material_pipeline.segmentation.part_relation_guidance import (

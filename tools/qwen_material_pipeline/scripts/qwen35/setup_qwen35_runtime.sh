@@ -7,7 +7,7 @@ set -euo pipefail
 # interpreter while SAM3, MVInverse, Isaac Sim, and Blender keep theirs.
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PACKAGE_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+PACKAGE_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 MODEL_VOLUME="${ASSET_MODEL_VOLUME:-${XDG_CACHE_HOME:-${HOME}/.cache}/hunyuan_asset_pipeline}"
 RUNTIME_ROOT="${QWEN35_RUNTIME_ROOT:-${MODEL_VOLUME}/qwen35_4b_runtime}"
 ENV_DIR="${QWEN35_ENV_DIR:-${RUNTIME_ROOT}/env}"

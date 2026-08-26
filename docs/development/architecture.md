@@ -1,6 +1,6 @@
 # Architecture and Call Graph
 
-[English](./architecture.md) | [中文](./architecture.zh.md) | [Documentation index](./README.md)
+[English](./architecture.md) | [中文](./architecture.zh.md) | [Documentation index](../README.md)
 
 This page describes module ownership and the main execution paths. User
 commands and tuning options are documented in the relevant workflow guides.
@@ -110,9 +110,9 @@ workflows.run_process_model_job
 -> delivery validation
 ```
 
-For refinement internals, see [Refine](./modules/refine.md). For Blender and
-physics, see [Blender](./modules/blender.md) and
-[Physics](./modules/physics.md).
+For refinement internals, see [Refine](../modules/refine.md). For Blender and
+physics, see [Blender](../modules/blender.md) and
+[Physics](../modules/physics.md).
 
 ## STEP/STP workflow
 
@@ -135,8 +135,8 @@ origin. Camera alignment is used only to compare renders with photographs; it
 does not rotate or resize the delivered CAD geometry.
 
 The workflow intentionally has no `len_x`, `len_y`, `len_z`, or `orientation`
-option. See [CAD](./modules/cad.md) and the
-[CAD material quick start](./manual-part-id-materials.md).
+option. See [CAD](../modules/cad.md) and the
+[CAD material quick start](../guides/manual-part-id-materials.md).
 
 ## Visual-material workflow
 
@@ -214,7 +214,7 @@ visual_materials.run_final_visual_acceptance_job
 The final choice is made from rendered MDL candidates. Once the selection
 record is created, later stages verify and apply that choice without silently
 changing it. Exact thresholds and repair rules are documented in
-[Visual materials](./modules/visual-materials.md).
+[Visual materials](../modules/visual-materials.md).
 
 ## Runtime boundaries and resume
 

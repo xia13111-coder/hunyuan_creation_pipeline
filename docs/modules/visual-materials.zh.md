@@ -1,6 +1,6 @@
 # STEP/STP 参考图自动赋材质
 
-[English](./visual-materials.md) | [中文](./visual-materials.zh.md) | [快速开始](../manual-part-id-materials.zh.md)
+[English](./visual-materials.md) | [中文](./visual-materials.zh.md) | [快速开始](../guides/manual-part-id-materials.zh.md)
 
 该流程根据同一工件的 2–4 张照片，为手工建模 STEP/STP 装配体选择 NVIDIA Base MDL。
 CAD 始终决定几何、层级和尺寸，照片只为可见 Part-ID 提供外观信息。
@@ -60,7 +60,7 @@ Part-ID、轮廓和遮挡关系，不移动任何单独 Mesh，也不使用材�
 两遍分割、邻件关系引导和融合顺序。该阶段从 `orchestrator.py` 抽离后具有唯一、可测试的
 owner，但磁盘产物路径和阶段名称不变。`tools/qwen_material_pipeline/` 提供分割、
 图像信息提取、检索、模型调用和 USD 工具；Isaac Sim 负责 CAD/USD、MDL 渲染、物理和最终
-验证。详见[架构](../architecture.zh.md)。
+验证。详见[架构](../development/architecture.zh.md)。
 
 ## 如何提取图像信息
 
@@ -214,4 +214,4 @@ CAD 转换开始前，专用命令会校验标注文档哈希、每张图片的�
 - [Base observation bank](../../tools/qwen_material_pipeline/docs/base_material_observation_bank.zh.md)
 
 MVInverse 仅限非商业用途；NVIDIA 资产和 Isaac Sim 采用各自许可，见
-[第三方声明](../../THIRD_PARTY_NOTICES.md)。
+[第三方声明](../../legal/THIRD_PARTY_NOTICES.md)。

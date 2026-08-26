@@ -248,7 +248,8 @@ class ProcessModelRequest(BaseModel):
         default=None, description="模型质量；为空时自动按体积和材质密度计算"
     )
     material: str = Field(
-        default="plastic", description="材质标签，对应 materials.json"
+        default="plastic",
+        description="物理材质标签，对应 configs/physics/materials.json",
     )
     approx: str = Field(
         default="convexDecomposition", description="碰撞体类型，对应 --approx"
@@ -289,7 +290,10 @@ class GenerateAndProcessModelRequest(BaseModel):
     )
     refine_config_path: str | None = Field(
         default=None,
-        description="refine mesh 配置文件；为空时使用 configs/hunyuan_reduce_local_postprocess.yaml",
+        description=(
+            "refine mesh 配置文件；为空时使用 "
+            "configs/refinement/hunyuan_reduce_local_postprocess.yaml"
+        ),
     )
     refine_temp_upload: str | None = Field(
         default=None,

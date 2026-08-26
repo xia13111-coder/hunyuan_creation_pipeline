@@ -29,6 +29,30 @@ class ProjectLayout:
         return self.root / "configs"
 
     @property
+    def physics_configs(self) -> Path:
+        return self.configs / "physics"
+
+    @property
+    def physics_materials(self) -> Path:
+        return self.physics_configs / "materials.json"
+
+    @property
+    def refinement_configs(self) -> Path:
+        return self.configs / "refinement"
+
+    @property
+    def default_refine_config(self) -> Path:
+        return self.refinement_configs / "hunyuan_reduce_local_postprocess.yaml"
+
+    @property
+    def requirements(self) -> Path:
+        return self.root / "requirements"
+
+    @property
+    def visual_material_requirements(self) -> Path:
+        return self.requirements / "visual-materials.txt"
+
+    @property
     def docs(self) -> Path:
         return self.root / "docs"
 

@@ -35,7 +35,7 @@ asset_pipeline/jobs/refine.py
 
 | 参数 | 说明 |
 | --- | --- |
-| `--refine-config-path` | 配置文件。生产配置为 `configs/hunyuan_reduce_local_postprocess.yaml`。 |
+| `--refine-config-path` | 配置文件。生产配置为 `configs/refinement/hunyuan_reduce_local_postprocess.yaml`。 |
 | `--refine-output-dir` | 指定精修工作目录；不传时在输入旁创建 `*_refined_mesh`。 |
 | `--refine-temp-upload` | 临时上传服务。`uguu` 适用于本地 GLB；`none` 关闭。 |
 | `--refine-fail-on-qc-error` | QC 为 `fail` 时停止整个流程。 |
@@ -70,7 +70,7 @@ SAM3D 原始 GLB 可能没有图片贴图或 PBR 材质，而把颜色保存在�
 3. 两者都没有时才写默认颜色。
 
 `qc_report.json` 中的 `source_vertex_color_found: true` 表示流程使用了源顶点色。
-`materials.json` 只定义 PhysX 材质，不参与视觉贴图迁移。
+`configs/physics/materials.json` 只定义 PhysX 材质，不参与视觉贴图迁移。
 
 ## 输出
 

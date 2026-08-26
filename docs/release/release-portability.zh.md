@@ -1,6 +1,6 @@
 # 发布与可移植性
 
-[English](./release-portability.md) | [中文](./release-portability.zh.md) | [文档索引](./README.zh.md)
+[English](./release-portability.md) | [中文](./release-portability.zh.md) | [文档索引](../README.zh.md)
 
 配置好本机运行时、模型、密钥和挂载目录后，项目应能从任意检出目录运行。源码不能依赖
 某位开发者的用户名或安装路径。
@@ -66,4 +66,4 @@ cd docker/offline-images
 sha256sum -c hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
 ```
 
-加载与验收方法见 [Docker 操作手册](../docker/README.zh.md)。
+加载与验收方法见 [Docker 操作手册](../../docker/README.zh.md)。

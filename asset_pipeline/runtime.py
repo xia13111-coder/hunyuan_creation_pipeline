@@ -14,7 +14,7 @@ from .local_models import (
     configure_discovered_sam3d_environment,
     configure_offline_model_environment,
 )
-from .project_layout import SOURCE_LAYOUT
+from .project_layout import ProjectLayout, SOURCE_LAYOUT
 
 
 PROJECT_ROOT = SOURCE_LAYOUT.root
@@ -186,11 +186,11 @@ def require_unified_environment() -> None:
 
 
 def materials_file() -> Path:
-    return root_dir() / "materials.json"
+    return ProjectLayout.from_root(root_dir()).physics_materials
 
 
 def default_refine_config_path() -> Path:
-    return root_dir() / "configs" / "hunyuan_reduce_local_postprocess.yaml"
+    return ProjectLayout.from_root(root_dir()).default_refine_config
 
 
 def default_refine_temp_upload() -> str | None:

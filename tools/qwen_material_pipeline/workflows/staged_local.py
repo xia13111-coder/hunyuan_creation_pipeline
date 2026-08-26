@@ -4085,7 +4085,8 @@ def _qwen_inference_ledger(
             ):
                 raise ValueError(
                     "Qwen checkpoint has no regular checkpoint_identity.json; "
-                    "install the pinned model with scripts/setup_qwen35_runtime.sh"
+                    "install the pinned model with "
+                    "scripts/qwen35/setup_qwen35_runtime.sh"
                 )
             checkpoint_identity_path = checkpoint_identity_path.resolve(strict=True)
             try:

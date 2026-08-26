@@ -20,7 +20,7 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
-from ..scripts.build_part_id_sam3_request import _box
+from .part_id_request import _box
 from .hybrid_part_masks import (
     _best_model_domain_shape_agreement,
     _model_domain_shape_references,

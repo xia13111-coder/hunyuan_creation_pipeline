@@ -1,6 +1,6 @@
 # Repository Layout
 
-[English](./repository-layout.md) | [中文](./repository-layout.zh.md) | [Documentation index](./README.md)
+[English](./repository-layout.md) | [中文](./repository-layout.zh.md) | [Documentation index](../README.md)
 
 ## Top-level directories
 
@@ -12,7 +12,11 @@ asset_refiner/                  mesh-refinement package
 tools/{blender,isaac,sam3d}/    workers for external runtimes
 tools/qwen_material_pipeline/   material inference and USD tools
 configs/                        versioned configuration
-docs/                           user and developer documentation
+requirements/                   purpose-specific dependency overlays
+docs/{guides,development,release,modules}/
+                                user, developer, and release documentation
+legal/                          third-party license inventory
+.github/                        contribution, conduct, and security policies
 tests/                          main-pipeline tests
 apps/                           standalone web applications
 examples/                       example instructions and public metadata
@@ -23,6 +27,11 @@ docker/                         container files and instructions
 `asset_pipeline/project_layout.py` resolves repository paths. Other modules
 should use it instead of rebuilding paths to `tools/`, `configs/`, or
 `outputs/`.
+
+Root-level `LICENSE`, `NOTICE`, and `CITATION.cff` intentionally remain where
+packaging and hosting tools discover them. Repository-wide third-party notices
+live under `legal/`; licenses belonging to an independently built package or
+vendored dependency stay beside that code.
 
 ## Main material-package directories
 
@@ -41,7 +50,8 @@ tools/qwen_material_pipeline/
 ├── core/            shared data structures
 ├── configs/         package configuration
 ├── schemas/         JSON schemas
-├── web/             annotation and result viewers
+├── scripts/qwen35/  isolated Qwen3.5 runtime setup
+├── web/             annotation and result viewers, including their server
 ├── third_party/     vendored source with upstream licenses
 ├── models/          local weights; ignored by Git
 ├── var/             rebuildable indexes and caches; ignored by Git
@@ -59,6 +69,8 @@ repository root.
   generated results in the source release.
 - Keep Blender, Isaac Sim, and SAM3D workers under their matching `tools/`
   directory; workflow orchestration belongs in `asset_pipeline/`.
+- Keep production runtime workers at the top of each runtime directory and
+  group optional operators under `utilities/` or `diagnostics/`.
 - `apps/` may consume published results but must not be imported by
   `asset_pipeline`.
 - Remove caches only when they are reproducible. Review user inputs, evidence,

@@ -26,7 +26,7 @@ asset_pipeline/jobs/isaac.py
 ## Physics Materials
 
 `--material` explicitly selects a preset from
-[`materials.json`](../../materials.json). The code does not infer a physics
+[`configs/physics/materials.json`](../../configs/physics/materials.json). The code does not infer a physics
 material from prim names or visual appearance.
 
 | Field | Unit/type | Purpose |
@@ -40,7 +40,7 @@ material from prim names or visual appearance.
 The configuration contains general presets and more specific metals, polymers,
 elastomers, wood, glass, ceramic, and concrete. Treat them as simulation
 baselines; use measured values when the exact grade and contact pair are known.
-Read the current values from `materials.json` rather than copying them into
+Read the current values from `configs/physics/materials.json` rather than copying them into
 another configuration.
 
 ## Collision Approximation

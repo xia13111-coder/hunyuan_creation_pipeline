@@ -62,4 +62,4 @@ unrelated changes in separate pull requests.
 
 Unless explicitly stated otherwise, a contribution intentionally submitted to
 this project is provided under the Apache License 2.0, consistent with section
-5 of [LICENSE](./LICENSE). Third-party code must retain its own license.
+5 of [LICENSE](../LICENSE). Third-party code must retain its own license.

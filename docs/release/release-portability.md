@@ -1,6 +1,6 @@
 # Release and Portability
 
-[English](./release-portability.md) | [中文](./release-portability.zh.md) | [Documentation index](./README.md)
+[English](./release-portability.md) | [中文](./release-portability.zh.md) | [Documentation index](../README.md)
 
 The project should run from any checkout directory after local runtimes,
 models, credentials, and mounts are configured. Source files must not depend on
@@ -75,4 +75,4 @@ cd docker/offline-images
 sha256sum -c hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
 ```
 
-See [Docker Operations](../docker/README.md) for loading and validation.
+See [Docker Operations](../../docker/README.md) for loading and validation.

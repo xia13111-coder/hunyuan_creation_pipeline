@@ -36,7 +36,7 @@ use `run_manual_cad_workflow` and
 ## Command
 
 Create the SAM3 foreground annotation first as shown in the
-[Part-ID quick start](../manual-part-id-materials.md), then run:
+[Part-ID quick start](../guides/manual-part-id-materials.md), then run:
 
 ```bash
 hunyuan-asset-pipeline \
@@ -78,7 +78,7 @@ multiple files; reference-image assignment requires exactly one CAD asset.
 | `--visual-material-output-dir` | Material-analysis files and the USD after material assignment. |
 | `--acknowledge-mvinverse-noncommercial` | Confirm that the run complies with the MVInverse license. |
 | `--allow-policy-material-fallback` | Give unobserved or unresolved parts the configured default material. |
-| `--material` | Physics-material preset from `materials.json`. |
+| `--material` | Physics-material preset from `configs/physics/materials.json`. |
 | `--approx` | Collision approximation; `sdf` is recommended for complex dynamic CAD. |
 | `--manual-sdf-resolution` | Manual-CAD SDF resolution, default `32`. |
 | `--set-mass` | Total mass in kilograms; omit to estimate it from volume and density. |

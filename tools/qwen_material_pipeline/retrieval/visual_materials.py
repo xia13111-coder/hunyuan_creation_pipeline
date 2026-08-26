@@ -194,7 +194,7 @@ def _verify_pinned_siglip2_identity(model_path: Path) -> dict[str, Any]:
     if not identity_path.is_file() or identity_path.is_symlink():
         raise VisualRetrievalError(
             "SigLIP2 checkpoint has no regular checkpoint_identity.json; "
-            "install it with scripts/setup_qwen35_runtime.sh"
+            "install it with scripts/qwen35/setup_qwen35_runtime.sh"
         )
     identity = _read_json(identity_path, "SigLIP2 checkpoint identity")
     runtime_files = identity.get("runtime_files")

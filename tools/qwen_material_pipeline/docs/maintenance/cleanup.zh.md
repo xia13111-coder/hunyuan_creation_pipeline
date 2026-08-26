@@ -4,7 +4,7 @@
 Python 缓存、模型软链接或旧运行目录。
 
 本页说明自动材质子系统的细则；整个仓库的统一发布规范见
-[发布与可移植性](../../../../docs/release-portability.zh.md)。
+[发布与可移植性](../../../../docs/release/release-portability.zh.md)。
 
 ## 目录分类
 

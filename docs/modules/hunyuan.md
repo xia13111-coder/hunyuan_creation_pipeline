@@ -2,7 +2,8 @@
 
 [English](./hunyuan.md) | [中文](./hunyuan.zh.md) | [Documentation index](../README.md)
 
-For input and use-case differences from SAM3D, see [Choosing Between Hunyuan And SAM3D](../generation-guide.md).
+For input and use-case differences from SAM3D, see
+[Choosing Between Hunyuan And SAM3D](../guides/generation-guide.md).
 
 This module submits a local image or image URL to Tencent Hunyuan 3D, downloads a raw GLB, and hands it to the refine module. It does not implement ReduceFace, UVs, physics, or USD conversion.
 
@@ -39,7 +40,7 @@ hunyuan-asset-pipeline \
   --input-dir ./data \
   --output-dir ./outputs/hunyuan_example/generation \
   --face-count 150000 \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --intermediate-output-dir ./outputs/hunyuan_example/intermediate \
   --final-output-dir ./outputs/hunyuan_example/final \

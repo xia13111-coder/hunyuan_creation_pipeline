@@ -4,7 +4,7 @@
 
 SAM3D 从一张或多张图片重建指定物体，再把原始 GLB 交给 Hunyuan 精修、Blender
 后处理和 Isaac Sim 物理流程。选择生成方式前可先阅读
-[Hunyuan 与 SAM3D 的区别](../generation-guide.zh.md)。
+[Hunyuan 与 SAM3D 的区别](../guides/generation-guide.zh.md)。
 
 ## 流程
 
@@ -76,7 +76,7 @@ hunyuan-asset-pipeline \
   --intermediate-output-dir ./outputs/sam3d_example/intermediate \
   --final-output-dir ./outputs/sam3d_example/final \
   --result-json ./outputs/sam3d_example/pipeline_result.json \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --len-x 0.4 --len-y 0.3 --len-z 0.8 \
   --orientation "X=L,Y=M,Z=S" \
@@ -136,7 +136,7 @@ hunyuan-asset-pipeline \
   --sam3d-glb ./outputs/sam3d_example/generation/sam3d/sam3d_images/result.glb \
   --intermediate-output-dir ./outputs/sam3d_resume/intermediate \
   --final-output-dir ./outputs/sam3d_resume/final \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --len-x 0.4 --len-y 0.3 --len-z 0.8 \
   --orientation "X=L,Y=M,Z=S" \

@@ -422,7 +422,7 @@ class PipelineStructureTests(unittest.TestCase):
         )
 
     def test_materials_use_explicit_presets_only(self) -> None:
-        path = asset_pipeline.project_root() / "materials.json"
+        path = asset_pipeline.materials_file()
         materials = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(set(materials), {"materials"})
         self.assertIn("plastic", materials["materials"])

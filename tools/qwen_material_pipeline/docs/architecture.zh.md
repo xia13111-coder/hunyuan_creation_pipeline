@@ -162,7 +162,7 @@ Part-ID 仍保留独立绑定和选择记录。
 
 ```bash
 DELIVERY_DIR=./outputs/example/output_final \
-  tools/qwen_material_pipeline/scripts/serve_results.sh 8088
+  tools/qwen_material_pipeline/web/result_viewer/serve.sh 8088
 ```
 
 访问 `http://127.0.0.1:8088/result_viewer/`。该服务没有鉴权，只适合可信本机或内网。

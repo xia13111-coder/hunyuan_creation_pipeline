@@ -16,14 +16,19 @@ class PublicReleaseTests(unittest.TestCase):
             ".env.example",
             "CHANGELOG.md",
             "CITATION.cff",
-            "CODE_OF_CONDUCT.md",
-            "CONTRIBUTING.md",
+            ".github/CODE_OF_CONDUCT.md",
+            ".github/CONTRIBUTING.md",
             "LICENSE",
             "NOTICE",
             "README.md",
             "README.zh.md",
-            "SECURITY.md",
-            "THIRD_PARTY_NOTICES.md",
+            ".github/SECURITY.md",
+            "legal/README.md",
+            "legal/README.zh.md",
+            "legal/THIRD_PARTY_NOTICES.md",
+            "tools/qwen_material_pipeline/LICENSE",
+            "tools/qwen_material_pipeline/third_party/mvinverse/LICENSE",
+            "tools/qwen_material_pipeline/third_party/mvinverse/DINOV2_LICENSE",
         }
         missing = sorted(name for name in required if not (ROOT / name).is_file())
         self.assertEqual(missing, [])

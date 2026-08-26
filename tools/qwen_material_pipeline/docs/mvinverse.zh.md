@@ -49,7 +49,7 @@ MVInverse 与主流程共用 `hunyuan_sam3d` Conda 环境，但在独立子进�
 conda activate hunyuan_sam3d
 ```
 
-依赖由根目录的 `requirements-visual-materials.txt` 管理。不要另装上游推荐的 CUDA 11.8
+依赖由根目录的 `requirements/visual-materials.txt` 管理。不要另装上游推荐的 CUDA 11.8
 PyTorch，也不要用 Isaac Sim Python 运行 MVInverse。
 
 ## 4. 输入要求

@@ -1,6 +1,8 @@
 # 代码架构与调用关系
 
-[English](./architecture.md) | [中文](./architecture.zh.md) | [文档索引](./README.zh.md)
+[English](./architecture.md) | [中文](./architecture.zh.md) | [文档索引](../README.zh.md)
+
+![资产创建总体流程](../assets/diagrams/pipeline-flow.zh.svg)
 
 本页只说明模块职责和主要调用链。运行命令和调参方法请查看对应的流程文档。
 
@@ -107,8 +109,8 @@ workflows.run_process_model_job
 -> 交付检查
 ```
 
-精修细节见[网格精修](./modules/refine.zh.md)，Blender 和物理处理见
-[Blender](./modules/blender.zh.md)与[物理处理](./modules/physics.zh.md)。
+精修细节见[网格精修](../modules/refine.zh.md)，Blender 和物理处理见
+[Blender](../modules/blender.zh.md)与[物理处理](../modules/physics.zh.md)。
 
 ## STEP/STP 流程
 
@@ -129,7 +131,7 @@ manual_cad.run_manual_cad_workflow
 交付的 CAD 几何。
 
 该流程不接收 `len_x`、`len_y`、`len_z` 或 `orientation`。详细说明见
-[CAD](./modules/cad.zh.md)和[材质快速开始](./manual-part-id-materials.zh.md)。
+[CAD](../modules/cad.zh.md)和[材质快速开始](../guides/manual-part-id-materials.zh.md)。
 
 ## 视觉材质流程
 
@@ -199,7 +201,7 @@ visual_materials.run_final_visual_acceptance_job
   配置中的默认方案，确保所有 Mesh 都有材质。
 
 最终结果由 MDL 候选的实际渲染效果决定。选择结果生成后，后续阶段只校验并应用它，
-不会静默替换。具体阈值和调整规则见[视觉材质](./modules/visual-materials.zh.md)。
+不会静默替换。具体阈值和调整规则见[视觉材质](../modules/visual-materials.zh.md)。
 
 ## 运行时与断点继续
 

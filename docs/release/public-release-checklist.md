@@ -1,6 +1,6 @@
 # Public Release Checklist
 
-[English](./public-release-checklist.md) | [中文](./public-release-checklist.zh.md) | [Documentation index](./README.md)
+[English](./public-release-checklist.md) | [中文](./public-release-checklist.zh.md) | [Documentation index](../README.md)
 
 Use this checklist for each source release. Automated checks complement, but do
 not replace, a review of ownership, privacy, and license terms.
@@ -8,7 +8,7 @@ not replace, a review of ownership, privacy, and license terms.
 ## Content and licenses
 
 - Confirm that every first-party file may be released under Apache-2.0.
-- Include `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md`, and the licenses for
+- Include `LICENSE`, `NOTICE`, `legal/THIRD_PARTY_NOTICES.md`, and the licenses for
   redistributed third-party source.
 - Exclude model weights, NVIDIA assets, Isaac Sim files, Blender binaries, and
   generated results unless their licenses explicitly allow redistribution.

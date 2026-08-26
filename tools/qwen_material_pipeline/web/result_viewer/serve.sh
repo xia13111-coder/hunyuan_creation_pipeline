@@ -4,8 +4,8 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  serve_results.sh [PORT]
-  serve_results.sh --port PORT
+  serve.sh [PORT]
+  serve.sh --port PORT
 
 Serve the isolated tools/qwen_material_pipeline/web result site.
 
@@ -56,17 +56,11 @@ if (( port_number < 1 || port_number > 65535 )); then
 fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-pipeline_root="$(cd -- "$script_dir/.." && pwd)"
-source_web_root="$pipeline_root/web"
-viewer="$source_web_root/result_viewer/index.html"
-manifest_builder="$source_web_root/result_viewer/build_manifest.py"
+viewer="$script_dir/index.html"
+manifest_builder="$script_dir/build_manifest.py"
 : "${DELIVERY_DIR:?Set DELIVERY_DIR to a validated delivery directory}"
 delivery="$DELIVERY_DIR"
 
-if [[ ! -d "$source_web_root" ]]; then
-  echo "error: web directory does not exist: $source_web_root" >&2
-  exit 1
-fi
 if [[ ! -f "$viewer" ]]; then
   echo "error: result viewer does not exist: $viewer" >&2
   exit 1

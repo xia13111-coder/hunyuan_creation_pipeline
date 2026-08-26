@@ -34,7 +34,7 @@ starting point. Do not commit the populated file.
 Optional verified Qwen3.5/SigLIP2 setup:
 
 ```bash
-bash tools/qwen_material_pipeline/scripts/setup_qwen35_runtime.sh
+bash tools/qwen_material_pipeline/scripts/qwen35/setup_qwen35_runtime.sh
 ```
 
 SAM3, EntitySeg/CropFormer, MVInverse, DINOv2, NVIDIA materials, and the Base observation bank remain
@@ -98,7 +98,7 @@ Do not include local results, caches, models, or workspaces in a source release.
 
 ## Documentation and tests
 
-- [User command](../../docs/manual-part-id-materials.md)
+- [User command](../../docs/guides/manual-part-id-materials.md)
 - [Behavior and troubleshooting](../../docs/modules/visual-materials.md)
 - [Architecture (Chinese)](./docs/architecture.zh.md)
 - [MVInverse (Chinese)](./docs/mvinverse.zh.md)
@@ -111,5 +111,8 @@ PYTHONPATH=./tools python -m pytest -q -p no:cacheprovider \
 ## License
 
 First-party code uses [Apache License 2.0](./LICENSE). MVInverse remains
-non-commercial; models and NVIDIA assets retain separate terms. See
-[third-party notices](../../THIRD_PARTY_NOTICES.md).
+non-commercial; its [license](./third_party/mvinverse/LICENSE) and the bundled
+[DINOv2 license](./third_party/mvinverse/DINOV2_LICENSE) remain beside the
+vendored source and are included in package builds. Models and NVIDIA assets
+retain separate terms. See the repository-wide
+[third-party notices](../../legal/THIRD_PARTY_NOTICES.md).

@@ -1,6 +1,6 @@
 # Hunyuan 与 SAM3D 生成方式选择
 
-[English](./generation-guide.md) | [中文](./generation-guide.zh.md) | [文档索引](./README.zh.md)
+[English](./generation-guide.md) | [中文](./generation-guide.zh.md) | [文档索引](../README.zh.md)
 
 两条路径都会输出原始 GLB，之后通常继续执行 Hunyuan 精修、Blender 后处理和 Isaac Sim
 物理。区别在于初始几何的来源：
@@ -57,5 +57,5 @@ SAM3D 适合同一实物的多个互补视角，或需要从场景中指定一�
 但不能自动纠正错误的重建结构。用于仿真时，还应在最终 USD 中检查碰撞、质量、原点和
 运动表现。
 
-命令和参数见 [Hunyuan 模块](./modules/hunyuan.zh.md)和
-[SAM3D 模块](./modules/sam3d.zh.md)。
+命令和参数见 [Hunyuan 模块](../modules/hunyuan.zh.md)和
+[SAM3D 模块](../modules/sam3d.zh.md)。

@@ -88,6 +88,7 @@ part_id_reference_evidence.json
 part_id_material_plan.json
 ```
 
-See the [detailed workflow](./modules/visual-materials.md),
-[environment template](../.env.example), and
-[third-party notices](../THIRD_PARTY_NOTICES.md). MVInverse is non-commercial.
+See the [detailed workflow](../modules/visual-materials.md),
+[environment template](../../.env.example), and
+[third-party notices](../../legal/THIRD_PARTY_NOTICES.md). MVInverse is
+non-commercial.

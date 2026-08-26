@@ -1,6 +1,6 @@
 # Choosing Between Hunyuan and SAM3D
 
-[English](./generation-guide.md) | [中文](./generation-guide.zh.md) | [Documentation index](./README.md)
+[English](./generation-guide.md) | [中文](./generation-guide.zh.md) | [Documentation index](../README.md)
 
 Both paths create a raw GLB, then normally continue through Hunyuan refine,
 Blender postprocess, and Isaac Sim physics. The difference is how the initial
@@ -64,5 +64,5 @@ can simplify geometry and transfer appearance, but it cannot correct a wrong
 reconstruction automatically. For simulation assets, also verify collision,
 mass, origin, and physical behavior in the final USD.
 
-Commands and parameters: [Hunyuan module](./modules/hunyuan.md) and
-[SAM3D module](./modules/sam3d.md).
+Commands and parameters: [Hunyuan module](../modules/hunyuan.md) and
+[SAM3D module](../modules/sam3d.md).

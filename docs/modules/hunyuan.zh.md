@@ -2,7 +2,8 @@
 
 [English](./hunyuan.md) | [中文](./hunyuan.zh.md) | [文档索引](../README.zh.md)
 
-与 SAM3D 的输入和适用场景区别见 [Hunyuan 与 SAM3D 生成方式选择](../generation-guide.zh.md)。
+与 SAM3D 的输入和适用场景区别见
+[Hunyuan 与 SAM3D 生成方式选择](../guides/generation-guide.zh.md)。
 
 该模块把本地图片或图片 URL 提交给 Tencent Hunyuan 3D，下载原始 GLB，再交给
 网格精修模块。它不负责 ReduceFace、UV、物理或 USD 转换。
@@ -39,7 +40,7 @@ hunyuan-asset-pipeline \
   --input-dir ./data \
   --output-dir ./outputs/hunyuan_example/generation \
   --face-count 150000 \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --intermediate-output-dir ./outputs/hunyuan_example/intermediate \
   --final-output-dir ./outputs/hunyuan_example/final \

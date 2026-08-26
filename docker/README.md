@@ -226,7 +226,7 @@ Existing GLB:
 ```bash
 docker exec hunyuan-pipeline-601 python run_asset_pipeline.py \
   --existing-glb /workspace/assets/input/model.glb \
-  --refine-config-path configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --intermediate-output-dir /workspace/assets/glb/intermediate \
   --final-output-dir /workspace/assets/glb/final \
   --result-json /workspace/assets/glb/result.json \
@@ -255,7 +255,7 @@ docker exec hunyuan-pipeline-601 python run_asset_pipeline.py \
   --sam3d-input /workspace/assets/input/sam3d_images \
   --sam3d-mode auto --sam3d-prompt "storage shelves" \
   --output-dir /workspace/assets/sam3d/work \
-  --refine-config-path configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --intermediate-output-dir /workspace/assets/sam3d/intermediate \
   --final-output-dir /workspace/assets/sam3d/final \
   --result-json /workspace/assets/sam3d/result.json \

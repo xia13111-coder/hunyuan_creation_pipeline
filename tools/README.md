@@ -29,9 +29,21 @@ Main Isaac tools:
 ```text
 tools/isaac/convert_cad_to_usd.py  STEP/STP -> USD through the Omniverse CAD converter
 tools/isaac/add_physics.py         Unit normalization, CAD geometry cleanup, collision, mass, materials
-tools/isaac/apply_uniform_mdl.py    Uniform visual MDL binding that preserves existing physics data
 tools/isaac/collect_usd_flat.py    Final USD/material/texture collection
 tools/isaac/isaac_sim_compat.py    Isaac Sim 5/6 SimulationApp import compatibility
+```
+
+Optional one-off operators are grouped below the runtime they require:
+
+```text
+tools/blender/utilities/create_hunyuan_upload_proxy.py
+                               geometry-only proxy creation
+tools/blender/diagnostics/render_topology_views.py
+                               inspection and diagnostic renders
+tools/isaac/utilities/apply_uniform_mdl.py
+                               standalone uniform MDL binding
+tools/isaac/utilities/group_meshes_as_compound.py
+                               standalone compound-body authoring
 ```
 
 The CAD path is:
@@ -50,7 +62,7 @@ the package responsible for them.
 material package. Run it through an editable install or with `PYTHONPATH=./tools`;
 saved evidence uses relative, hash-checked references instead of host paths. See
 the
-[release and portability rules](../docs/release-portability.md).
+[release and portability rules](../docs/release/release-portability.md).
 
 For interactive use, install both first-party packages in editable mode once:
 

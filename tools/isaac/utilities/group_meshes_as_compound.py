@@ -7,7 +7,7 @@ transform, collider ownership, relationship, and mass-conservation checks pass.
 Run this with a Python environment that provides Pixar USD, for example:
 
     "$ISAACSIM_ROOT/python.sh" \
-      tools/isaac/group_meshes_as_compound.py \
+      tools/isaac/utilities/group_meshes_as_compound.py \
       --input asset.usd --output asset_grouped.usd \
       --mesh /World/PartA/Mesh \
       --mesh /World/PartB/Mesh \

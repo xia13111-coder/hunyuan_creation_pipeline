@@ -4,7 +4,7 @@
 
 SAM3D reconstructs a selected object from one or more images, then sends the
 raw GLB through Hunyuan refine, Blender postprocess, and Isaac Sim physics. See
-[Choosing between Hunyuan and SAM3D](../generation-guide.md) before selecting a
+[Choosing between Hunyuan and SAM3D](../guides/generation-guide.md) before selecting a
 generation path.
 
 ## Flow
@@ -82,7 +82,7 @@ hunyuan-asset-pipeline \
   --intermediate-output-dir ./outputs/sam3d_example/intermediate \
   --final-output-dir ./outputs/sam3d_example/final \
   --result-json ./outputs/sam3d_example/pipeline_result.json \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --len-x 0.4 --len-y 0.3 --len-z 0.8 \
   --orientation "X=L,Y=M,Z=S" \
@@ -145,7 +145,7 @@ hunyuan-asset-pipeline \
   --sam3d-glb ./outputs/sam3d_example/generation/sam3d/sam3d_images/result.glb \
   --intermediate-output-dir ./outputs/sam3d_resume/intermediate \
   --final-output-dir ./outputs/sam3d_resume/final \
-  --refine-config-path ./configs/hunyuan_reduce_local_postprocess.yaml \
+  --refine-config-path ./configs/refinement/hunyuan_reduce_local_postprocess.yaml \
   --refine-temp-upload uguu \
   --len-x 0.4 --len-y 0.3 --len-z 0.8 \
   --orientation "X=L,Y=M,Z=S" \

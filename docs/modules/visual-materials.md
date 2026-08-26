@@ -1,6 +1,6 @@
 # Reference-image materials for STEP/STP
 
-[English](./visual-materials.md) | [中文](./visual-materials.zh.md) | [Quick start](../manual-part-id-materials.md)
+[English](./visual-materials.md) | [中文](./visual-materials.zh.md) | [Quick start](../guides/manual-part-id-materials.md)
 
 This workflow assigns NVIDIA Base MDLs to a hand-authored STEP/STP assembly
 from 2–4 photographs. CAD continues to define geometry, hierarchy,
@@ -79,7 +79,8 @@ fusion sequence. Keeping that sequence out of `orchestrator.py` gives it one
 testable owner without changing any artifact path or stage name.
 `tools/qwen_material_pipeline/` provides segmentation, evidence extraction,
 retrieval, model calls, and USD workers. Isaac Sim handles CAD/USD, MDL
-rendering, physics, and final validation. See [Architecture](../architecture.md).
+rendering, physics, and final validation. See
+[Architecture](../development/architecture.md).
 
 ## How evidence is built
 
@@ -274,4 +275,4 @@ Further reading:
 - [Base observation bank (Chinese)](../../tools/qwen_material_pipeline/docs/base_material_observation_bank.zh.md)
 
 MVInverse is non-commercial. NVIDIA assets and Isaac Sim components have their
-own terms; see [Third-party notices](../../THIRD_PARTY_NOTICES.md).
+own terms; see [Third-party notices](../../legal/THIRD_PARTY_NOTICES.md).

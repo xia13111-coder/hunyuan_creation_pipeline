@@ -6,4 +6,4 @@ in `../var/runs/` until all delivery checks pass.
 
 Generated releases must use relative USD/JSON references and must not be
 committed with machine-local paths. View a validated local release by setting
-`DELIVERY_DIR` when running `../scripts/serve_results.sh`.
+`DELIVERY_DIR` when running `../web/result_viewer/serve.sh`.

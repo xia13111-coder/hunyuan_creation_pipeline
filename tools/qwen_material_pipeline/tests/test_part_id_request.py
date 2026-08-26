@@ -5,7 +5,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from qwen_material_pipeline.scripts.build_part_id_sam3_request import (
+from qwen_material_pipeline.segmentation.part_id_request import (
     _box,
     _sha256,
     build_request,

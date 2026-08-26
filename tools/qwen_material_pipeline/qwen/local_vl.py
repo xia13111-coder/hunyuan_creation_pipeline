@@ -758,7 +758,7 @@ class TransformersQwen3VLRunner:
                     "Local Qwen3.5 requires a newer Transformers build exposing "
                     f"{_QWEN35_MODEL_CLASS}; found transformers=="
                     f"{transformers_version}. Install the pinned isolated runtime "
-                    "with scripts/setup_qwen35_runtime.sh. "
+                    "with scripts/qwen35/setup_qwen35_runtime.sh. "
                     "Remote code and network fallback are intentionally disabled."
                 ) from exc
 

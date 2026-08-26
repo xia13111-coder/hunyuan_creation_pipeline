@@ -8,7 +8,7 @@ that cannot define a reliable closed volume.
 Example:
     "$ISAAC_PYTHON" ./tools/isaac/add_physics.py \
       --folder ./downloads_refined_mesh/postprocess_glbs \
-      --material-file ./materials.json \
+      --material-file ./configs/physics/materials.json \
       --out-dir ./output_intermediate \
       --headless \
       --material plastic \
@@ -144,7 +144,7 @@ def load_materials(path):
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if "materials" not in data or not isinstance(data["materials"], dict):
-        raise ValueError("materials.json 缺少根键 'materials' 或其类型不是对象")
+        raise ValueError(f"{path} 缺少根键 'materials' 或其类型不是对象")
     return data
 
 
@@ -1248,7 +1248,9 @@ def match_params(prim):
         preset = get_preset(chosen)
         if not preset:
             log(
-                f"[WARN] --material '{args.material}' 不在 materials.json 中；可用标签：{list(MATERIAL_PRESETS.keys())}"
+                f"[WARN] --material '{args.material}' 不在 "
+                f"{args.material_file} 中；可用标签："
+                f"{list(MATERIAL_PRESETS.keys())}"
             )
         else:
             for k in ("density", "friction", "restitution", "combine", "dyn_ratio"):

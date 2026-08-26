@@ -20,6 +20,13 @@ versioning for published CLI behavior and schemas where practical.
 
 ### Changed
 
+- Repository support files are now grouped by ownership: community policies in
+  `.github/`, third-party notices in `legal/`, subsystem configuration in
+  `configs/`, dependency overlays in `requirements/`, and detailed documents
+  under `docs/{guides,development,release}/`.
+- Part-ID request construction now lives with segmentation code; Qwen3.5 setup,
+  result-viewer serving, and optional Blender/Isaac operators are grouped with
+  their owning runtime instead of the generic scripts directory.
 - The dedicated STEP/STP material CLI fully validates human foreground
   annotation, image, decoded-pixel, mask, and document hashes before starting.
 - The canonical new-workpiece CLI exposes `live` and exact `bundled` modes;
