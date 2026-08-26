@@ -69,7 +69,7 @@ pipeline-owned compatibility layer into that environment (not into
 
 ```bash
 "$ENTITYSEG_PYTHON" -m pip install \
-  -r tools/qwen_material_pipeline/requirements-entityseg.txt
+  -r tools/qwen_material_pipeline/requirements/entityseg.txt
 PYTHONNOUSERSITE=1 "$ENTITYSEG_PYTHON" -c \
   'import black, cloudpickle, mmcv, yapf'
 ```
@@ -246,8 +246,7 @@ Key references:
 
 ```bash
 python -m pytest -q -p no:cacheprovider tests
-PYTHONPATH=./tools python -m pytest -q -p no:cacheprovider \
-  tools/qwen_material_pipeline/tests
+python -m pytest -q -p no:cacheprovider tools/qwen_material_pipeline/tests
 python ./tools/release/check_public_tree.py
 ```
 

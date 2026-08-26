@@ -220,8 +220,7 @@ outputs/                        生成结果
 
 ```bash
 python -m pytest -q -p no:cacheprovider tests
-PYTHONPATH=./tools python -m pytest -q -p no:cacheprovider \
-  tools/qwen_material_pipeline/tests
+python -m pytest -q -p no:cacheprovider tools/qwen_material_pipeline/tests
 python ./tools/release/check_public_tree.py
 ```
 

@@ -37,8 +37,7 @@
 python ./tools/release/check_public_tree.py
 git diff --check
 python -m pytest -q -p no:cacheprovider tests
-PYTHONPATH=./tools python -m pytest -q -p no:cacheprovider \
-  tools/qwen_material_pipeline/tests
+python -m pytest -q -p no:cacheprovider tools/qwen_material_pipeline/tests
 ```
 
 记录跳过的集成测试及缺少的运行时或模型。发布二进制或容器时，还应在最终交付物中执行

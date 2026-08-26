@@ -186,7 +186,7 @@ component; it does not contain asset-specific exceptions.
   again. A failed check stops the pipeline and reports the corresponding stage.
 
 The default configuration is
-`tools/qwen_material_pipeline/configs/pipeline/manual_part_id_materials.json`.
+`tools/qwen_material_pipeline/src/qwen_material_pipeline/configs/pipeline/manual_part_id_materials.json`.
 It searches only NVIDIA `Materials/Base` and makes decisions independently per
 CAD Part-ID.
 
@@ -221,7 +221,7 @@ pipeline compatibility layer into the same interpreter:
 
 ```bash
 "$ENTITYSEG_PYTHON" -m pip install \
-  -r tools/qwen_material_pipeline/requirements-entityseg.txt
+  -r tools/qwen_material_pipeline/requirements/entityseg.txt
 PYTHONNOUSERSITE=1 "$ENTITYSEG_PYTHON" -c \
   'import black, cloudpickle, mmcv, yapf'
 ```

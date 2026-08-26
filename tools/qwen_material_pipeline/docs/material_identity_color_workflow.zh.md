@@ -113,7 +113,7 @@ apply report、rendered registry 与四视图报告逐一按路径和 SHA256 复
 运行：
 
 ```bash
-PYTHONPATH=tools python -m qwen_material_pipeline \
+python -m qwen_material_pipeline \
   run-corresponding-material-color-workflow \
   --source-plan RUN/part_id_material_plan.identity.json \
   --qwen-choices RUN/part_id_qwen_choices.json \

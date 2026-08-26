@@ -59,7 +59,8 @@ Keep package-internal workers, such as `asset_refiner/blender_worker.py`, inside
 the package responsible for them.
 
 `tools/qwen_material_pipeline` is the only source location for the automatic
-material package. Run it through an editable install or with `PYTHONPATH=./tools`;
+material package. Run it through an editable install or with
+`PYTHONPATH=./tools/qwen_material_pipeline/src`;
 saved evidence uses relative, hash-checked references instead of host paths. See
 the
 [release and portability rules](../docs/release/release-portability.md).

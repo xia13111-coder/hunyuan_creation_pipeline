@@ -1437,8 +1437,8 @@ class VisualMaterialBridgeTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            quality = destination / "visual_quality" / (
-                "reference_render_comparison.json"
+            quality = (
+                destination / "visual_quality" / ("reference_render_comparison.json")
             )
             quality.parent.mkdir()
             quality.write_text(
@@ -1789,6 +1789,8 @@ class VisualMaterialBridgeTests(unittest.TestCase):
         production_config = (
             Path(__file__).resolve().parents[1]
             / "tools"
+            / "qwen_material_pipeline"
+            / "src"
             / "qwen_material_pipeline"
             / "configs"
             / "pipeline"

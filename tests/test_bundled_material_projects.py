@@ -26,6 +26,12 @@ from qwen_material_pipeline.usd.registry import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[1]
+DTN100_PROJECT_DIR = (
+    ROOT / "tools" / "qwen_material_pipeline" / "runtime" / "projects" / "dtn100"
+)
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -70,8 +76,8 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
     mdl_path = material_root / "Base" / "Fixture.mdl"
     mdl_path.parent.mkdir(parents=True)
     mdl_path.write_text(
-        'mdl 1.0;\nexport material Fixture() = material();\n'
-        'export texture_2d FixtureTexture() = '
+        "mdl 1.0;\nexport material Fixture() = material();\n"
+        "export texture_2d FixtureTexture() = "
         'texture_2d("./Fixture/fixture.png");\n',
         encoding="utf-8",
     )
@@ -100,9 +106,7 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
             }
         ],
     }
-    (project_dir / "catalog.json").write_text(
-        json.dumps(catalog), encoding="utf-8"
-    )
+    (project_dir / "catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
     dependency_lock = {
         "schema_version": "qwen-sealed-material-dependency-lock/v1",
         "asset_id": "fixture",
@@ -128,9 +132,7 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         "isaac_helper_modules": [
             {
                 "module_name": "::Helper",
-                "relative_to_isaac_root": (
-                    "kit/mdl/core/Base/Helper.mdl"
-                ),
+                "relative_to_isaac_root": ("kit/mdl/core/Base/Helper.mdl"),
                 "sha256": _sha256(helper_path),
             }
         ],
@@ -154,9 +156,7 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         },
     }
     dependency_lock_path = project_dir / "dependency_lock.json"
-    dependency_lock_path.write_text(
-        json.dumps(dependency_lock), encoding="utf-8"
-    )
+    dependency_lock_path.write_text(json.dumps(dependency_lock), encoding="utf-8")
     occurrence_registry = {
         "part_count": 2,
         "parts": [
@@ -275,12 +275,10 @@ def _planner_fixture(tmp_path: Path) -> dict[str, Path]:
         "subset_prim_path": f"{prim_path}/painted_faces",
         "visual_material_prim_path": "/Assembly/Looks/Original",
     }
-    subset_record[SOURCE_SUBSET_HASH_FIELD] = (
-        source_material_bind_subset_sha256(
-            part_id="P0001",
-            prim_path=prim_path,
-            subset_record=subset_record,
-        )
+    subset_record[SOURCE_SUBSET_HASH_FIELD] = source_material_bind_subset_sha256(
+        part_id="P0001",
+        prim_path=prim_path,
+        subset_record=subset_record,
     )
     registry = {
         "asset_usd": str(source_usd),
@@ -322,9 +320,7 @@ def _planner_fixture(tmp_path: Path) -> dict[str, Path]:
                         "subset_name": "painted_faces",
                         "profile": "detail",
                         "index_count": 2,
-                        "indices_sha256": hashlib.sha256(
-                            b"[1,2]"
-                        ).hexdigest(),
+                        "indices_sha256": hashlib.sha256(b"[1,2]").hexdigest(),
                     }
                 ],
             }
@@ -393,9 +389,7 @@ def test_exact_identity_selects_bundled_project(tmp_path: Path) -> None:
             "cover every reference role exactly",
         ),
         (
-            lambda contract: contract["view_mapping"].update(
-                {"ref-3": "top"}
-            ),
+            lambda contract: contract["view_mapping"].update({"ref-3": "top"}),
             "one-to-one",
         ),
         (
@@ -433,9 +427,7 @@ def test_bundled_project_rejects_acceptance_view_preset(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
     project_path = fixture["project_file"]
     project = json.loads(project_path.read_text(encoding="utf-8"))
-    project["acceptance"]["render"]["views"] = (
-        "right,front,top,pose-bank-74"
-    )
+    project["acceptance"]["render"]["views"] = "right,front,top,pose-bank-74"
     project_path.write_text(json.dumps(project), encoding="utf-8")
 
     with pytest.raises(ValueError, match="explicit supported poses"):
@@ -599,20 +591,10 @@ def test_deinstanced_596_mesh_manual_source_matches_exact_topology_contract(
 
 def test_dtn100_manifest_path_topology_contract_matches_sealed_template() -> None:
     _require_dtn100_bundle()
-    project_dir = (
-        Path(__file__).resolve().parents[1]
-        / "tools"
-        / "qwen_material_pipeline"
-        / "projects"
-        / "dtn100"
-    )
-    project = json.loads(
-        (project_dir / "project.json").read_text(encoding="utf-8")
-    )
+    project_dir = DTN100_PROJECT_DIR
+    project = json.loads((project_dir / "project.json").read_text(encoding="utf-8"))
     template = json.loads(
-        (project_dir / "v1_material_template.json").read_text(
-            encoding="utf-8"
-        )
+        (project_dir / "v1_material_template.json").read_text(encoding="utf-8")
     )
     expected = project["expected_assembly"]
     assignments = template["assignments"]
@@ -621,9 +603,7 @@ def test_dtn100_manifest_path_topology_contract_matches_sealed_template() -> Non
     assert project["acceptance"] == {
         "render": {
             "resolution": 512,
-            "views": (
-                "right,front,pose_a090_e082_toproll,pose_a135_e015"
-            ),
+            "views": ("right,front,pose_a090_e082_toproll,pose_a135_e015"),
             "rt_subframes": 4,
             "lighting_profile": "material-neutral",
             "analysis_up_axis": "z",
@@ -640,10 +620,7 @@ def test_dtn100_manifest_path_topology_contract_matches_sealed_template() -> Non
     assert len(assignments) == expected["mesh_occurrences"] == 596
     assert sum(item["point_count"] for item in assignments) == 504_669
     assert sum(item["face_count"] for item in assignments) == 546_262
-    assert (
-        _topology_sha256(assignments)
-        == expected["occurrence_path_topology_sha256"]
-    )
+    assert _topology_sha256(assignments) == expected["occurrence_path_topology_sha256"]
     assert {
         (item["instance_root_count"], item["topology_role"])
         for item in expected["source_registry_contracts"]
@@ -652,36 +629,21 @@ def test_dtn100_manifest_path_topology_contract_matches_sealed_template() -> Non
 
 def test_dtn100_sealed_profiles_match_public_v18_library_default_lock() -> None:
     _require_dtn100_bundle()
-    root = Path(__file__).resolve().parents[1]
-    project_dir = (
-        root / "tools" / "qwen_material_pipeline" / "projects" / "dtn100"
-    )
-    project = json.loads(
-        (project_dir / "project.json").read_text(encoding="utf-8")
-    )
+    root = ROOT
+    project_dir = DTN100_PROJECT_DIR
+    project = json.loads((project_dir / "project.json").read_text(encoding="utf-8"))
     template_path = project_dir / project["template"]
     catalog_path = project_dir / project["catalog"]
     dependency_lock_path = project_dir / project["dependency_lock"]
     template = json.loads(template_path.read_text(encoding="utf-8"))
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-    dependency_lock = json.loads(
-        dependency_lock_path.read_text(encoding="utf-8")
-    )
+    dependency_lock = json.loads(dependency_lock_path.read_text(encoding="utf-8"))
     public_summary_path = (
-        root
-        / "apps"
-        / "material_audit_web"
-        / "public"
-        / "data"
-        / "run-summary.json"
+        root / "apps" / "material_audit_web" / "public" / "data" / "run-summary.json"
     )
-    public_summary = json.loads(
-        public_summary_path.read_text(encoding="utf-8")
-    )
+    public_summary = json.loads(public_summary_path.read_text(encoding="utf-8"))
     reference_paths_by_role = {
-        item["role"]: (
-            root / "examples" / "dtn100" / "references" / item["basename"]
-        )
+        item["role"]: (root / "examples" / "dtn100" / "references" / item["basename"])
         for item in project["references"]
     }
     if not all(path.is_file() for path in reference_paths_by_role.values()):
@@ -707,26 +669,26 @@ def test_dtn100_sealed_profiles_match_public_v18_library_default_lock() -> None:
         }
     )
     catalog_ids = {item["material_id"] for item in catalog["materials"]}
-    locked_ids = {
-        item["material_id"] for item in dependency_lock["selected_materials"]
-    }
+    locked_ids = {item["material_id"] for item in dependency_lock["selected_materials"]}
 
     assert project["evidence"]["method"] == (
         "sealed_dtn100_v18_library_default_mdl_result"
     )
-    assert project["evidence"]["public_audit_sha256"] == _sha256(
-        public_summary_path
-    )
+    assert project["evidence"]["public_audit_sha256"] == _sha256(public_summary_path)
     assert project["template_sha256"] == _sha256(template_path)
     assert project["catalog_sha256"] == _sha256(catalog_path)
     assert project["dependency_lock_sha256"] == _sha256(dependency_lock_path)
     assert acceptance_evidence is not None
-    assert acceptance_evidence["manifest_sha256"] == project[
-        "acceptance_evidence"
-    ]["sha256"]
-    assert [
-        view["id"] for view in acceptance_evidence["source_views"]
-    ] == ["front", "side", "top", "iso"]
+    assert (
+        acceptance_evidence["manifest_sha256"]
+        == project["acceptance_evidence"]["sha256"]
+    )
+    assert [view["id"] for view in acceptance_evidence["source_views"]] == [
+        "front",
+        "side",
+        "top",
+        "iso",
+    ]
     assert restored_counts == public_counts
     assert len(restored_counts) == len(catalog_ids) == len(locked_ids) == 13
     assert catalog_ids == locked_ids == set(restored_counts)
@@ -744,12 +706,17 @@ def test_current_v17_artifacts_match_sealed_project_and_dependencies() -> None:
     _require_dtn100_bundle()
     root = Path(__file__).resolve().parents[1]
     visual_dir = (
-        root / "outputs" / "manual" / "dtn100_unattended_v17"
-        / "visual_material"
+        root / "outputs" / "manual" / "dtn100_unattended_v17" / "visual_material"
     )
     material_root = (
-        Path.home() / "isaacsim_assets" / "Assets" / "Isaac" / "4.5"
-        / "NVIDIA" / "Materials" / "Base"
+        Path.home()
+        / "isaacsim_assets"
+        / "Assets"
+        / "Isaac"
+        / "4.5"
+        / "NVIDIA"
+        / "Materials"
+        / "Base"
     )
     isaac_root = Path.home() / "isaacsim500"
     required = [
@@ -813,9 +780,7 @@ def test_deinstanced_source_does_not_bypass_path_bound_topology(
     source_registry = {
         "instance_root_count": 0,
         "part_count": occurrence_registry["part_count"],
-        "parts": [
-            dict(item) for item in occurrence_registry["parts"]
-        ],
+        "parts": [dict(item) for item in occurrence_registry["parts"]],
     }
     # Preserve every aggregate count while changing one occurrence identity.
     source_registry["parts"][0]["prim_path"] = "/Assembly/Replaced/Mesh"
@@ -838,9 +803,7 @@ def test_occurrence_path_change_fails_even_when_aggregate_counts_match(
     fixture = _fixture(tmp_path)
     occurrence_registry = {
         "part_count": fixture["occurrence_registry"]["part_count"],
-        "parts": [
-            dict(item) for item in fixture["occurrence_registry"]["parts"]
-        ],
+        "parts": [dict(item) for item in fixture["occurrence_registry"]["parts"]],
     }
     occurrence_registry["parts"][0]["prim_path"] = "/Assembly/Replaced/Mesh"
 
@@ -936,9 +899,7 @@ def test_bundled_apply_command_matches_source_representation(
     assert expected_source_argument in command
     assert command[command.index(expected_source_argument) + 1] == str(source)
     rejected_argument = (
-        "--source-usd"
-        if expected_source_argument == "--asset-usd"
-        else "--asset-usd"
+        "--source-usd" if expected_source_argument == "--asset-usd" else "--asset-usd"
     )
     assert rejected_argument not in command
 
@@ -977,9 +938,7 @@ def test_bundled_planner_rejects_tampered_registry_subset_evidence(
     _require_dtn100_bundle()
     fixture = _planner_fixture(tmp_path)
     registry = json.loads(fixture["registry"].read_text(encoding="utf-8"))
-    registry["parts"][0][SOURCE_MATERIAL_BIND_SUBSETS_FIELD][0][
-        "face_indices"
-    ] = [0, 2]
+    registry["parts"][0][SOURCE_MATERIAL_BIND_SUBSETS_FIELD][0]["face_indices"] = [0, 2]
     fixture["registry"].write_text(json.dumps(registry), encoding="utf-8")
 
     with pytest.raises(RuntimeError, match="invalid source subset hash"):

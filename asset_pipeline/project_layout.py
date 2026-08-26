@@ -73,8 +73,32 @@ class ProjectLayout:
         return self.tools / "qwen_material_pipeline"
 
     @property
+    def material_source(self) -> Path:
+        return self.material_pipeline / "src"
+
+    @property
+    def material_package(self) -> Path:
+        return self.material_source / "qwen_material_pipeline"
+
+    @property
+    def material_runtime(self) -> Path:
+        return self.material_pipeline / "runtime"
+
+    @property
+    def material_models(self) -> Path:
+        return self.material_runtime / "models"
+
+    @property
+    def material_cache(self) -> Path:
+        return self.material_runtime / "cache"
+
+    @property
+    def material_third_party(self) -> Path:
+        return self.material_pipeline / "third_party"
+
+    @property
     def material_configs(self) -> Path:
-        return self.material_pipeline / "configs"
+        return self.material_package / "configs"
 
     @property
     def manual_part_id_material_config(self) -> Path:
@@ -82,17 +106,17 @@ class ProjectLayout:
 
     @property
     def material_projects(self) -> Path:
-        return self.material_pipeline / "projects"
+        return self.material_runtime / "projects"
 
     @property
     def material_pythonpath(self) -> Path:
         """Directory placed on PYTHONPATH for ``qwen_material_pipeline``."""
 
-        return self.tools
+        return self.material_source
 
     @property
     def material_retrieval_script(self) -> Path:
-        return self.material_pipeline / "retrieval" / "visual_materials.py"
+        return self.material_package / "retrieval" / "visual_materials.py"
 
     @property
     def sam3d_tools(self) -> Path:

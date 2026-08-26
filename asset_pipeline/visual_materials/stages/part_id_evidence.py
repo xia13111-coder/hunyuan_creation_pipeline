@@ -56,7 +56,7 @@ def _sam3_region_command(
     output_dir: Path,
 ) -> list[str]:
     script = (
-        ProjectLayout.from_root(root_dir()).material_pipeline
+        ProjectLayout.from_root(root_dir()).material_package
         / "segmentation"
         / "sam3_regions.py"
     )

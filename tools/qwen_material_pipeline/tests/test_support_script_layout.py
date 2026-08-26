@@ -36,7 +36,14 @@ def test_qwen35_smoke_script_resolves_package_from_any_working_directory(
 def test_result_viewer_server_resolves_sibling_assets_from_any_working_directory(
     tmp_path: Path,
 ) -> None:
-    script = PACKAGE_ROOT / "web" / "result_viewer" / "serve.sh"
+    script = (
+        PACKAGE_ROOT
+        / "src"
+        / "qwen_material_pipeline"
+        / "web"
+        / "result_viewer"
+        / "serve.sh"
+    )
     completed = subprocess.run(
         ["bash", str(script), "--help"],
         cwd=tmp_path,

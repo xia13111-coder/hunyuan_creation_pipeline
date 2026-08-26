@@ -230,7 +230,12 @@ class PipelineStructureTests(unittest.TestCase):
             project / "asset_pipeline" / "visual_materials" / "orchestrator.py"
         ).read_text(encoding="utf-8")
         material_cli = (
-            project / "tools" / "qwen_material_pipeline" / "__main__.py"
+            project
+            / "tools"
+            / "qwen_material_pipeline"
+            / "src"
+            / "qwen_material_pipeline"
+            / "__main__.py"
         ).read_text(encoding="utf-8")
         command_builders = (
             project / "asset_pipeline" / "visual_materials" / "commands.py"
@@ -242,6 +247,7 @@ class PipelineStructureTests(unittest.TestCase):
             project
             / "tools"
             / "qwen_material_pipeline"
+            / "runtime"
             / "projects"
             / "dtn100"
             / "project.json"
@@ -253,7 +259,13 @@ class PipelineStructureTests(unittest.TestCase):
             self.assertTrue(manifest["source_cad"]["sha256"])
         else:
             self.assertTrue(
-                (project_manifest.parents[1] / "README.md").is_file(),
+                (
+                    project
+                    / "tools"
+                    / "qwen_material_pipeline"
+                    / "runtime"
+                    / "README.md"
+                ).is_file(),
                 "source releases must document how private sealed projects are added",
             )
         material_inference = (
@@ -1195,9 +1207,7 @@ class PipelineStructureTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         tree = ast.parse(source)
         functions = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef)
+            node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
         }
         entry = functions["run_assign_visual_materials_job"]
         stage_names = {

@@ -14,9 +14,9 @@ from pathlib import Path
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
-TOOLS_DIR = Path(__file__).resolve().parents[3]
-if str(TOOLS_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOLS_DIR))
+SOURCE_ROOT = Path(__file__).resolve().parents[2] / "src"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
 
 from qwen_material_pipeline.qwen.local_vl import (  # noqa: E402
     TransformersQwen3VLRunner,

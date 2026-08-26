@@ -52,14 +52,9 @@ manual_pipeline_result*.json
 /annotations/
 
 # Material-pipeline local runtimes, model weights, caches and results.
-/tools/qwen_material_pipeline/models/
-/tools/qwen_material_pipeline/var/*
-!/tools/qwen_material_pipeline/var/.gitkeep
-/tools/qwen_material_pipeline/workspace/*
-!/tools/qwen_material_pipeline/workspace/.gitkeep
-/tools/qwen_material_pipeline/results/*
-!/tools/qwen_material_pipeline/results/README.md
-/tools/qwen_material_pipeline/projects/dtn100/
+/tools/qwen_material_pipeline/.venv/
+/tools/qwen_material_pipeline/runtime/*
+!/tools/qwen_material_pipeline/runtime/README.md
 
 # Local third-party SAM3D checkouts and model weights.
 /tools/sam3d/third_party/

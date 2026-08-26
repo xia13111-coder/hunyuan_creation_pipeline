@@ -39,24 +39,29 @@ This is a functional overview, not an exhaustive directory listing.
 
 ```text
 tools/qwen_material_pipeline/
-├── workflows/       command workflows
-├── evidence/        camera, Part-ID, color, PBR, and QA measurements
-├── retrieval/       SigLIP2 and DINOv2 retrieval
-├── materials/       MDL catalog, selection, and application rules
-├── segmentation/    SAM3, EntitySeg, relation guidance, and hybrid masks
-├── mvinverse/       MVInverse adapter and run records
-├── qwen/            local and remote VLM adapters
-├── usd/             part indexing, rendering, application, and validation
-├── core/            shared data structures
-├── configs/         package configuration
-├── schemas/         JSON schemas
-├── scripts/qwen35/  isolated Qwen3.5 runtime setup
-├── web/             annotation and result viewers, including their server
-├── third_party/     vendored source with upstream licenses
-├── models/          local weights; ignored by Git
-├── var/             rebuildable indexes and caches; ignored by Git
-└── results/         local results; ignored by Git
+├── src/qwen_material_pipeline/
+│   ├── workflows/       command workflows
+│   ├── evidence/        camera, Part-ID, color, PBR, and QA measurements
+│   ├── retrieval/       SigLIP2 and DINOv2 retrieval
+│   ├── materials/       MDL catalog, selection, and application rules
+│   ├── segmentation/    SAM3, EntitySeg, relation guidance, and hybrid masks
+│   ├── mvinverse/       MVInverse adapters
+│   ├── qwen/            local and remote VLM adapters
+│   ├── usd/             part indexing, rendering, application, and validation
+│   ├── core/            shared data structures
+│   ├── configs/         package configuration
+│   ├── schemas/         JSON schemas
+│   └── web/             annotation and result viewers
+├── tests/               package tests
+├── docs/                package documentation
+├── scripts/             setup and maintenance scripts
+├── requirements/        runtime and optional dependency sets
+├── third_party/         vendored source with upstream licenses
+└── runtime/             local models, caches, and private projects; ignored
 ```
+
+Generated run artifacts are stored only under the repository `outputs/`
+directory, never under the material package.
 
 The material package has its own `pyproject.toml`, but it remains under
 `tools/`; do not create a second copy or a compatibility symlink at the

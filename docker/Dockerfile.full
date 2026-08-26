@@ -104,7 +104,7 @@ ENV MVINVERSE_PYTHON=${CONDA_DIR}/envs/${CONDA_ENV_NAME}/bin/python
 ENV QWEN_MODEL_PATH=/workspace/models/qwen/Qwen3-VL-4B-Instruct
 ENV VISUAL_MATERIAL_ROOT=/workspace/materials/nvidia
 ENV TORCH_HOME=${HOME}/.cache/torch
-ENV PYTHONPATH=${ROOT_DIR}/tools
+ENV PYTHONPATH=${ROOT_DIR}:${ROOT_DIR}/tools/qwen_material_pipeline/src
 
 RUN if ! getent group "${APP_GID}" >/dev/null; then \
         groupadd --gid "${APP_GID}" pipeline; \

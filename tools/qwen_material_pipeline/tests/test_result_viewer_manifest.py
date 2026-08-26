@@ -15,7 +15,14 @@ RESTORED_BASELINE = "RESTORED_HISTORICAL_BASELINE"
 
 
 def _viewer_module() -> ModuleType:
-    path = Path(__file__).parents[1] / "web" / "result_viewer" / "build_manifest.py"
+    path = (
+        Path(__file__).parents[1]
+        / "src"
+        / "qwen_material_pipeline"
+        / "web"
+        / "result_viewer"
+        / "build_manifest.py"
+    )
     spec = importlib.util.spec_from_file_location("qwen_result_viewer_manifest", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -749,9 +756,7 @@ def test_completed_retry_acceptance_exposes_immutable_library_review(
         acceptance_name="final_visual_acceptance_retry2",
         immutable_library_review=True,
     )
-    acceptance_root = (
-        tmp_path / "visual_material" / "final_visual_acceptance_retry2"
-    )
+    acceptance_root = tmp_path / "visual_material" / "final_visual_acceptance_retry2"
     _write_json(
         tmp_path / "visual_material" / "final_visual_acceptance_result.json",
         {
@@ -891,9 +896,7 @@ def test_final_collected_preview_fails_closed(
             encoding="utf-8",
         )
 
-    legacy_image = (
-        tmp_path / "final" / "asset" / "preview_final" / "rgb" / "iso.png"
-    )
+    legacy_image = tmp_path / "final" / "asset" / "preview_final" / "rgb" / "iso.png"
     legacy_image.parent.mkdir(parents=True)
     legacy_image.write_bytes(b"must-not-be-exposed")
 
@@ -980,7 +983,12 @@ def test_sealed_restored_project_exposes_verified_preview(tmp_path: Path) -> Non
 
 def test_viewer_exposes_all_quality_gate_fields_once() -> None:
     index = (
-        Path(__file__).parents[1] / "web" / "result_viewer" / "index.html"
+        Path(__file__).parents[1]
+        / "src"
+        / "qwen_material_pipeline"
+        / "web"
+        / "result_viewer"
+        / "index.html"
     ).read_text(encoding="utf-8")
     parser = _IdCollector()
     parser.feed(index)

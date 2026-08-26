@@ -8,7 +8,8 @@ command; this package supplies its material stages.
 
 ## Scope
 
-The default configuration is `configs/pipeline/manual_part_id_materials.json`.
+The default configuration is
+`src/qwen_material_pipeline/configs/pipeline/manual_part_id_materials.json`.
 It predicts material identity before colour, selects an NVIDIA
 `Materials/Base` entry per CAD Part-ID, preserves exact presets, and runs
 identity-preserving actual-CAD colour calibration only for corresponding
@@ -28,8 +29,9 @@ python -m pip install -e . -e ./tools/qwen_material_pipeline
 qwen-material --help
 ```
 
-Set local model and application paths in `.env`; copy `.env.example` as a
-starting point. Do not commit the populated file.
+Set local model and application paths in the repository-root `.env`; copy the
+root `.env.example` as a starting point. Local models, caches, and private
+sealed projects belong under `runtime/` and are not committed.
 
 Optional verified Qwen3.5/SigLIP2 setup:
 
@@ -39,6 +41,10 @@ bash tools/qwen_material_pipeline/scripts/qwen35/setup_qwen35_runtime.sh
 
 SAM3, EntitySeg/CropFormer, MVInverse, DINOv2, NVIDIA materials, and the Base observation bank remain
 separate local dependencies and must pass preflight.
+
+Reference photographs, their manifest, and the STEP/STP file are supplied to
+the root CLI as explicit paths. Do not copy them into this package. Every run
+writes to the repository `outputs/<run-id>/` selected by `--output`.
 
 ## Pipeline
 
@@ -94,7 +100,7 @@ visual_material/visual_quality/
 visual_material/final_visual_acceptance/
 ```
 
-Do not include local results, caches, models, or workspaces in a source release.
+Do not include `runtime/` or `outputs/` in a source release.
 
 ## Documentation and tests
 
@@ -104,8 +110,7 @@ Do not include local results, caches, models, or workspaces in a source release.
 - [MVInverse (Chinese)](./docs/mvinverse.zh.md)
 
 ```bash
-PYTHONPATH=./tools python -m pytest -q -p no:cacheprovider \
-  tools/qwen_material_pipeline/tests
+python -m pytest -q -p no:cacheprovider tools/qwen_material_pipeline/tests
 ```
 
 ## License

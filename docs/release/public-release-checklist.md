@@ -45,8 +45,7 @@ Run from the repository root:
 python ./tools/release/check_public_tree.py
 git diff --check
 python -m pytest -q -p no:cacheprovider tests
-PYTHONPATH=./tools python -m pytest -q -p no:cacheprovider \
-  tools/qwen_material_pipeline/tests
+python -m pytest -q -p no:cacheprovider tools/qwen_material_pipeline/tests
 ```
 
 Record skipped integration tests and unavailable runtimes or models. Test a

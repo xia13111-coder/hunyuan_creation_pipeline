@@ -43,6 +43,11 @@ def _prepare_live_material_catalog(
     catalog = build_catalog(material_root)
     material_count = len(catalog.materials)
     if material_count == 0:
+        if not configured_catalog.is_file():
+            raise FileNotFoundError(
+                "Configured material root exports no MDLs and the fallback "
+                f"catalog does not exist: {configured_catalog}"
+            )
         log_message(
             log_cb,
             "Configured material root contains no exported MDL materials; "

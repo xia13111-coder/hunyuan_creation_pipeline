@@ -7,7 +7,7 @@ MVInverse 从参考图预测 albedo、metallic、roughness、normal 和 shading�
 
 ```text
 tools/qwen_material_pipeline/
-├── mvinverse/
+├── src/qwen_material_pipeline/mvinverse/
 │   ├── adapter.py       # 输入准备、离线调度、账本和输出校验
 │   ├── runner.py        # 加载上游模型
 │   ├── evidence.py      # 区域统计与多视图融合
@@ -16,7 +16,7 @@ tools/qwen_material_pipeline/
 │   ├── REVISION
 │   ├── LICENSE
 │   └── mvinverse/models/mvinverse.py
-└── models/mvinverse/model/
+└── runtime/models/mvinverse/model/
     ├── config.json
     └── model.safetensors
 ```
@@ -37,7 +37,7 @@ tools/qwen_material_pipeline/
 - 运行时必须显式传入 `--acknowledge-mvinverse-noncommercial`；
 - 商业使用、对外服务或再分发前必须另行取得授权；
 - 上游源码、模型权重和模型卡可能有不同条款，应采用更严格者；
-- `third_party/mvinverse/` 和 `models/mvinverse/` 不应直接打入客户交付包。
+- `third_party/mvinverse/` 和 `runtime/models/mvinverse/` 不应直接打入客户交付包。
 
 以上是工程使用提示，不构成法律意见。
 
@@ -72,12 +72,12 @@ PyTorch，也不要用 Isaac Sim Python 运行 MVInverse。
 ```bash
 PIPELINE_ROOT="$PWD/tools/qwen_material_pipeline"
 
-PYTHONPATH=./tools python -m qwen_material_pipeline.mvinverse.adapter \
+python -m qwen_material_pipeline.mvinverse.adapter \
   --reference-manifest ./inputs/reference_manifest.json \
   --repo "$PIPELINE_ROOT/third_party/mvinverse" \
   --python "$(command -v python)" \
-  --checkpoint "$PIPELINE_ROOT/models/mvinverse/model" \
-  --output-dir "$PIPELINE_ROOT/var/runs/my_run/mvinverse" \
+  --checkpoint "$PIPELINE_ROOT/runtime/models/mvinverse/model" \
+  --output-dir ./outputs/my_run/visual_material/analysis/mvinverse \
   --device cuda \
   --max-side 448 \
   --oom-retry-max-side 392 \

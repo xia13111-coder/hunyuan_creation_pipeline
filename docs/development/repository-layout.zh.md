@@ -37,24 +37,28 @@ docker/                         容器文件与说明
 
 ```text
 tools/qwen_material_pipeline/
-├── workflows/       命令工作流
-├── evidence/        相机、Part-ID、颜色、PBR 与质量测量
-├── retrieval/       SigLIP2 和 DINOv2 检索
-├── materials/       MDL 目录、选择与应用规则
-├── segmentation/    SAM3、EntitySeg、邻件关系引导与 hybrid mask
-├── mvinverse/       MVInverse 适配器和运行记录
-├── qwen/            本地与远程 VLM 适配器
-├── usd/             零件索引、渲染、应用与验证
-├── core/            共用数据结构
-├── configs/         工具包配置
-├── schemas/         JSON Schema
-├── scripts/qwen35/  隔离的 Qwen3.5 运行环境安装脚本
-├── web/             标注、结果查看器及其服务脚本
-├── third_party/     保留上游许可证的第三方源码
-├── models/          本机权重；Git 默认忽略
-├── var/             可重建的索引和缓存；Git 默认忽略
-└── results/         本机结果；Git 默认忽略
+├── src/qwen_material_pipeline/
+│   ├── workflows/       命令工作流
+│   ├── evidence/        相机、Part-ID、颜色、PBR 与质量测量
+│   ├── retrieval/       SigLIP2 和 DINOv2 检索
+│   ├── materials/       MDL 目录、选择与应用规则
+│   ├── segmentation/    SAM3、EntitySeg、邻件关系引导与 hybrid mask
+│   ├── mvinverse/       MVInverse 适配器
+│   ├── qwen/            本地与远程 VLM 适配器
+│   ├── usd/             零件索引、渲染、应用与验证
+│   ├── core/            共用数据结构
+│   ├── configs/         工具包配置
+│   ├── schemas/         JSON Schema
+│   └── web/             标注和结果查看器
+├── tests/               工具包测试
+├── docs/                工具包文档
+├── scripts/             安装和维护脚本
+├── requirements/        运行时和可选依赖
+├── third_party/         保留上游许可证的第三方源码
+└── runtime/             本机模型、缓存和私有项目；Git 默认忽略
 ```
+
+运行产物只写入仓库 `outputs/`，不放入材质工具包。
 
 材质工具包有独立的 `pyproject.toml`，但实体目录仍位于 `tools/`。不要在仓库根目录
 复制一份，也不要创建兼容软链接。

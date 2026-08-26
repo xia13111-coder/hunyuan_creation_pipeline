@@ -295,6 +295,24 @@ def resolve_directory_target(
     return resolved
 
 
+def resolve_file_target(
+    value: Any,
+    *,
+    config_dir: Path,
+    label: str,
+) -> Path:
+    """Resolve a generated-file fallback without requiring it before a run."""
+
+    raw = os.path.expandvars(require_string(value, label))
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = config_dir / path
+    resolved = Path(os.path.abspath(path))
+    if resolved.exists() and not resolved.is_file():
+        raise ValueError(f"{label} must be a file: {resolved}")
+    return resolved
+
+
 def resolve_material_root(
     materials: dict[str, Any],
     *,
@@ -803,11 +821,10 @@ def load_visual_material_config(
         qwen_minimum_usable_palette_view_ratio=(qwen_minimum_usable_palette_view_ratio),
         qwen_parallel_requests=qwen_parallel_requests,
         qwen_mapping_verification_views=qwen_mapping_verification_views,
-        catalog=resolve_path(
+        catalog=resolve_file_target(
             materials.get("catalog"),
             config_dir=config_dir,
             label="config.materials.catalog",
-            kind="file",
         ),
         whitelist=resolve_path(
             materials.get("whitelist"),

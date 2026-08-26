@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -12,6 +13,8 @@ from ..project_layout import ProjectLayout
 from ..runtime import isaac_python, root_dir
 from .references import sha256_file
 from .sealed_dependencies import verify_sealed_dependency_lock
+
+
 PROJECT_SCHEMA_VERSION = "qwen-material-project/v2"
 _SOURCE_TOPOLOGY_ROLES = frozenset(
     {"pre_expansion", "occurrence_equivalent"}
@@ -696,13 +699,18 @@ def match_bundled_project(
 
     if source_cad is None:
         return None
-    root = (
-        projects_root.expanduser().resolve(strict=True)
-        if projects_root is not None
-        else ProjectLayout.from_root(root_dir()).material_projects.resolve(
-            strict=True
-        )
-    )
+    if projects_root is not None:
+        root = projects_root.expanduser().resolve(strict=True)
+    else:
+        configured_root = Path(
+            os.environ.get(
+                "MATERIAL_PROJECTS_ROOT",
+                ProjectLayout.from_root(root_dir()).material_projects,
+            )
+        ).expanduser()
+        if not configured_root.is_dir():
+            return None
+        root = configured_root.resolve(strict=True)
     for project_file in sorted(root.glob("*/project.json")):
         project = _read_project(project_file)
         source_identity = project.get("source_cad")

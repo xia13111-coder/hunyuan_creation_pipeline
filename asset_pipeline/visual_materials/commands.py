@@ -159,7 +159,7 @@ def cad_mesh_template_command(
     return [
         str(isaac_python),
         str(
-            SOURCE_LAYOUT.material_pipeline
+            SOURCE_LAYOUT.material_package
             / "segmentation"
             / "cad_mesh_templates.py"
         ),

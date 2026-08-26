@@ -183,7 +183,7 @@ docker run --name hunyuan-pipeline-601 \
   -e SIGLIP2_MODEL_PATH=/workspace/models/siglip2 \
   -v "$DINOV2_MODEL_DIR:/workspace/models/dinov2:ro" \
   -e DINOV2_MODEL_PATH=/workspace/models/dinov2 \
-  -v "$MVINVERSE_MODEL_DIR:/workspace/hunyuan3.0_assets_creation/tools/qwen_material_pipeline/models/mvinverse/model:ro" \
+  -v "$MVINVERSE_MODEL_DIR:/workspace/hunyuan3.0_assets_creation/tools/qwen_material_pipeline/runtime/models/mvinverse/model:ro" \
   -v "$NVIDIA_MATERIAL_DIR:/workspace/materials/nvidia:ro" \
   -e VISUAL_MATERIAL_ROOT=/workspace/materials/nvidia \
   -v "$NVIDIA_BASE_BANK_DIR:/workspace/models/nvidia_base_observation_bank_v1:ro" \

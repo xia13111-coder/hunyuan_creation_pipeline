@@ -242,7 +242,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--visual-material-config",
         help=(
             "runtime config for Qwen, MVInverse, MDL and evidence rendering; "
-            "defaults to tools/qwen_material_pipeline/configs/pipeline/"
+            "defaults to tools/qwen_material_pipeline/src/"
+            "qwen_material_pipeline/configs/pipeline/"
             "manual_part_id_materials.json"
         ),
     )

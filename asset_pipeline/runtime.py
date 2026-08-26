@@ -262,6 +262,15 @@ def configure_runtime() -> dict[str, str | None]:
     os.environ.setdefault("QWEN_PYTHON", sys.executable)
     os.environ.setdefault("MVINVERSE_PYTHON", sys.executable)
     visual_material_root = SOURCE_LAYOUT.material_pipeline
+    visual_material_models = SOURCE_LAYOUT.material_models
+    visual_material_third_party = SOURCE_LAYOUT.material_third_party
+    os.environ.setdefault("QWEN_MATERIAL_PIPELINE_HOME", str(visual_material_root))
+    os.environ.setdefault(
+        "QWEN_MATERIAL_RUNTIME_ROOT", str(SOURCE_LAYOUT.material_runtime)
+    )
+    os.environ.setdefault(
+        "MATERIAL_PROJECTS_ROOT", str(SOURCE_LAYOUT.material_projects)
+    )
     cache_root = (
         Path(
             os.getenv(
@@ -290,7 +299,7 @@ def configure_runtime() -> dict[str, str | None]:
             os.getenv("QWEN35_MODEL_PATH") or "",
             *(root / "model" for root in qwen35_runtime_roots),
             cache_root / "qwen35_4b_runtime" / "model",
-            visual_material_root / "models" / "qwen" / "Qwen3.5-4B",
+            visual_material_models / "qwen" / "Qwen3.5-4B",
         ]
     )
     if default_qwen35_python is not None:
@@ -304,26 +313,26 @@ def configure_runtime() -> dict[str, str | None]:
         [
             os.getenv("QWEN_MODEL_PATH") or "",
             *removable_qwen_models,
-            visual_material_root / "models" / "qwen" / "Qwen3-VL-4B-Instruct",
+            visual_material_models / "qwen" / "Qwen3-VL-4B-Instruct",
         ]
     )
     os.environ.setdefault(
         "QWEN_MODEL_PATH",
         str(
             default_qwen_model
-            or visual_material_root / "models" / "qwen" / "Qwen3-VL-4B-Instruct"
+            or visual_material_models / "qwen" / "Qwen3-VL-4B-Instruct"
         ),
     )
     default_mvinverse_repository = first_existing_path(
         [
             os.getenv("MVINVERSE_REPOSITORY") or "",
-            visual_material_root / "third_party" / "mvinverse",
+            visual_material_third_party / "mvinverse",
         ]
     )
     default_mvinverse_checkpoint = first_existing_path(
         [
             os.getenv("MVINVERSE_CHECKPOINT") or "",
-            visual_material_root / "models" / "mvinverse" / "model",
+            visual_material_models / "mvinverse" / "model",
         ]
     )
     default_sam3_repository = first_existing_path(
@@ -353,7 +362,7 @@ def configure_runtime() -> dict[str, str | None]:
         [
             os.getenv("ENTITYSEG_CROPFORMER_ROOT") or "",
             *removable_entityseg_roots,
-            visual_material_root / "third_party" / "CropFormer",
+            visual_material_third_party / "CropFormer",
         ]
     )
     entityseg_venv_pythons = sorted(
@@ -492,7 +501,7 @@ def configure_runtime() -> dict[str, str | None]:
             / "4.5"
             / "NVIDIA"
             / "Materials",
-            visual_material_root / "models" / "materials" / "nvidia",
+            visual_material_models / "materials" / "nvidia",
         ]
     )
     os.environ.setdefault(

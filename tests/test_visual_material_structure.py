@@ -167,12 +167,10 @@ def test_render_and_camera_builders_handle_optional_arguments() -> None:
     )
     assert templates[0] == "/runtime/python.sh"
     assert templates[1].endswith(
-        "/tools/qwen_material_pipeline/segmentation/cad_mesh_templates.py"
+        "/tools/qwen_material_pipeline/src/qwen_material_pipeline/segmentation/cad_mesh_templates.py"
     )
     assert templates[templates.index("--registry") + 1] == "/run/registry.json"
-    assert templates[templates.index("--evidence") + 1] == (
-        "/run/coarse-evidence.json"
-    )
+    assert templates[templates.index("--evidence") + 1] == ("/run/coarse-evidence.json")
     assert templates[-2:] == ["--output-dir", "/run/amodal"]
 
 

@@ -10,7 +10,7 @@ configs/
 
 Package-internal settings remain with the package that owns them. In
 particular, the Part-ID material pipeline reads
-`tools/qwen_material_pipeline/configs/`; those files should not be duplicated
+`tools/qwen_material_pipeline/src/qwen_material_pipeline/configs/`; those files should not be duplicated
 here.
 
 ## Mesh refinement

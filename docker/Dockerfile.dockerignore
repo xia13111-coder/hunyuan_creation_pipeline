@@ -25,9 +25,6 @@ pipeline_*_result.json
 manual_pipeline_result*.json
 *.log
 tools/sam3d/third_party/
-tools/qwen_material_pipeline/models/
-tools/qwen_material_pipeline/results/
-tools/qwen_material_pipeline/var/
-tools/qwen_material_pipeline/workspace/
+tools/qwen_material_pipeline/runtime/
 docker/runtime/
 docker/offline-images/

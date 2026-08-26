@@ -41,7 +41,13 @@ from qwen_material_pipeline.segmentation.human_foreground import sha256_file
 def test_standalone_cli_imports_shared_replay_code_without_inherited_pythonpath(
     tmp_path: Path,
 ) -> None:
-    script = Path(__file__).resolve().parents[1] / "segmentation" / "sam3_regions.py"
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "qwen_material_pipeline"
+        / "segmentation"
+        / "sam3_regions.py"
+    )
     environment = os.environ.copy()
     for name in (
         "CONDA_PREFIX",
@@ -1007,9 +1013,7 @@ def test_shared_camera_alignment_only_translates_the_complete_part_shape() -> No
     assert np.array_equal(aligned, coarse)
     assert audit["translation_xy_pixels"] == pytest.approx([5.0, 4.0])
     assert audit["part_local_translation_xy_pixels"] == [0.0, 0.0]
-    assert audit["candidate_centroid_residual_xy_pixels"] == pytest.approx(
-        [5.0, 4.0]
-    )
+    assert audit["candidate_centroid_residual_xy_pixels"] == pytest.approx([5.0, 4.0])
     assert audit["per_mesh_pose_change_allowed"] is False
     assert "translation_only" in audit["alignment_model"]
 
@@ -1031,8 +1035,7 @@ def test_view_shared_alignment_cannot_follow_one_part_candidate() -> None:
     assert audit["cad_union_foreground_recall"] == 1.0
 
 
-def test_view_shared_alignment_is_not_applicable_to_foreground_without_cad_seeds(
-) -> None:
+def test_view_shared_alignment_is_not_applicable_to_foreground_without_cad_seeds() -> None:
     foreground = np.ones((40, 48), dtype=bool)
 
     audit = _estimate_view_shared_translation({}, foreground)
@@ -1141,9 +1144,7 @@ def test_amodal_shape_rejects_neighbor_extension_even_when_visible_seed_matches(
     merged_neighbor = visible.copy()
     merged_neighbor[20:45, 50:75] = True
 
-    metrics = _occlusion_aware_amodal_agreement(
-        merged_neighbor, visible, amodal
-    )
+    metrics = _occlusion_aware_amodal_agreement(merged_neighbor, visible, amodal)
 
     assert metrics["cad_amodal_candidate_precision"] < 0.88
     assert metrics["cad_amodal_completion_iou"] < 0.75

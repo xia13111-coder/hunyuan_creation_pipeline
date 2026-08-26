@@ -31,7 +31,7 @@ run the complete source-only suite when possible:
 
 ```bash
 python -m pytest -q -p no:cacheprovider tests
-PYTHONPATH=./tools python -m pytest -q -p no:cacheprovider \
+PYTHONPATH=./tools/qwen_material_pipeline/src python -m pytest -q -p no:cacheprovider \
   tools/qwen_material_pipeline/tests
 python ./tools/release/check_public_tree.py
 git diff --check

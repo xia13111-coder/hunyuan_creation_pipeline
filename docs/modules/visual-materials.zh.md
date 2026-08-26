@@ -134,7 +134,7 @@ MDL。组件只有在成员投票达到严格多数时才按票数统一；平�
   一项失败都会停止流程，并指出失败阶段。
 
 默认配置为
-`tools/qwen_material_pipeline/configs/pipeline/manual_part_id_materials.json`，只搜索 NVIDIA
+`tools/qwen_material_pipeline/src/qwen_material_pipeline/configs/pipeline/manual_part_id_materials.json`，只搜索 NVIDIA
 `Materials/Base`，并按 CAD Part-ID 独立决策。
 
 ## 运行环境和模式
@@ -165,7 +165,7 @@ EntitySeg 解释器会与用户级 Python 包隔离。安装外部 CropFormer/De
 
 ```bash
 "$ENTITYSEG_PYTHON" -m pip install \
-  -r tools/qwen_material_pipeline/requirements-entityseg.txt
+  -r tools/qwen_material_pipeline/requirements/entityseg.txt
 PYTHONNOUSERSITE=1 "$ENTITYSEG_PYTHON" -c \
   'import black, cloudpickle, mmcv, yapf'
 ```

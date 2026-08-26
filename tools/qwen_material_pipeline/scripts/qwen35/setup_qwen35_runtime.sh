@@ -45,7 +45,7 @@ TMPDIR="${RUNTIME_ROOT}/tmp" \
 PIP_CACHE_DIR="${RUNTIME_ROOT}/pip_cache" \
   "${ENV_DIR}/bin/python" -m pip install \
     --disable-pip-version-check --quiet \
-    --requirement "${PACKAGE_ROOT}/requirements-qwen35.txt"
+    --requirement "${PACKAGE_ROOT}/requirements/qwen35.txt"
 
 download_checkpoint() {
   local model_key="$1"
@@ -174,7 +174,7 @@ print(f"SigLIP2 checkpoint provisioned and verified: {siglip}")
 PY
 
 if [[ "${QWEN35_RUN_SMOKE:-0}" == "1" ]]; then
-  PYTHONPATH="$(dirname -- "${PACKAGE_ROOT}")${PYTHONPATH:+:${PYTHONPATH}}" \
+  PYTHONPATH="${PACKAGE_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" \
   HF_HUB_OFFLINE=1 \
   TRANSFORMERS_OFFLINE=1 \
     "${ENV_DIR}/bin/python" "${SMOKE_SCRIPT}" \

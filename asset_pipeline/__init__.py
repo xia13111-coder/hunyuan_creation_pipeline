@@ -6,6 +6,20 @@ for diagnostics and older callers but do not replace the STEP/STP production
 entry contract.
 """
 
+# ruff: noqa: E402
+
+import sys
+
+from .project_layout import SOURCE_LAYOUT
+
+
+# A source checkout contains the independently packaged material implementation
+# under ``tools``. Installed deployments resolve it through normal site-packages.
+if SOURCE_LAYOUT.material_pythonpath.is_dir():
+    _material_source = str(SOURCE_LAYOUT.material_pythonpath)
+    if _material_source not in sys.path:
+        sys.path.insert(0, _material_source)
+
 from .jobs.blender import (
     blender_preflight,
     run_align_job,

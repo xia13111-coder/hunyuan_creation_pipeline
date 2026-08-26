@@ -54,7 +54,7 @@
 通常不需要单独运行。复核已有相机配准结果时可执行：
 
 ```bash
-PYTHONPATH=./tools python -m qwen_material_pipeline appearance-components \
+python -m qwen_material_pipeline appearance-components \
   --rendered-registry ./run/visual_material/highres_final/part_registry.rendered.json \
   --reference-manifest ./sam3_foreground_annotations.json \
   --camera-report ./run/visual_material/search_pass/camera_calibration_report.json \

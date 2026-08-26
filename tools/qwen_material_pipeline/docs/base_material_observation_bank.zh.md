@@ -28,7 +28,7 @@ MDL 附带的官方预览图。清单会将其明确标记为
 在项目根目录、`hunyuan_sam3d` 环境中运行：
 
 ```bash
-PYTHONPATH=./tools python -m qwen_material_pipeline base-bank build \
+python -m qwen_material_pipeline base-bank build \
   --material-root "$NVIDIA_MDL_BASE_ROOT" \
   --output-dir "$NVIDIA_BASE_OBSERVATION_BANK" \
   --isaac-python "$ISAAC_PYTHON" \
@@ -42,7 +42,7 @@ PYTHONPATH=./tools python -m qwen_material_pipeline base-bank build \
 ## 独立校验
 
 ```bash
-PYTHONPATH=./tools python -m qwen_material_pipeline base-bank verify \
+python -m qwen_material_pipeline base-bank verify \
   --material-root "$NVIDIA_MDL_BASE_ROOT" \
   --output-dir "$NVIDIA_BASE_OBSERVATION_BANK"
 ```

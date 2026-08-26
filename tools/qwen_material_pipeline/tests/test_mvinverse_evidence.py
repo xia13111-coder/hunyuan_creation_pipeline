@@ -654,7 +654,13 @@ def test_strict_validator_and_atomic_writer(tmp_path: Path) -> None:
     destination = write_evidence_report(report, tmp_path / "nested" / "report.json")
     assert validate_mvinverse_evidence(json.loads(destination.read_text())) == report
     jsonschema = pytest.importorskip("jsonschema")
-    schema_path = Path(__file__).parents[1] / "schemas" / "mvinverse_evidence_v1.json"
+    schema_path = (
+        Path(__file__).parents[1]
+        / "src"
+        / "qwen_material_pipeline"
+        / "schemas"
+        / "mvinverse_evidence_v1.json"
+    )
     jsonschema.validate(report, json.loads(schema_path.read_text(encoding="utf-8")))
 
     malformed = copy.deepcopy(report)

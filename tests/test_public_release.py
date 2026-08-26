@@ -49,7 +49,7 @@ class PublicReleaseTests(unittest.TestCase):
     def test_production_material_config_has_no_host_specific_model_paths(self) -> None:
         path = (
             ROOT
-            / "tools/qwen_material_pipeline/configs/pipeline/manual_part_id_materials.json"
+            / "tools/qwen_material_pipeline/src/qwen_material_pipeline/configs/pipeline/manual_part_id_materials.json"
         )
         document = json.loads(path.read_text(encoding="utf-8"))
         serialized = json.dumps(document, sort_keys=True)

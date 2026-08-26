@@ -7,7 +7,8 @@
 
 ## 适用范围
 
-默认配置为 `configs/pipeline/manual_part_id_materials.json`。流程按 CAD Part-ID 从
+默认配置为 `src/qwen_material_pipeline/configs/pipeline/manual_part_id_materials.json`。
+流程按 CAD Part-ID 从
 NVIDIA `Materials/Base` 中选择视觉效果最接近的材质。精确目录匹配保持原始预设；仅确认
 材质类别的“对应材质”可以在 MDL 身份固定后进入独立的真实 CAD 校色流程。
 
@@ -22,7 +23,8 @@ python -m pip install -e . -e ./tools/qwen_material_pipeline
 qwen-material --help
 ```
 
-本机模型和应用路径写在 `.env` 中，可从 `.env.example` 复制。不要提交填写后的 `.env`。
+本机模型和应用路径写在仓库根目录 `.env` 中，可从根目录 `.env.example` 复制。本机模型、
+缓存和私有封存项目放在 `runtime/`，不提交 Git。
 
 可选的 Qwen3.5/SigLIP2 校验安装：
 
@@ -32,6 +34,9 @@ bash tools/qwen_material_pipeline/scripts/qwen35/setup_qwen35_runtime.sh
 
 SAM3、EntitySeg/CropFormer、MVInverse、DINOv2、NVIDIA 材质和 Base 材质观察库是独立本机依赖，必须通过
 预检。
+
+参考图、清单和 STEP/STP 文件通过根命令显式传入，不复制到本包。每次运行由 `--output`
+写入仓库 `outputs/<run-id>/`。
 
 ## 流程
 
@@ -88,7 +93,7 @@ visual_material/visual_quality/
 visual_material/final_visual_acceptance/
 ```
 
-本机结果、缓存、模型和工作目录不进入源码发布包。
+`runtime/` 和 `outputs/` 不进入源码发布包。
 
 ## 文档与测试
 
@@ -99,8 +104,7 @@ visual_material/final_visual_acceptance/
 - [MVInverse](./docs/mvinverse.zh.md)
 
 ```bash
-PYTHONPATH=./tools python -m pytest -q -p no:cacheprovider \
-  tools/qwen_material_pipeline/tests
+python -m pytest -q -p no:cacheprovider tools/qwen_material_pipeline/tests
 ```
 
 ## 许可证
