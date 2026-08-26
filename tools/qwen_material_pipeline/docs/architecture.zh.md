@@ -9,13 +9,13 @@
 ```text
 tools/qwen_material_pipeline/
 ├── src/qwen_material_pipeline/
-│   ├── core/          # 公共合同与阶段状态
-│   ├── evidence/      # 相机、Part-ID、颜色与质量证据
+│   ├── core/          # 公共数据格式、检查规则与阶段状态
+│   ├── evidence/      # 相机、Part-ID、颜色与质量检查数据
 │   ├── segmentation/  # SAM3、EntitySeg 与关系引导融合
 │   ├── retrieval/     # 视觉检索
 │   ├── materials/     # MDL 目录、候选、选择与颜色参数
 │   ├── mvinverse/     # MVInverse 适配
-│   ├── qwen/          # VLM 适配
+│   ├── qwen/          # 视觉语言模型（VLM）适配
 │   ├── usd/           # USD 渲染、绑定与验证
 │   ├── workflows/     # 子包工作流
 │   ├── configs/       # 版本化生产配置
@@ -24,9 +24,9 @@ tools/qwen_material_pipeline/
 ├── tests/             # 子包测试
 ├── docs/              # 子包文档
 ├── scripts/           # 安装和维护脚本
-├── requirements/      # runtime/dev/entityseg/qwen35 依赖
+├── requirements/      # 运行、开发、EntitySeg 和 Qwen3.5 的依赖文件
 ├── third_party/       # 固定版本源码及上游许可证
-└── runtime/           # 本机模型、缓存和私有封存项目；Git 忽略
+└── runtime/           # 本机模型、缓存和私有复现项目；Git 忽略
 ```
 
 每次运行的图片、日志、分析文件和 USD 统一写入仓库 `outputs/<run-id>/`，不放入包源码或
@@ -35,11 +35,11 @@ tools/qwen_material_pipeline/
 
 ## 模块规则
 
-- `evidence/` 和 `segmentation/` 只生成、校验证据，不写 USD。
-- `qwen/`、`mvinverse/` 和 `retrieval/` 只生成观测或候选。
+- `evidence/` 和 `segmentation/` 只生成和检查判断所需的数据，不写 USD。
+- `qwen/`、`mvinverse/` 和 `retrieval/` 只生成模型观测结果或候选。
 - `materials/` 生成完整、可追溯的 Part-ID 材质计划。
 - `usd/` 只执行已确定的计划并验证结果。
-- `web/` 只标注或展示数据，不成为生产决策 owner。
+- `web/` 只标注或展示数据，不负责生产决策。
 - 第三方代码只放 `third_party/`，不得混入 `src/`；本机权重和私有数据只放 `runtime/`。
 
 主仓库的 `asset_pipeline/visual_materials/orchestrator.py` 负责编排；
@@ -50,15 +50,15 @@ tools/qwen_material_pipeline/
 ```text
 CAD USD + 参考图
   -> 相机配准与 RGB/Part-ID 渲染
-  -> isolated 模型图模板
+  -> 单独渲染的零件形状模板
   -> SAM3/EntitySeg + 邻件关系引导 + 迭代融合
   -> MVInverse/SigLIP2/DINOv2/Qwen 候选
   -> 真实 CAD 候选渲染比较
-  -> 材质身份锁定与对应材质自动校色
+  -> 确定最终 MDL，并只对未匹配到精确预设的材质自动调色
   -> USD 绑定、重渲染和最终验证
 ```
 
-几何和材质严格分离：分析相机、照片 mask 和颜色参数不得改变 CAD 尺寸、姿态、拓扑、
+几何和材质严格分离：分析相机、照片掩码和颜色参数不得改变 CAD 尺寸、姿态、拓扑、
 碰撞、质量或关节。`--resume` 仅在输入、配置、模型、数据格式和哈希一致时复用产物。
 
 ## 开发与查看

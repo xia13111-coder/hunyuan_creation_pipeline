@@ -51,6 +51,8 @@ together.
   or cached stages.
 - Add tests for bug fixes and public behavior.
 - Update both English and Chinese user documentation for user-visible changes.
+- Write user documentation in plain language. State inputs, rules, results, and
+  failure conditions directly; explain unavoidable abbreviations on first use.
 - Keep generated files under `outputs/`; never commit local results as fixtures
   unless they are minimal, synthetic, documented, and legally redistributable.
 

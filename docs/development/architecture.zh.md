@@ -42,7 +42,7 @@ CLI / HTTP API
 
 ## 主命令分发
 
-参考图驱动的 STEP/STP 材质正式命令只有一条 owner 调用链：
+参考图驱动的 STEP/STP 材质正式命令只有一条明确的调用链：
 
 ```text
 manual-material-pipeline
@@ -153,13 +153,13 @@ visual_materials.run_assign_visual_materials_job
    -> Qwen + MVInverse 分析
    -> SigLIP2 检索 + DINOv2 重排
 -> stages.part_id_evidence.run_part_id_evidence_stage
-   -> isolated CAD 模型图 Part-ID 模板
+   -> 从 CAD 模型单独渲染每个 Part-ID 的完整形状模板
    -> 第一遍 SAM3 与 EntitySeg 候选
    -> 排除目标自身的装配邻件关系定位
-   -> 第二遍分割与迭代 hybrid 融合
+   -> 第二遍分割与迭代融合
 -> 逐 Part-ID 选择候选并补全所有 Mesh
--> 不看颜色，先锁定材质身份
--> 只为“对应材质”校准审核过的颜色参数
+-> 不看颜色，先确定所选 MDL
+-> 只为未匹配到精确预设的材质调整程序明确支持的颜色参数
 -> 生成赋材质预览 USD，与参考图比较
 -> 图像信息充分时执行一次受限候选调整
 -> 确定最终 MDL 并记录选择结果
@@ -184,7 +184,7 @@ visual_materials.run_final_visual_acceptance_job
 - `stages/source_preparation.py` 准备注册表、渲染图和相机数据。
 - `stages/material_inference.py` 启动材质分析子进程。
 - `stages/part_id_evidence.py` 统一负责模型图 Part-ID 定位、两遍分割、邻件关系引导、
-  hybrid 融合和全视角证据覆盖检查。
+  融合和全视角判断数据覆盖检查。
 - `policy_exact_cover.py` 保证每个 Mesh 都有可应用的结果。
 - `exact_mdl_cache.py` 校验候选渲染缓存。
 - `tournaments.py` 按渲染效果比较入围的 MDL。
@@ -195,7 +195,7 @@ visual_materials.run_final_visual_acceptance_job
 
 - SAM3 提供已确认的整机前景，也可以重放用户点选得到的标注。
 - Qwen 描述可见零件，并在限定候选中做选择。
-- MVInverse 提供 PBR 外观估计，但不单独决定最终 MDL。
+- MVInverse 提供基础色、金属程度、粗糙度等 PBR 外观估计，但不单独决定最终 MDL。
 - SigLIP2 从本机完整 NVIDIA `Materials/Base` 目录中检索相似材质。
 - DINOv2 根据局部表面外观重新排序候选。
 - CAD Part-ID 渲染把照片中的信息对应到每个 Mesh。任何合格视角都看不到的零件使用

@@ -43,7 +43,7 @@ package-level compatibility entry point for older material-job callers.
 
 ## Main command dispatch
 
-The canonical reference-driven STEP/STP material command has one owner chain:
+The canonical reference-driven STEP/STP material command has one call path:
 
 ```text
 manual-material-pipeline

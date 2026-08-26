@@ -9,11 +9,12 @@
 
 - `catalog.json`：从 Base 实时扫描的全部 MDL export；
 - `allowlist.json`：与 catalog 完全一致的候选集合；
-- `scope_report.json`：Base 根目录、MDL 源文件指纹和越界计数；
+- `scope_report.json`：Base 根目录、MDL 源文件内容摘要和越界计数；
 - `renders/`：每种材质在固定几何上的三张标准渲染图；
 - `masks/`：对应的几何前景掩码；
 - `render_manifest.json`：每张图的 SHA-256、渲染进度和完整覆盖状态；
-- `appearance_profiles.json`：颜色、亮度、高光比例、纹理梯度及 MDL 原始 PBR 默认值；
+- `appearance_profiles.json`：颜色、亮度、高光比例、纹理梯度，以及 MDL 原始的基础色、
+  金属程度、粗糙度等 PBR 默认值；
 - `visual_embeddings.npz`：SigLIP2 768 维和 DINOv2 1024 维材质向量；
 - `index_manifest.json`：模型身份、聚合方式和索引文件哈希。
 

@@ -2,8 +2,8 @@
 
 [English](./manual-part-id-materials.md) | [中文](./manual-part-id-materials.zh.md)
 
-使用同一工件的 2–4 张照片，为一个 STEP/STP 装配体选择 NVIDIA Base MDL。CAD 始终
-决定几何和真实尺寸。
+使用同一工件的 2–4 张照片，按 CAD 零件编号（Part-ID）为 STEP/STP 装配体选择 NVIDIA
+材质定义语言（MDL）材质。CAD 始终决定几何和真实尺寸。
 
 ## 运行
 
@@ -47,21 +47,22 @@ manual-material-pipeline \
 
 ```text
 STEP/STP -> USD 和物理准备 -> 相机对齐
-         -> 为每个可见 Part-ID 生成模型图 isolated 模板
+         -> 从 CAD 模型单独渲染每个可见零件的完整形状模板
          -> SAM3 + EntitySeg 第一遍分割
          -> 邻件关系引导的第二遍分割与迭代融合
-         -> 不看颜色，先确定材质身份
-         -> 只对合格的对应材质校准审核过的颜色参数
+         -> 不看颜色，先确定所选 MDL
+         -> 只对未匹配到精确预设的材质调整程序明确支持的颜色参数
          -> 为全部 Mesh 应用材质 -> 最终验证
 ```
 
 SAM3 前景确认是唯一必需的人工步骤。当前主线是通用方法，不包含工件名称、Part-ID 名单、
-按视角定制的提示词或人工材质映射；所有已注册视角都必须贡献真实证据。局部图片贴合只调整
+按视角定制的提示词或人工材质映射；所有已注册视角都必须提供真实的判断信息。局部图片贴合只调整
 二维候选，不修改 CAD、单个 Mesh 变换或最终交付相机。
 
-隐藏或无法判断的零件使用预设默认材质。精确库预设保持不变；“对应材质”只有在材质身份
-固定之后，才能调整经过审核的颜色接口。局部颜色质量未达标时保留实测最优结果并记录
-`REVIEW`，不会让整条流程中断；哈希损坏、Part-ID 覆盖不完整、材质身份变化或交付数据无效
+隐藏或无法判断的零件使用预设默认材质。精确库预设保持不变；只能确定材质类别、无法匹配
+精确预设时，流程会先固定所选 MDL，再调整程序明确支持并测试过的颜色参数。局部颜色质量
+未达标时保留实测最优结果并记录
+`REVIEW`，不会让整条流程中断；哈希损坏、Part-ID 覆盖不完整、所选 MDL 变化或交付数据无效
 仍会严格失败。
 
 ## 输出
@@ -71,7 +72,7 @@ RUN_ROOT/{cad_usd,intermediate,visual_material,final}/
 RUN_ROOT/pipeline_result.json
 ```
 
-证据和选择审计位于 `RUN_ROOT/visual_material/analysis/`：
+判断数据和选择检查记录位于 `RUN_ROOT/visual_material/analysis/`：
 
 ```text
 part_id_cad_amodal_templates/manifest.json

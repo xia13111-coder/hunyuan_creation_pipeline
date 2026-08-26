@@ -53,8 +53,8 @@ the selected backend and any fallback reason for each view under
 `candidate_search`.
 
 Global camera seeds and per-phase candidates use the same geometry-gate
-ordering: candidates that require out-of-contract 2-D scale, rotation, or
-translation are rejected before silhouette IoU, boundary residual, and
+ordering: candidates that require 2-D scale, rotation, or translation outside
+the allowed ranges are rejected before silhouette IoU, boundary residual, and
 structure scores are compared. Camera calibration and spatial Part-ID
 projection share the sealed whole-workpiece foreground from the reference
 manifest, and cross-resolution comparisons remove raster-size scale and
@@ -76,7 +76,7 @@ old cameras, masks, or Part-ID evidence into a new run.
 `asset_pipeline/visual_materials/stages/part_id_evidence.py` owns the complete
 per-Part-ID model-template, two-pass segmentation, relation-guidance, and
 fusion sequence. Keeping that sequence out of `orchestrator.py` gives it one
-testable owner without changing any artifact path or stage name.
+testable module without changing any artifact path or stage name.
 `tools/qwen_material_pipeline/` provides segmentation, evidence extraction,
 retrieval, model calls, and USD workers. Isaac Sim handles CAD/USD, MDL
 rendering, physics, and final validation. See
@@ -118,7 +118,7 @@ and produces a result. In that fallback, the CAD shape is only a location prior
 and cannot create a 1.0 self-overlap acceptance floor. A bounded local
 similarity transform is selected by joint photograph-edge gain and assembly-
 neighbour clearance. Genuine SAM3, EntitySeg, or prior-fusion image candidates
-retain their stricter non-regression contract. Insufficient anchors preserve
+retain their stricter non-regression rules. Insufficient anchors preserve
 the audited first-pass result instead of aborting the batch.
 For filamentary parts such as tubes, hoses, cables, rods, and thin rails, an
 ordinary edge score can lock onto only one side or a nearby metal edge. The
@@ -140,7 +140,7 @@ run instead of silently continuing with a two-view material decision.
 | Component | Role |
 | --- | --- |
 | SAM3 | Whole-workpiece foreground and per-part initialization candidates. |
-| EntitySeg / CropFormer | Class-agnostic initialization candidates accepted only inside the CAD safety contract. |
+| EntitySeg / CropFormer | Class-agnostic initialization candidates accepted only inside the CAD-supported region. |
 | Neighbour-relation localizer | Excludes the target's own old mask and infers its position from multiple automatic anchors plus CAD assembly relations. |
 | Iterative boundary optimizer | Combines the complete model-image target shape, neighbour exclusion, both segmentation passes, and prior masks. Ordinary parts use image edges; automatically detected filamentary parts also use centreline ridges and both boundaries. It transforms only 2-D proposals and never moves an individual mesh. |
 | MVInverse | Albedo, roughness, and metallic estimates inside accepted masks. |

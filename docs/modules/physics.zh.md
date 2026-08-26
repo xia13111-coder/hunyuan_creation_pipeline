@@ -3,7 +3,8 @@
 [English](./physics.md) | [中文](./physics.zh.md) | [文档索引](../README.zh.md)
 
 该模块为 USD 添加碰撞体、刚体、物理材质和质量，再把 USD 及其材质、贴图依赖收集到
-最终目录。视觉 PBR 和 PhysX 材质是两套独立数据。
+最终目录。视觉外观参数（PBR，例如基础色、金属程度和粗糙度）与 PhysX 物理材质是两套
+独立数据。
 
 手工建模 STEP/STP 启用参考图赋材质时，`add_physics.py` 会先归一单位和局部原点、修复面序，
 并写入碰撞体、刚体、质量和物理材质。Qwen/MVInverse 随后在这份几何上

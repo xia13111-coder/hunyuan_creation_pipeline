@@ -7,7 +7,7 @@
 ```text
 asset_pipeline/                 工作流与编排
 asset_pipeline/visual_materials/stages/
-                                具有单一 owner 的材质流水线阶段
+                                每个阶段均有唯一负责模块的材质流水线
 asset_refiner/                  网格精修包
 tools/{blender,isaac,sam3d}/    外部运行时使用的执行脚本
 tools/qwen_material_pipeline/   材质推理与 USD 工具
@@ -39,23 +39,23 @@ docker/                         容器文件与说明
 tools/qwen_material_pipeline/
 ├── src/qwen_material_pipeline/
 │   ├── workflows/       命令工作流
-│   ├── evidence/        相机、Part-ID、颜色、PBR 与质量测量
+│   ├── evidence/        相机、零件编号、颜色、基础色/金属度/粗糙度等 PBR 参数与质量测量
 │   ├── retrieval/       SigLIP2 和 DINOv2 检索
 │   ├── materials/       MDL 目录、选择与应用规则
-│   ├── segmentation/    SAM3、EntitySeg、邻件关系引导与 hybrid mask
+│   ├── segmentation/    SAM3、EntitySeg、邻件关系引导与融合掩码
 │   ├── mvinverse/       MVInverse 适配器
-│   ├── qwen/            本地与远程 VLM 适配器
+│   ├── qwen/            本地与远程视觉语言模型适配器
 │   ├── usd/             零件索引、渲染、应用与验证
 │   ├── core/            共用数据结构
 │   ├── configs/         工具包配置
-│   ├── schemas/         JSON Schema
+│   ├── schemas/         JSON 数据格式定义
 │   └── web/             标注和结果查看器
 ├── tests/               工具包测试
 ├── docs/                工具包文档
 ├── scripts/             安装和维护脚本
 ├── requirements/        运行时和可选依赖
 ├── third_party/         保留上游许可证的第三方源码
-└── runtime/             本机模型、缓存和私有项目；Git 默认忽略
+└── runtime/             本机运行所需的模型、缓存和私有项目；Git 默认忽略
 ```
 
 运行产物只写入仓库 `outputs/`，不放入材质工具包。

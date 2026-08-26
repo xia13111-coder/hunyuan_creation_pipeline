@@ -1,7 +1,8 @@
 # MVInverse 集成说明
 
-MVInverse 从参考图预测 albedo、metallic、roughness、normal 和 shading。在本项目中，它只
-提供材质检索依据：不识别 CAD Part-ID、不直接贴图，也不修改选中的 NVIDIA MDL。
+MVInverse 从参考图预测基础色、金属程度、粗糙度、表面法线和光照分量（albedo、metallic、
+roughness、normal、shading）。在本项目中，它只为材质检索提供判断信息：不识别 CAD
+零件编号（Part-ID）、不直接贴图，也不修改选中的 NVIDIA MDL。
 
 ## 1. 本地文件
 
@@ -21,7 +22,7 @@ tools/qwen_material_pipeline/
     └── model.safetensors
 ```
 
-`third_party/mvinverse/REVISION` 固定上游源码版本。当前期望 revision 为：
+`third_party/mvinverse/REVISION` 记录并固定上游源码版本。当前期望版本号为：
 
 ```text
 6172ff9a437444df028ed67523badfa523173f21
@@ -86,7 +87,7 @@ python -m qwen_material_pipeline.mvinverse.adapter \
 ```
 
 `--dry-run` 只检查路径、许可、源码、权重和预处理。`--reuse-existing` 仅在图片、清单、
-源码 revision、权重、runner、设备和尺寸全部一致时复用结果。
+源码版本、权重、推理执行程序、设备和尺寸全部一致时复用结果。
 
 ## 6. 输出与完整性
 
@@ -105,8 +106,9 @@ mvinverse/
 └── mvinverse_inference_ledger.json
 ```
 
-账本记录原图、预处理图、源码、许可证、权重、runner 和输出的哈希。只有状态为 `SUCCESS`
-或通过完整校验的 `REUSED`，且五类 map 的数量、尺寸和哈希正确时，结果才进入下一阶段。
+运行记录保存原图、预处理图、源码、许可证、权重、推理执行程序和输出的哈希。只有状态为
+`SUCCESS` 或通过完整检查的 `REUSED`，且五类预测图的数量、尺寸和哈希正确时，结果才进入
+下一阶段。
 
 ## 7. 在材质选择中的作用
 
@@ -115,22 +117,22 @@ MVInverse 的区域统计会与以下信息共同参与 Base MDL 候选排序：
 - Qwen 对颜色、表面外观和可见物质的描述；
 - SigLIP2 的整体视觉相似度；
 - DINOv2 的局部纹理相似度；
-- NVIDIA MDL 的默认颜色、metallic 和 roughness；
+- NVIDIA MDL 的默认颜色、金属程度和粗糙度；
 - 候选绑定到真实 CAD 零件后的重渲染结果。
 
 使用时需要注意：
 
-- albedo 不是可直接写入 USD 的纹理；
-- 高光会影响 metallic，照明会影响颜色和 roughness；
-- normal 没有相机、UV 和 texel 投影时不能直接作为模型 normal map；
+- 基础色（albedo）不是可直接写入 USD 的纹理；
+- 高光会影响金属程度，照明会影响颜色和粗糙度；
+- 表面法线（normal）没有相机、纹理坐标（UV）和纹理像素投影时，不能直接作为模型法线贴图；
 - MVInverse 不知道像素属于哪个 Part-ID，零件对应关系来自相机配准和 Part-ID 渲染；
 - 单视图或小区域估计只能降低权重使用，不能视为稳定的多视角结果。
 
 最终候选必须来自 `NVIDIA/Materials/Base`，并经过真实 CAD 重渲染比较。当前生产配置在
-选择完成后锁定 MDL；MVInverse 不能再改颜色、metallic、roughness、纹理或 face subset。
+选择完成后固定 MDL；MVInverse 不能再改颜色、金属程度、粗糙度、纹理或面级材质子集。
 
 ## 8. 缓存边界
 
-每个工件生成独立的输入清单、推理记录、PBR 图和材质计划。只有输入和全部指纹一致时
+每个工件生成独立的输入清单、推理记录、PBR 图和材质计划。只有输入和全部内容摘要一致时
 才能恢复；不能把一个工件的 MVInverse 结果复制给另一个工件。需要长期保留的运行应将
 这些分析结果与收集后的 USD 和最终验证报告一起归档。

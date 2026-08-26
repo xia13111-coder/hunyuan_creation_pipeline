@@ -2,7 +2,8 @@
 
 [English](./refine.md) | [中文](./refine.zh.md) | [文档索引](../README.zh.md)
 
-网格精修模块把原始 GLB 转为适合后续 USD 和物理处理的低模 GLB。默认流程使用 Hunyuan ReduceFace，再由本地 Blender 完成投影、UV 和贴图迁移。
+网格精修模块把原始 GLB 转为适合后续 USD 和物理处理的低模 GLB。默认流程使用 Hunyuan
+ReduceFace，再由本地 Blender 完成投影、纹理坐标（UV）和贴图迁移。
 
 ## 代码
 
@@ -26,7 +27,7 @@ asset_pipeline/jobs/refine.py
 -> 导入源模型和低模结果
 -> 对齐包围盒并把低模投影回源表面
 -> 清理、法线修复和 UV 展开
--> 最近表面迁移 PBR 图片或 COLOR_0 顶点色
+-> 从最近表面迁移 PBR 外观图片或 COLOR_0 顶点色
 -> refined_asset.glb + qc_report.json
 -> postprocess_glbs/<asset>_refined.glb
 ```
@@ -38,7 +39,7 @@ asset_pipeline/jobs/refine.py
 | `--refine-config-path` | 配置文件。生产配置为 `configs/refinement/hunyuan_reduce_local_postprocess.yaml`。 |
 | `--refine-output-dir` | 指定精修工作目录；不传时在输入旁创建 `*_refined_mesh`。 |
 | `--refine-temp-upload` | 临时上传服务。`uguu` 适用于本地 GLB；`none` 关闭。 |
-| `--refine-fail-on-qc-error` | QC 为 `fail` 时停止整个流程。 |
+| `--refine-fail-on-qc-error` | 质量检查（QC）为 `fail` 时停止整个流程。 |
 | `--skip-refine` | 仅用于诊断。Hunyuan/SAM3D 正常资产不建议跳过。 |
 
 ## 重点配置
@@ -63,7 +64,8 @@ asset_pipeline/jobs/refine.py
 
 ## SAM3D 顶点色
 
-SAM3D 原始 GLB 可能没有图片贴图或 PBR 材质，而把颜色保存在网格的 `COLOR_0` 属性中。Blender 脚本按以下顺序确定 `base_color`：
+SAM3D 原始 GLB 可能没有图片贴图或基于物理的渲染材质（PBR），而把颜色保存在网格的
+`COLOR_0` 属性中。Blender 脚本按以下顺序确定 `base_color`：
 
 1. 优先采样源材质的基础色贴图。
 2. 没有图片时插值采样源顶点色。

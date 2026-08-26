@@ -2,15 +2,16 @@
 
 [English](./README.md) | [中文](./README.zh.md) | [项目 README](../../README.zh.md)
 
-为手工建模 STEP/STP 资产提供参考图驱动的 NVIDIA MDL 检索和 USD 材质工具。普通用户
-运行根命令 `manual-material-pipeline`；本子包提供其中的材质阶段。
+为手工建模 STEP/STP 资产提供参考图驱动的 NVIDIA 材质定义语言（MDL）检索和通用场景
+描述格式（USD）材质工具。普通用户运行根命令 `manual-material-pipeline`；本子包提供其中
+的材质阶段。
 
 ## 适用范围
 
 默认配置为 `src/qwen_material_pipeline/configs/pipeline/manual_part_id_materials.json`。
-流程按 CAD Part-ID 从
-NVIDIA `Materials/Base` 中选择视觉效果最接近的材质。精确目录匹配保持原始预设；仅确认
-材质类别的“对应材质”可以在 MDL 身份固定后进入独立的真实 CAD 校色流程。
+流程按 CAD 零件编号（Part-ID）从 NVIDIA `Materials/Base` 中选择视觉效果最接近的材质。
+精确目录匹配保持原始预设；如果只能确定材质类别、不能匹配到精确预设，则先固定所选 MDL，
+再进入真实 CAD 校色流程。
 
 本包负责参考图分析、相机配准、Part-ID 映射、材质检索、USD 绑定和验证。CAD 转换及
 总流程由 `asset_pipeline` 负责。
@@ -24,7 +25,7 @@ qwen-material --help
 ```
 
 本机模型和应用路径写在仓库根目录 `.env` 中，可从根目录 `.env.example` 复制。本机模型、
-缓存和私有封存项目放在 `runtime/`，不提交 Git。
+缓存和私有复现项目放在 `runtime/`，不提交 Git。
 
 可选的 Qwen3.5/SigLIP2 校验安装：
 
@@ -32,8 +33,8 @@ qwen-material --help
 bash tools/qwen_material_pipeline/scripts/qwen35/setup_qwen35_runtime.sh
 ```
 
-SAM3、EntitySeg/CropFormer、MVInverse、DINOv2、NVIDIA 材质和 Base 材质观察库是独立本机依赖，必须通过
-预检。
+SAM3、EntitySeg/CropFormer、MVInverse、DINOv2、NVIDIA 材质和 Base 材质观察库是独立本机依赖，
+运行前必须通过环境检查。
 
 参考图、清单和 STEP/STP 文件通过根命令显式传入，不复制到本包。每次运行由 `--output`
 写入仓库 `outputs/<run-id>/`。
@@ -43,7 +44,7 @@ SAM3、EntitySeg/CropFormer、MVInverse、DINOv2、NVIDIA 材质和 Base 材质�
 ```text
 归一 CAD + 已确认照片
   -> 对齐 RGB 图并提取 Part-ID 外观信息
-  -> isolated 模型图 Part-ID 模板
+  -> 从 CAD 模型单独渲染每个零件的形状模板
   -> SAM3/EntitySeg 第一遍 + 邻件引导第二遍 + 迭代融合
   -> MVInverse/SigLIP2/DINOv2/Qwen3.5
   -> Base MDL 候选渲染
@@ -53,9 +54,9 @@ SAM3、EntitySeg/CropFormer、MVInverse、DINOv2、NVIDIA 材质和 Base 材质�
 
 每个可见 Part-ID 独立判断；不可见零件使用预设默认材质。模型只负责候选排序，USD 绑定由
 经过校验的程序完成。精确库匹配保持默认参数；对应材质固定 MDL 身份后，由主流程在真实
-CAD 上自动校色，且同一照片材质组件共享一套封存参数。只有具备审核颜色接口的 MDL 才会
-写入参数；没有审核接口的对应材质保留所选库预设，不猜测参数，也不阻断其他材质继续校色。
-少数组件成员的精确预设只提供材质身份证据；只有全部成员都验证同一预设时才锁定整组原生
+CAD 上自动校色，且同一照片材质组件共享一套最终采用、后续不再修改的参数。只有程序明确支持调节颜色
+的 MDL 才会写入新参数；其他对应材质保留所选库预设，不猜测参数，也不阻断其他材质继续校色。
+少数组件成员匹配到的精确预设只能用于确认材质类型；只有全部成员都验证同一预设时才保留整组原生
 颜色，否则整组在保持 MDL 身份不变的前提下共享自动校色参数。
 
 ## 命令
@@ -68,7 +69,7 @@ CAD 上自动校色，且同一照片材质组件共享一套封存参数。只�
 | `base-bank` | 构建或验证 Base 材质观察库 |
 | `part-id-qwen` | 按 Part-ID 排序候选 |
 | `exact-mdl-tournament` | 渲染比较 MDL 候选 |
-| `run-corresponding-material-color-workflow` | 固定 MDL 后实渲选择颜色并做绝对 QA |
+| `run-corresponding-material-color-workflow` | 固定 MDL 后实际渲染、选择颜色并检查质量 |
 | `compare` | 比较参考图和渲染图 |
 | `final-visual-gate` | 验证收集后的 USD |
 | `usd` | USD 零件索引、渲染、绑定与验证 |
