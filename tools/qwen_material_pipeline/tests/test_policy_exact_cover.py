@@ -1409,6 +1409,80 @@ def test_confirmed_nvidia_mdl_replaces_corroborated_source_accent() -> None:
     ] == sorted(replaced)
 
 
+@pytest.mark.parametrize(
+    "collapse_group_field",
+    ["review_required_group_ids", "unsafe_group_ids"],
+)
+def test_collapse_recovery_group_cannot_seed_corroborated_source_mdl(
+    collapse_group_field: str,
+) -> None:
+    registry, staged, gate, whitelist, palette = _source_accent_bundle()
+    blue_polycarbonate = (
+        "mdl:vMaterials_2/Plastic/Polycarbonate_Opaque.mdl#Polycarbonate_Blue"
+    )
+    whitelist["material_ids"].append(blue_polycarbonate)
+    staged["audit"] = {
+        "collapse_check": {
+            "review_required_group_ids": [],
+            "unsafe_group_ids": [],
+        }
+    }
+    staged["audit"]["collapse_check"][collapse_group_field] = ["G01"]
+
+    plan, report = build_policy_exact_cover(
+        registry=registry,
+        staged_result=staged,
+        confidence_gate=gate,
+        whitelist=whitelist,
+        palette_fusion=palette,
+        group_materials={
+            "schema_version": "qwen-palette-material/v1",
+            "selections": [
+                {
+                    "group_id": "G01",
+                    "material_id": blue_polycarbonate,
+                    "confirmed": True,
+                    "confidence": 0.70,
+                }
+            ],
+        },
+        policy={
+            "schema_version": POLICY_SCHEMA_VERSION,
+            "source_visual_strategy": "neutralize_unverified",
+        },
+        acknowledge_policy_fallback=True,
+    )
+
+    by_id = {item["part_id"]: item for item in plan["assignments"]}
+    expected_accent_ids = {f"P{index:04d}" for index in range(1, 5)}
+    assert set(by_id) == {str(part["part_id"]) for part in registry["parts"]}
+    assert len(by_id) == registry["part_count"]
+    for part_id in expected_accent_ids:
+        assignment = by_id[part_id]
+        assert assignment["material_id"] != blue_polycarbonate
+        assert assignment["status"] == FALLBACK_STATUS
+        assert assignment["provenance"]["tier"] == SOURCE_VISUAL_PRESERVE_TIER
+        assert assignment["apply_action"] == SOURCE_VISUAL_PRESERVE_ACTION
+
+    assert report["summary"]["exact_cover"] is True
+    assert report["summary"][
+        "corroborated_source_visual_nvidia_mdl_count"
+    ] == 0
+    assert report["summary"][
+        "material_collapse_recovery_excluded_group_count"
+    ] == 1
+    assert report["corroborated_source_visual"][
+        "nvidia_mdl_replacement_part_ids"
+    ] == []
+    assert report["material_collapse_recovery"] == {
+        "excluded_group_ids": ["G01"],
+        "fallback_rule": (
+            "reviewed or unsafe palette groups cannot seed "
+            "source-visual material replacement"
+        ),
+    }
+
+
 def test_final_part_id_visibility_neutralizes_unobserved_p0181_group_attack() -> None:
     registry, staged, gate, whitelist, palette = _source_accent_bundle()
     # Reproduce the production failure shape: P0181 shares the exact blue

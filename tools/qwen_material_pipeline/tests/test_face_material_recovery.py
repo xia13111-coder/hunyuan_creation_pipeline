@@ -167,6 +167,23 @@ def test_candidate_filter_rejects_any_unrelated_failure_reason() -> None:
     assert _candidate_decisions(gate) == {}
 
 
+def test_excluded_group_never_enters_standard_candidate_creation() -> None:
+    gate = {
+        "schema_version": recovery.CONFIDENCE_GATE_SCHEMA_VERSION,
+        "policy": {
+            "auto_model_confidence": 0.9,
+            "review_mapping_confidence": 0.6,
+            "auto_material_choice_confidence": 0.85,
+            "minimum_candidate_margin": 0.15,
+            "minimum_independent_references": 2,
+        },
+        "decisions": [_gate_decision()],
+    }
+
+    assert set(_candidate_decisions(gate)) == {"P0001"}
+    assert _candidate_decisions(gate, excluded_group_ids={"G01"}) == {}
+
+
 def _group_material_evidence() -> tuple[dict[str, Any], dict[str, Any]]:
     material_id = "mdl:vMaterials_2/Metal/Steel_Painted.mdl#Green"
     group_materials = {
@@ -317,6 +334,38 @@ def test_spatial_override_accepts_two_registered_independent_views() -> None:
             spatial_mapping_report=report,
             group_material_candidates=choices,
             policy=recovery.DEFAULT_POLICY,
+        )
+        == {}
+    )
+
+
+def test_excluded_group_never_enters_spatial_candidate_creation() -> None:
+    group_materials, audit = _group_material_evidence()
+    material_id = group_materials["selections"][0]["material_id"]
+    unfiltered_choices = _group_material_candidates(
+        group_materials=group_materials,
+        material_choice_audit=audit,
+        allowed_material_ids={material_id},
+        policy=recovery.DEFAULT_POLICY,
+    )
+
+    assert (
+        _group_material_candidates(
+            group_materials=group_materials,
+            material_choice_audit=audit,
+            allowed_material_ids={material_id},
+            policy=recovery.DEFAULT_POLICY,
+            excluded_group_ids={"G01"},
+        )
+        == {}
+    )
+    assert (
+        _spatial_override_candidates(
+            confidence_gate=_spatial_override_gate(),
+            spatial_mapping_report=_spatial_override_report(),
+            group_material_candidates=unfiltered_choices,
+            policy=recovery.DEFAULT_POLICY,
+            excluded_group_ids={"G01"},
         )
         == {}
     )
@@ -759,3 +808,28 @@ def test_insufficient_registered_views_preserve_base_plan_without_face_subsets(
     unsigned = dict(report)
     integrity = unsigned.pop("integrity")
     assert integrity == {"report_sha256": recovery._sha256_document(unsigned)}
+
+    excluded_report = build_face_material_recovery(
+        base_material_plan=base_plan,
+        confidence_gate=gate,
+        face_region_manifest=manifest_path,
+        spatial_mapping_report=spatial,
+        canonical_palette=palette,
+        mvinverse_evidence=mvinverse,
+        batches=[],
+        allowed_material_ids=["generic-painted", "painted-green"],
+        excluded_group_ids={"G01"},
+    )
+
+    assert excluded_report["recovery_gate"]["candidate_part_ids"] == []
+    assert excluded_report["summary"]["excluded_material_group_count"] == 1
+    assert excluded_report["material_collapse_recovery"] == {
+        "excluded_group_ids": ["G01"],
+        "candidate_policy": (
+            "exclude_before_standard_and_spatial_candidate_creation"
+        ),
+    }
+    assert excluded_report["inputs"]["document_sha256"][
+        "excluded_group_ids"
+    ] == recovery._sha256_document(["G01"])
+    assert excluded_report["material_plan"] == base_plan

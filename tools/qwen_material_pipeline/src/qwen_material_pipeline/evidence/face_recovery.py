@@ -468,8 +468,37 @@ def _face_indices(patch: Mapping[str, Any], face_count: int) -> list[int]:
     return result
 
 
+def _excluded_group_id_set(
+    excluded_group_ids: Iterable[str] | None,
+) -> set[str]:
+    """Normalize an optional fail-closed palette-group exclusion."""
+
+    if excluded_group_ids is None:
+        return set()
+    if isinstance(excluded_group_ids, (str, bytes)):
+        raise FaceMaterialRecoveryError(
+            "excluded_group_ids must be an iterable of group IDs"
+        )
+    try:
+        raw_group_ids = list(excluded_group_ids)
+    except TypeError as exc:
+        raise FaceMaterialRecoveryError(
+            "excluded_group_ids must be an iterable of group IDs"
+        ) from exc
+    result: set[str] = set()
+    for index, raw_group_id in enumerate(raw_group_ids):
+        if not isinstance(raw_group_id, str) or not raw_group_id.strip():
+            raise FaceMaterialRecoveryError(
+                f"excluded_group_ids[{index}] must be a non-empty string"
+            )
+        result.add(raw_group_id.strip())
+    return result
+
+
 def _candidate_decisions(
     confidence_gate: Mapping[str, Any],
+    *,
+    excluded_group_ids: Iterable[str] | None = None,
 ) -> dict[str, Mapping[str, Any]]:
     if confidence_gate.get("schema_version") != CONFIDENCE_GATE_SCHEMA_VERSION:
         raise FaceMaterialRecoveryError("confidence-gate schema is unsupported")
@@ -479,6 +508,7 @@ def _candidate_decisions(
     minimum_choice = float(gate_policy.get("auto_material_choice_confidence", 0.85))
     minimum_margin = float(gate_policy.get("minimum_candidate_margin", 0.15))
     minimum_references = int(gate_policy.get("minimum_independent_references", 2))
+    excluded_groups = _excluded_group_id_set(excluded_group_ids)
     result: dict[str, Mapping[str, Any]] = {}
     seen: set[str] = set()
     for index, raw in enumerate(
@@ -525,6 +555,7 @@ def _candidate_decisions(
             and model["independent_reference_count"] >= minimum_references
             and isinstance(group_id, str)
             and bool(group_id)
+            and group_id not in excluded_groups
             and isinstance(mapping.get("confidence"), (int, float))
             and not isinstance(mapping.get("confidence"), bool)
             and float(mapping["confidence"]) >= minimum_mapping
@@ -554,6 +585,7 @@ def _group_material_candidates(
     material_choice_audit: Mapping[str, Any] | None,
     allowed_material_ids: set[str],
     policy: Mapping[str, float | int | bool],
+    excluded_group_ids: Iterable[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Return only group choices with independent, order-stable Qwen evidence."""
 
@@ -565,6 +597,7 @@ def _group_material_candidates(
         )
     if group_materials.get("schema_version") != GROUP_MATERIAL_SCHEMA_VERSION:
         raise FaceMaterialRecoveryError("group-material schema is unsupported")
+    excluded_groups = _excluded_group_id_set(excluded_group_ids)
     minimum_confidence = float(policy["minimum_spatial_override_material_confidence"])
     minimum_margin = float(policy["minimum_spatial_override_material_margin"])
     minimum_views = int(policy["minimum_spatial_override_material_views"])
@@ -589,6 +622,8 @@ def _group_material_candidates(
         ):
             raise FaceMaterialRecoveryError("group-material selections are invalid")
         seen.add(group_id)
+        if group_id in excluded_groups:
+            continue
         audit = material_choice_audit.get(group_id)
         if not isinstance(audit, Mapping):
             continue
@@ -738,6 +773,7 @@ def _spatial_override_candidates(
     spatial_mapping_report: Mapping[str, Any],
     group_material_candidates: Mapping[str, Mapping[str, Any]],
     policy: Mapping[str, float | int | bool],
+    excluded_group_ids: Iterable[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Select review parts whose photo-space evidence corrects a Qwen mapping."""
 
@@ -757,6 +793,7 @@ def _spatial_override_candidates(
             )
         decisions[part_id] = decision
 
+    excluded_groups = _excluded_group_id_set(excluded_group_ids)
     minimum_supports = int(policy["minimum_spatial_override_support_views"])
     minimum_registrations = int(policy["minimum_spatial_override_registration_views"])
     minimum_unknown_supports = int(
@@ -833,6 +870,8 @@ def _spatial_override_candidates(
         if len(supported_groups) != 1:
             continue
         target_group_id = supported_groups[0]
+        if target_group_id in excluded_groups:
+            continue
         required_supports = (
             minimum_unknown_supports if unknown_model_eligible else minimum_supports
         )
@@ -1346,6 +1385,7 @@ def build_face_material_recovery(
     allowed_material_ids: Iterable[str],
     group_materials: Mapping[str, Any] | None = None,
     material_choice_audit: Mapping[str, Any] | None = None,
+    excluded_group_ids: Iterable[str] | None = None,
     policy: Mapping[str, Any] | None = None,
     allow_parameter_writes: bool = True,
 ) -> dict[str, Any]:
@@ -1354,6 +1394,7 @@ def build_face_material_recovery(
     if not isinstance(allow_parameter_writes, bool):
         raise FaceMaterialRecoveryError("allow_parameter_writes must be boolean")
     selected_policy = _validated_policy(policy)
+    excluded_groups = _excluded_group_id_set(excluded_group_ids)
     allowed_material_id_set: set[str] = set()
     for value in allowed_material_ids:
         if not isinstance(value, str) or not value:
@@ -1426,13 +1467,22 @@ def build_face_material_recovery(
 
     groups = _palette_groups(canonical_palette)
     groups_by_id = {group["group_id"]: group for group in groups}
+    unknown_excluded_groups = sorted(excluded_groups - set(groups_by_id))
+    if unknown_excluded_groups:
+        raise FaceMaterialRecoveryError(
+            "excluded_group_ids contain groups outside the canonical palette: "
+            f"{unknown_excluded_groups}"
+        )
     evidence_groups = {
         group["group_id"]: group
         for group in _array(verified_mvinverse.get("groups"), "mvinverse.groups")
         if isinstance(group, Mapping) and isinstance(group.get("group_id"), str)
     }
     standard_candidates: dict[str, dict[str, Any]] = {}
-    for part_id, decision in _candidate_decisions(confidence_gate).items():
+    for part_id, decision in _candidate_decisions(
+        confidence_gate,
+        excluded_group_ids=excluded_groups,
+    ).items():
         group_id = decision["mapping"]["group_id"]
         choice = decision["material_choice"]
         if (
@@ -1459,12 +1509,14 @@ def build_face_material_recovery(
         material_choice_audit=material_choice_audit,
         allowed_material_ids=allowed_material_id_set,
         policy=selected_policy,
+        excluded_group_ids=excluded_groups,
     )
     spatial_candidates = _spatial_override_candidates(
         confidence_gate=confidence_gate,
         spatial_mapping_report=spatial_mapping_report,
         group_material_candidates=group_choices,
         policy=selected_policy,
+        excluded_group_ids=excluded_groups,
     )
     spatial_candidates = {
         part_id: candidate
@@ -1492,6 +1544,23 @@ def build_face_material_recovery(
         document_hashes["material_choice_audit"] = _sha256_document(
             material_choice_audit
         )
+    if excluded_groups:
+        document_hashes["excluded_group_ids"] = _sha256_document(
+            sorted(excluded_groups)
+        )
+
+    collapse_recovery_audit = (
+        {
+            "material_collapse_recovery": {
+                "excluded_group_ids": sorted(excluded_groups),
+                "candidate_policy": (
+                    "exclude_before_standard_and_spatial_candidate_creation"
+                ),
+            }
+        }
+        if excluded_groups
+        else {}
+    )
 
     files: list[dict[str, str]] = [
         {
@@ -1561,7 +1630,13 @@ def build_face_material_recovery(
                 "base_uniform_assignment_count": len(base_assignments),
                 "output_assignment_count": len(output_plan["assignments"]),
                 "parent_material_bindings_preserved": True,
+                **(
+                    {"excluded_material_group_count": len(excluded_groups)}
+                    if excluded_groups
+                    else {}
+                ),
             },
+            **collapse_recovery_audit,
             "parts": [
                 {
                     "part_id": part_id,
@@ -1893,6 +1968,11 @@ def build_face_material_recovery(
             "output_assignment_count": len(output_plan["assignments"]),
             "parent_material_bindings_preserved": True,
             **(
+                {"excluded_material_group_count": len(excluded_groups)}
+                if excluded_groups
+                else {}
+            ),
+            **(
                 {
                     "excluded_unprojected_trusted_view_ids": (
                         excluded_unprojected_view_ids
@@ -1902,6 +1982,7 @@ def build_face_material_recovery(
                 else {}
             ),
         },
+        **collapse_recovery_audit,
         "parts": part_audits,
         "parameterization": parameterization_audit,
         "material_plan": output_plan,

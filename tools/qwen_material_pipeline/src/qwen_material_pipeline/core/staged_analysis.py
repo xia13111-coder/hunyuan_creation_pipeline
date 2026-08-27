@@ -88,6 +88,15 @@ FINISH_HINTS = frozenset(
         "unknown",
     }
 )
+_ROUGHNESS_CLASS_BY_FINISH = {
+    "glossy": "glossy",
+    "polished": "glossy",
+    "smooth": "glossy",
+    "brushed": "satin",
+    "matte": "matte",
+    "rough": "matte",
+}
+_STRUCTURAL_FINISHES = frozenset({"painted", "bare", "translucent", "brushed"})
 
 MAPPING_STATUSES = frozenset({"matched", "review", "unknown"})
 MATCHED_REASON_CODES = frozenset({"shape_and_location", "direct_visual_match"})
@@ -109,6 +118,7 @@ UNKNOWN_REASON_CODES = frozenset(
         "partial_visibility",
         "no_cad_render",
         "multi_material_mesh",
+        "material_collapse_recovery",
     }
 )
 _GROUP_ID_RE = re.compile(r"G[0-9]{2,4}")
@@ -117,28 +127,6 @@ _BATCH_ID_RE = re.compile(r"B[0-9]{2,4}")
 
 class StagedAnalysisError(ValueError):
     """Raised when staged analysis data is malformed, incomplete, or unsafe."""
-
-
-class MaterialCollapseError(StagedAnalysisError):
-    """Raised when material inference collapses a diverse reference.
-
-    The stage metadata lets the subprocess boundary classify this deterministic
-    quality failure and suppress an identical fresh-process retry.
-    """
-
-    stage_name = "material_collapse_gate"
-    reason = "material_collapse_detected"
-
-    def __init__(self, diagnostic: Mapping[str, Any]) -> None:
-        self.diagnostic = dict(diagnostic)
-        reasons = self.diagnostic.get("reasons")
-        rendered_reasons = (
-            "; ".join(str(item) for item in reasons)
-            if isinstance(reasons, Sequence)
-            and not isinstance(reasons, (str, bytes))
-            else "invalid collapse diagnostic"
-        )
-        super().__init__("Material collapse detected: " + rendered_reasons)
 
 
 def _require_exact_fields(
@@ -915,8 +903,9 @@ def detect_material_collapse(
     pre_filter_palette_group_count: int | None = None,
     orientation_confidence: float = 1.0,
     total_part_count: int | None = None,
+    parameter_authoring_evidence: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Detect dominant-group, material, and evidence-filter collapse patterns.
+    """Diagnose material collapse and describe deterministic recovery.
 
     ``pre_filter_palette_group_count`` is optional so older callers retain the
     previous behavior.  When supplied, it makes loss of a multi-group model
@@ -947,6 +936,48 @@ def detect_material_collapse(
     normalized_minimum_eligible_retention_share = float(
         minimum_eligible_retention_share
     )
+    if parameter_authoring_evidence is None:
+        parameter_evidence_by_group: dict[str, dict[str, str]] = {}
+    else:
+        if not isinstance(parameter_authoring_evidence, Mapping):
+            raise StagedAnalysisError(
+                "parameter_authoring_evidence must be an object keyed by group ID"
+            )
+        parameter_evidence_by_group = {}
+        for raw_group_id, raw_evidence in parameter_authoring_evidence.items():
+            group_id = _require_nonempty_string(
+                raw_group_id,
+                "parameter_authoring_evidence group ID",
+            )
+            evidence = _require_mapping(
+                raw_evidence,
+                f"parameter_authoring_evidence[{group_id}]",
+            )
+            _require_exact_fields(
+                evidence,
+                {"base_color", "roughness_class"},
+                f"parameter_authoring_evidence[{group_id}]",
+            )
+            base_color = evidence["base_color"]
+            roughness_class = evidence["roughness_class"]
+            if not isinstance(base_color, str) or base_color not in BASE_COLORS:
+                raise StagedAnalysisError(
+                    f"parameter_authoring_evidence[{group_id}].base_color "
+                    f"must be one of {sorted(BASE_COLORS)}"
+                )
+            if not isinstance(roughness_class, str) or roughness_class not in {
+                "glossy",
+                "satin",
+                "matte",
+            }:
+                raise StagedAnalysisError(
+                    f"parameter_authoring_evidence[{group_id}].roughness_class "
+                    "must be glossy, satin, or matte"
+                )
+            parameter_evidence_by_group[group_id] = {
+                "base_color": str(base_color),
+                "roughness_class": str(roughness_class),
+            }
 
     canonical_palette = validate_palette(palette)
     orientation = _require_confidence(
@@ -972,6 +1003,12 @@ def detect_material_collapse(
         material_selections, palette=canonical_palette
     )
     group_records = {group["group_id"]: group for group in canonical_palette["groups"]}
+    unknown_parameter_groups = set(parameter_evidence_by_group) - set(group_records)
+    if unknown_parameter_groups:
+        raise StagedAnalysisError(
+            "parameter_authoring_evidence contains groups outside the palette: "
+            f"{sorted(unknown_parameter_groups)}"
+        )
     selection_by_group = {
         selection["group_id"]: selection
         for selection in canonical_selections["selections"]
@@ -1078,15 +1115,141 @@ def detect_material_collapse(
         for selection in canonical_selections["selections"]
     )
     used_group_ids = set(group_counts)
-    used_colors = {group_records[group_id]["base_color"] for group_id in used_group_ids}
     used_materials = {
         selection_by_group[group_id]["material_id"]
         for group_id in used_group_ids
         if group_id in selection_by_group
     }
 
+    # Downstream spatial and source-visual recovery paths can consume a raw
+    # group selection even when no part mapping reached REVIEW_THRESHOLD.
+    # Therefore collision recovery must cover every selected group, not just
+    # the subset that can enter the initial material plan.
+    authorable_selection_group_ids = {
+        group_id
+        for group_id, selection in selection_by_group.items()
+        if selection["confidence"] >= REVIEW_THRESHOLD
+    }
+    groups_by_material: dict[str, list[str]] = {}
+    for group_id in sorted(authorable_selection_group_ids):
+        material_id = selection_by_group[group_id]["material_id"]
+        groups_by_material.setdefault(material_id, []).append(group_id)
+    color_material_collisions: list[dict[str, Any]] = []
+    color_tunable_identity_shares: list[dict[str, Any]] = []
+    parameterized_finish_shares: list[dict[str, Any]] = []
+    material_identity_collisions: list[dict[str, Any]] = []
+    collision_group_ids: set[str] = set()
+    for material_id in sorted(groups_by_material):
+        group_ids = groups_by_material[material_id]
+        if len(group_ids) < 2:
+            continue
+        base_colors = sorted(
+            {group_records[group_id]["base_color"] for group_id in group_ids}
+        )
+        affected_part_ids = sorted(
+            {
+                str(mapping["part_id"])
+                for mapping in usable_mappings
+                if mapping["group_id"] in group_ids
+            }
+        )
+        family_hints = sorted(
+            {
+                group_records[group_id]["family_hint"]
+                for group_id in group_ids
+                if group_records[group_id]["family_hint"]
+                not in {"other", "unknown"}
+            }
+        )
+        finish_hints = sorted(
+            {
+                group_records[group_id]["finish_hint"]
+                for group_id in group_ids
+                if group_records[group_id]["finish_hint"]
+                not in {"other", "unknown"}
+            }
+        )
+        structural_finishes = {
+            finish for finish in finish_hints if finish in _STRUCTURAL_FINISHES
+        }
+        expected_roughness_by_group = {
+            group_id: _ROUGHNESS_CLASS_BY_FINISH[
+                group_records[group_id]["finish_hint"]
+            ]
+            for group_id in group_ids
+            if group_records[group_id]["finish_hint"]
+            in _ROUGHNESS_CLASS_BY_FINISH
+        }
+        roughness_finish_conflict = (
+            len(set(expected_roughness_by_group.values())) > 1
+        )
+        roughness_parameters_match = (
+            set(group_ids) <= set(parameter_evidence_by_group)
+            and all(
+                parameter_evidence_by_group[group_id]["roughness_class"]
+                == expected_class
+                for group_id, expected_class in expected_roughness_by_group.items()
+            )
+        )
+        identity_conflicts: list[str] = []
+        if len(family_hints) > 1:
+            identity_conflicts.append("incompatible_material_families")
+        if len(structural_finishes) > 1 or (
+            "brushed" in finish_hints and len(finish_hints) > 1
+        ):
+            identity_conflicts.append("incompatible_surface_treatments")
+        if roughness_finish_conflict and not roughness_parameters_match:
+            identity_conflicts.append("incompatible_roughness_finishes")
+        elif roughness_finish_conflict and not identity_conflicts:
+            parameterized_finish_shares.append(
+                {
+                    "material_id": material_id,
+                    "group_ids": list(group_ids),
+                    "finish_hints": finish_hints,
+                    "roughness_classes": {
+                        group_id: parameter_evidence_by_group[group_id][
+                            "roughness_class"
+                        ]
+                        for group_id in sorted(group_ids)
+                    },
+                    "affected_part_ids": affected_part_ids,
+                }
+            )
+        if identity_conflicts:
+            collision_group_ids.update(group_ids)
+            material_identity_collisions.append(
+                {
+                    "material_id": material_id,
+                    "group_ids": list(group_ids),
+                    "family_hints": family_hints,
+                    "finish_hints": finish_hints,
+                    "reason_codes": identity_conflicts,
+                    "affected_part_ids": affected_part_ids,
+                }
+            )
+
+        if len(base_colors) < 2:
+            continue
+        color_record = {
+            "material_id": material_id,
+            "group_ids": list(group_ids),
+            "base_colors": base_colors,
+            "affected_part_ids": affected_part_ids,
+        }
+        color_parameters_match = all(
+            parameter_evidence_by_group.get(group_id, {}).get("base_color")
+            == group_records[group_id]["base_color"]
+            for group_id in group_ids
+        )
+        if not identity_conflicts and color_parameters_match:
+            color_tunable_identity_shares.append(color_record)
+            continue
+        collision_group_ids.update(group_ids)
+        color_material_collisions.append(color_record)
+
     reasons: list[str] = []
     recovery_reasons: list[str] = []
+    unsafe_group_ids: set[str] = set()
     palette_filter_collapse = (
         palette_filter_context_supplied
         and original_palette_group_count > 1
@@ -1096,22 +1259,57 @@ def detect_material_collapse(
         reasons.append(
             "palette evidence filtering reduced multiple model groups to one group"
         )
-    if (
-        len(used_colors) >= 2
-        and len(used_materials) == 1
-        and all(group_id in selection_by_group for group_id in used_group_ids)
-    ):
-        reasons.append("different palette colors resolved to one material_id")
-    if (
+        # Filtering already removed the other groups.  Mark every surviving
+        # canonical group unsafe even when all current part mappings are below
+        # the authoring threshold; raw group evidence is still visible to
+        # downstream recovery paths.
+        unsafe_group_ids.update(group_records)
+    if color_material_collisions:
+        # Material identity and colour are separate in the current pipeline.
+        # Sharing one identity across colours can be valid when a later,
+        # independently checked per-scope colour stage supplies the colour.
+        # It can also expose a weak immutable-preset choice.  Preserve the
+        # diagnostic, but require review instead of aborting before Part-ID
+        # retrieval has a chance to resolve the ambiguity.
+        recovery_reasons.append(
+            "different palette colors resolved to one material_id without "
+            "verified per-group parameter authoring"
+        )
+    if material_identity_collisions:
+        recovery_reasons.append(
+            "incompatible material identity hints resolved to one material_id"
+        )
+    dominant_collapse = (
         mapped_count >= minimum_assignments
         and len(reliable_groups) >= 3
         and dominant_group_share >= dominance_threshold
         and dominant_material_share >= dominance_threshold
         and absolute_dominant_group_share >= dominance_threshold
-    ):
+    )
+    dominant_group_id = (
+        min(
+            group_id
+            for group_id, count in group_counts.items()
+            if count == max(group_counts.values())
+        )
+        if group_counts
+        else None
+    )
+    dominant_material_id = (
+        min(
+            material_id
+            for material_id, count in material_counts.items()
+            if count == max(material_counts.values())
+        )
+        if material_counts
+        else None
+    )
+    if dominant_collapse:
         reasons.append(
             "one palette group and material dominate a visibly diverse reference"
         )
+        if dominant_group_id is not None:
+            unsafe_group_ids.add(dominant_group_id)
     evidence_starvation = (
         len(reliable_groups) >= 3
         and raw_mapped_count >= minimum_assignments
@@ -1128,12 +1326,34 @@ def detect_material_collapse(
         recovery_reasons.append(
             "authoring evidence starved after confidence filtering"
         )
+    if unsafe_group_ids:
+        recovery_reasons.append(
+            "unsafe collapsed assignments require policy fallback"
+        )
 
+    recovery_required = bool(
+        evidence_starvation
+        or color_material_collisions
+        or material_identity_collisions
+        or unsafe_group_ids
+    )
     return {
         "detected": bool(reasons),
         "reasons": reasons,
-        "recovery_required": evidence_starvation,
+        "recovery_required": recovery_required,
         "recovery_reasons": recovery_reasons,
+        "color_material_collisions": color_material_collisions,
+        "color_tunable_identity_shares": color_tunable_identity_shares,
+        "parameterized_finish_shares": parameterized_finish_shares,
+        "material_identity_collisions": material_identity_collisions,
+        "parameter_authoring_evidence": {
+            group_id: parameter_evidence_by_group[group_id]
+            for group_id in sorted(parameter_evidence_by_group)
+        },
+        "review_required_group_ids": sorted(
+            collision_group_ids - unsafe_group_ids
+        ),
+        "unsafe_group_ids": sorted(unsafe_group_ids),
         "mapped_assignment_count": mapped_count,
         "selected_assignment_count": selected_count,
         "raw_mapped_assignment_count": raw_mapped_count,
@@ -1156,10 +1376,54 @@ def detect_material_collapse(
         "used_material_count": len(used_materials),
         "dominant_group_share": dominant_group_share,
         "dominant_material_share": dominant_material_share,
+        "dominant_group_id": dominant_group_id,
+        "dominant_material_id": dominant_material_id,
         "absolute_dominant_group_share": absolute_dominant_group_share,
         "raw_dominant_group_share": raw_dominant_group_share,
         "raw_dominant_material_share": raw_dominant_material_share,
     }
+
+
+def collapse_recovery_group_ids(staged_result: Mapping[str, Any]) -> set[str]:
+    """Return palette groups barred from downstream material authoring.
+
+    The IDs are recorded by :func:`merge_staged_results` and must be honored by
+    every later recovery lane that can consume raw group-level evidence.
+    Missing audit data is valid for results produced before collapse recovery
+    was introduced.
+    """
+
+    document = _require_mapping(staged_result, "staged_result")
+    raw_audit = document.get("audit")
+    if raw_audit is None:
+        return set()
+    audit = _require_mapping(raw_audit, "staged_result.audit")
+    raw_check = audit.get("collapse_check")
+    if raw_check is None:
+        return set()
+    check = _require_mapping(raw_check, "staged_result.audit.collapse_check")
+
+    group_ids: set[str] = set()
+    for field in ("review_required_group_ids", "unsafe_group_ids"):
+        raw_values = check.get(field, [])
+        if isinstance(raw_values, (str, bytes)) or not isinstance(
+            raw_values, Sequence
+        ):
+            raise StagedAnalysisError(
+                f"staged_result.audit.collapse_check.{field} must be an array"
+            )
+        for index, raw_group_id in enumerate(raw_values):
+            group_id = _require_nonempty_string(
+                raw_group_id,
+                f"staged_result.audit.collapse_check.{field}[{index}]",
+            )
+            if not _GROUP_ID_RE.fullmatch(group_id):
+                raise StagedAnalysisError(
+                    "collapse recovery group IDs must use G followed by 2..4 "
+                    f"digits: {group_id}"
+                )
+            group_ids.add(group_id)
+    return group_ids
 
 
 def merge_staged_results(
@@ -1176,12 +1440,16 @@ def merge_staged_results(
     minimum_collapse_assignments: int = 8,
     minimum_eligible_retention_share: float = 0.20,
     pre_filter_palette_group_count: int | None = None,
+    parameter_authoring_evidence: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Validate and merge disjoint batches into a non-applying unknown audit.
+    """Validate and merge disjoint batches with safe collapse recovery.
 
     Every registered part must be either present in exactly one declared batch
     target or explicitly listed in ``forced_unknown_parts``.  Batch-level
     unknown mappings and forced unknowns are omitted from ``material_plan``.
+    Cross-colour identity conflicts remain review-only for the downstream
+    Part-ID selector; unsafe global collapse is converted to explicit unknowns
+    instead of terminating the workflow.
     """
 
     canonical_palette = validate_palette(palette)
@@ -1280,18 +1548,24 @@ def merge_staged_results(
         pre_filter_palette_group_count=pre_filter_palette_group_count,
         orientation_confidence=orientation,
         total_part_count=len(all_parts),
+        parameter_authoring_evidence=parameter_authoring_evidence,
     )
-    if collapse["detected"]:
-        raise MaterialCollapseError(collapse)
-
     assignments: list[dict[str, Any]] = []
     unknown_by_part: dict[str, str] = dict(normalized_forced)
+    unsafe_group_ids = set(collapse["unsafe_group_ids"])
+    review_required_group_ids = set(collapse["review_required_group_ids"])
+    collapse_unknown_part_ids: list[str] = []
+    collapse_review_part_ids: list[str] = []
     for mapping in mappings:
         part_id = mapping["part_id"]
         if mapping["status"] == "unknown":
             unknown_by_part[part_id] = mapping["reason_code"]
             continue
         group_id = mapping["group_id"]
+        if group_id in unsafe_group_ids:
+            unknown_by_part[part_id] = "material_collapse_recovery"
+            collapse_unknown_part_ids.append(part_id)
+            continue
         selection = selection_by_group.get(group_id)
         if selection is None:
             unknown_by_part[part_id] = "missing_material_selection"
@@ -1310,6 +1584,7 @@ def merge_staged_results(
             combined_confidence >= AUTO_THRESHOLD
             and mapping["status"] == "matched"
             and selection["confirmed"]
+            and group_id not in review_required_group_ids
         )
         if can_auto:
             status = "auto"
@@ -1317,6 +1592,8 @@ def merge_staged_results(
         else:
             status = "review"
             final_confidence = min(combined_confidence, REVIEW_CONFIDENCE_CAP)
+            if group_id in review_required_group_ids:
+                collapse_review_part_ids.append(part_id)
         assignments.append(
             {
                 "part_id": part_id,
@@ -1342,6 +1619,14 @@ def merge_staged_results(
 
     auto_count = sum(assignment["status"] == "auto" for assignment in assignments)
     review_count = len(assignments) - auto_count
+    collapse = {
+        **collapse,
+        "recovery_applied": bool(
+            collapse_unknown_part_ids or collapse_review_part_ids
+        ),
+        "recovered_to_unknown_part_ids": sorted(collapse_unknown_part_ids),
+        "review_required_part_ids": sorted(collapse_review_part_ids),
+    }
     return {
         "schema_version": STAGED_RESULT_SCHEMA_VERSION,
         "material_plan": {
@@ -1368,9 +1653,9 @@ __all__ = [
     "GROUP_MATERIAL_SCHEMA_VERSION",
     "PALETTE_SCHEMA_VERSION",
     "STAGED_RESULT_SCHEMA_VERSION",
-    "MaterialCollapseError",
     "StagedAnalysisError",
     "UNKNOWN_REASON_CODES",
+    "collapse_recovery_group_ids",
     "detect_material_collapse",
     "merge_staged_results",
     "normalize_part_palette_batch",

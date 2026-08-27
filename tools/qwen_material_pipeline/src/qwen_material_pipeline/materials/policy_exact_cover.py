@@ -46,6 +46,10 @@ from .tuning import (
     tune_selected_material_from_mvinverse,
     tuning_profile_for_material,
 )
+from ..core.staged_analysis import (
+    StagedAnalysisError,
+    collapse_recovery_group_ids,
+)
 from ..evidence.color_semantics import (
     fusion_color_label,
     pixel_color_label,
@@ -596,6 +600,19 @@ def _candidate_assignments(
             )
         result[part_id] = assignment
     return result
+
+
+def _collapse_recovery_group_ids(
+    staged_result: Mapping[str, Any],
+) -> set[str]:
+    """Return palette groups that cannot seed a fallback material."""
+
+    try:
+        return collapse_recovery_group_ids(staged_result)
+    except StagedAnalysisError as exc:
+        raise PolicyExactCoverError(
+            f"staged collapse recovery audit is invalid: {exc}"
+        ) from exc
 
 
 def _autonomous_base_assignments(
@@ -2380,6 +2397,7 @@ def _mvinverse_parameterizations(
     allowed_material_ids: set[str],
     palette_fusion: Mapping[str, Any] | None = None,
     key_by_group: bool = False,
+    excluded_group_ids: set[str] | None = None,
 ) -> tuple[dict[str, tuple[dict[str, Any], dict[str, Any]]], list[dict[str, Any]]]:
     if group_materials is None and mvinverse_pbr_evidence is None:
         return {}, []
@@ -2523,6 +2541,7 @@ def _mvinverse_parameterizations(
             except ValueError:
                 raise full_error
 
+    excluded_groups = excluded_group_ids or set()
     candidates_by_material: dict[str, list[tuple[str, Mapping[str, Any]]]] = (
         defaultdict(list)
     )
@@ -2550,6 +2569,15 @@ def _mvinverse_parameterizations(
                 f"group material {group_id} is outside industrial whitelist: "
                 f"{material_id}"
             )
+        if group_id in excluded_groups:
+            skipped.append(
+                {
+                    "group_id": group_id,
+                    "material_id": material_id,
+                    "reason_code": "MATERIAL_COLLAPSE_RECOVERY_REQUIRED",
+                }
+            )
+            continue
         if selection.get("confirmed") is not True:
             skipped.append(
                 {
@@ -2642,6 +2670,7 @@ def _corroborated_group_material_selections(
     group_materials: Mapping[str, Any] | None,
     allowed_material_ids: set[str],
     allow_high_confidence_provisional: bool,
+    excluded_group_ids: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Return exact NVIDIA MDL choices eligible for source corroboration.
 
@@ -2660,6 +2689,7 @@ def _corroborated_group_material_selections(
         )
     if group_materials.get("schema_version") != GROUP_MATERIALS_SCHEMA_VERSION:
         raise PolicyExactCoverError("group_materials has an unsupported schema_version")
+    excluded_groups = excluded_group_ids or set()
     result: dict[str, dict[str, Any]] = {}
     seen: set[str] = set()
     for index, raw_selection in enumerate(
@@ -2687,6 +2717,8 @@ def _corroborated_group_material_selections(
                 f"group material {group_id} is outside industrial whitelist: "
                 f"{material_id}"
             )
+        if group_id in excluded_groups:
+            continue
         confirmed = selection.get("confirmed")
         confidence = selection.get("confidence")
         normalized_confidence = _unit_or_zero(confidence)
@@ -2828,6 +2860,9 @@ def build_policy_exact_cover(
         registry_ids=registry_ids,
         allowed_material_ids=allowed_material_ids,
     )
+    collapse_recovery_excluded_group_ids = _collapse_recovery_group_ids(
+        staged_result
+    )
     autonomous_base = _autonomous_base_assignments(
         base_plan,
         registry_ids=registry_ids,
@@ -2868,11 +2903,13 @@ def build_policy_exact_cover(
         allowed_material_ids=allowed_material_ids,
         palette_fusion=palette_fusion,
         key_by_group=palette_fusion is not None,
+        excluded_group_ids=collapse_recovery_excluded_group_ids,
     )
     corroborated_group_materials = _corroborated_group_material_selections(
         group_materials=group_materials,
         allowed_material_ids=allowed_material_ids,
         allow_high_confidence_provisional=immutable_mdl_after_selection,
+        excluded_group_ids=collapse_recovery_excluded_group_ids,
     )
 
     output: dict[str, dict[str, Any]] = {}
@@ -3356,6 +3393,15 @@ def build_policy_exact_cover(
         "confidence_gate_auto_count": len(gate_auto),
         "output_assignment_count": len(assignments),
         "policy_fallback_count": status_counts[FALLBACK_STATUS],
+        **(
+            {
+                "material_collapse_recovery_excluded_group_count": len(
+                    collapse_recovery_excluded_group_ids
+                )
+            }
+            if collapse_recovery_excluded_group_ids
+            else {}
+        ),
         "mvinverse_parameterized_part_count": len(parameterized_part_ids),
         "neutral_default_count": neutral_default_count,
         "source_visual_preserve_count": source_visual_preserve_count,
@@ -3432,6 +3478,21 @@ def build_policy_exact_cover(
                 corroborated_source_visual_mdl_part_ids
             ),
         },
+        **(
+            {
+                "material_collapse_recovery": {
+                    "excluded_group_ids": sorted(
+                        collapse_recovery_excluded_group_ids
+                    ),
+                    "fallback_rule": (
+                        "reviewed or unsafe palette groups cannot seed "
+                        "source-visual material replacement"
+                    ),
+                }
+            }
+            if collapse_recovery_excluded_group_ids
+            else {}
+        ),
         **(
             {
                 "part_id_evidence_convergence": {

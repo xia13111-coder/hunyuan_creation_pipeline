@@ -6,7 +6,6 @@ from qwen_material_pipeline.qwen.client import validate_material_plan
 from qwen_material_pipeline.core.staged_analysis import (
     BATCH_SCHEMA_VERSION,
     GROUP_MATERIAL_SCHEMA_VERSION,
-    MaterialCollapseError,
     PALETTE_SCHEMA_VERSION,
     StagedAnalysisError,
     detect_material_collapse,
@@ -472,7 +471,7 @@ class MergeTests(unittest.TestCase):
 
 
 class CollapseDetectionTests(unittest.TestCase):
-    def test_old_all_yellow_pattern_is_detected_and_merge_rejects_it(self) -> None:
+    def test_old_all_yellow_pattern_is_detected_and_safely_recovered(self) -> None:
         mappings = [mapping(f"P{index:04d}", "G02") for index in range(1, 9)]
         materials = material_document(("G02", "MAT_YELLOW", 0.90, True))
         diagnostic = detect_material_collapse(
@@ -481,23 +480,33 @@ class CollapseDetectionTests(unittest.TestCase):
             material_selections=materials,
         )
         self.assertTrue(diagnostic["detected"])
+        self.assertTrue(diagnostic["recovery_required"])
         self.assertEqual(diagnostic["dominant_group_share"], 1.0)
         self.assertEqual(diagnostic["dominant_material_share"], 1.0)
 
         batch = batch_document("B01", mappings)
         part_ids = {item["part_id"] for item in mappings}
-        with self.assertRaisesRegex(
-            MaterialCollapseError, "Material collapse detected"
-        ) as caught:
-            merge_staged_results(
-                palette=palette_document(),
-                batches=[batch],
-                batch_targets={"B01": part_ids},
-                material_selections=materials,
-                all_part_ids=part_ids,
-            )
-        self.assertEqual(caught.exception.stage_name, "material_collapse_gate")
-        self.assertTrue(caught.exception.diagnostic["detected"])
+        result = merge_staged_results(
+            palette=palette_document(),
+            batches=[batch],
+            batch_targets={"B01": part_ids},
+            material_selections=materials,
+            all_part_ids=part_ids,
+        )
+        self.assertEqual(result["material_plan"]["assignments"], [])
+        self.assertEqual(
+            {record["part_id"] for record in result["unknown_parts"]},
+            part_ids,
+        )
+        self.assertEqual(
+            {record["reason_code"] for record in result["unknown_parts"]},
+            {"material_collapse_recovery"},
+        )
+        collapse = result["audit"]["collapse_check"]
+        self.assertTrue(collapse["detected"])
+        self.assertTrue(collapse["recovery_applied"])
+        self.assertEqual(collapse["unsafe_group_ids"], ["G02"])
+        self.assertEqual(collapse["recovered_to_unknown_part_ids"], sorted(part_ids))
 
     def test_non_authorable_review_concentration_is_audited_not_rejected(
         self,
@@ -658,17 +667,386 @@ class CollapseDetectionTests(unittest.TestCase):
                         minimum_eligible_retention_share=invalid,
                     )
 
-    def test_different_visible_colors_cannot_resolve_to_one_material(self) -> None:
+    def test_different_visible_colors_share_identity_only_through_review(self) -> None:
+        mappings = [mapping("P0001", "G01"), mapping("P0002", "G02")]
+        materials = material_document(
+            ("G01", "MAT_FIRST", 0.90, True),
+            ("G02", "MAT_FIRST", 0.90, True),
+        )
         diagnostic = detect_material_collapse(
             palette=palette_document(),
-            mappings=[mapping("P0001", "G01"), mapping("P0002", "G02")],
+            mappings=mappings,
+            material_selections=materials,
+        )
+        self.assertFalse(diagnostic["detected"])
+        self.assertTrue(diagnostic["recovery_required"])
+        self.assertIn(
+            "different palette colors",
+            diagnostic["recovery_reasons"][0],
+        )
+        self.assertEqual(diagnostic["review_required_group_ids"], ["G01", "G02"])
+        self.assertEqual(
+            diagnostic["color_material_collisions"],
+            [
+                {
+                    "material_id": "MAT_FIRST",
+                    "group_ids": ["G01", "G02"],
+                    "base_colors": ["white", "yellow"],
+                    "affected_part_ids": ["P0001", "P0002"],
+                }
+            ],
+        )
+
+        result = merge_staged_results(
+            palette=palette_document(),
+            batches=[batch_document("B01", mappings)],
+            batch_targets={"B01": {"P0001", "P0002"}},
+            material_selections=materials,
+            all_part_ids={"P0001", "P0002"},
+        )
+        self.assertEqual(result["unknown_parts"], [])
+        self.assertEqual(
+            [assignment["status"] for assignment in result["material_plan"]["assignments"]],
+            ["review", "review"],
+        )
+        collapse = result["audit"]["collapse_check"]
+        self.assertTrue(collapse["recovery_applied"])
+        self.assertEqual(
+            collapse["review_required_part_ids"],
+            ["P0001", "P0002"],
+        )
+
+    def test_reviewed_tunable_identity_can_serve_different_colors(self) -> None:
+        mappings = [mapping("P0001", "G01"), mapping("P0002", "G02")]
+        materials = material_document(
+            ("G01", "MAT_TUNABLE", 0.90, True),
+            ("G02", "MAT_TUNABLE", 0.90, True),
+        )
+
+        result = merge_staged_results(
+            palette=palette_document(),
+            batches=[batch_document("B01", mappings)],
+            batch_targets={"B01": {"P0001", "P0002"}},
+            material_selections=materials,
+            all_part_ids={"P0001", "P0002"},
+            parameter_authoring_evidence={
+                "G01": {"base_color": "white", "roughness_class": "satin"},
+                "G02": {"base_color": "yellow", "roughness_class": "satin"},
+            },
+        )
+
+        self.assertEqual(result["unknown_parts"], [])
+        self.assertEqual(
+            [
+                assignment["status"]
+                for assignment in result["material_plan"]["assignments"]
+            ],
+            ["auto", "auto"],
+        )
+        collapse = result["audit"]["collapse_check"]
+        self.assertFalse(collapse["detected"])
+        self.assertFalse(collapse["recovery_required"])
+        self.assertEqual(collapse["review_required_group_ids"], [])
+        self.assertEqual(collapse["color_material_collisions"], [])
+        self.assertEqual(
+            collapse["color_tunable_identity_shares"],
+            [
+                {
+                    "material_id": "MAT_TUNABLE",
+                    "group_ids": ["G01", "G02"],
+                    "base_colors": ["white", "yellow"],
+                    "affected_part_ids": ["P0001", "P0002"],
+                }
+            ],
+        )
+
+    def test_partial_parameter_evidence_does_not_exempt_color_collision(self) -> None:
+        mappings = [mapping("P0001", "G01"), mapping("P0002", "G02")]
+        result = merge_staged_results(
+            palette=palette_document(),
+            batches=[batch_document("B01", mappings)],
+            batch_targets={"B01": {"P0001", "P0002"}},
+            material_selections=material_document(
+                ("G01", "MAT_TUNABLE", 0.90, True),
+                ("G02", "MAT_TUNABLE", 0.90, True),
+            ),
+            all_part_ids={"P0001", "P0002"},
+            parameter_authoring_evidence={
+                "G01": {"base_color": "white", "roughness_class": "satin"}
+            },
+        )
+
+        collapse = result["audit"]["collapse_check"]
+        self.assertTrue(collapse["recovery_required"])
+        self.assertEqual(collapse["review_required_group_ids"], ["G01", "G02"])
+        self.assertEqual(collapse["color_tunable_identity_shares"], [])
+        self.assertEqual(
+            [
+                assignment["status"]
+                for assignment in result["material_plan"]["assignments"]
+            ],
+            ["review", "review"],
+        )
+
+    def test_wrong_authored_color_does_not_exempt_color_collision(self) -> None:
+        mappings = [mapping("P0001", "G01"), mapping("P0002", "G02")]
+        diagnostic = detect_material_collapse(
+            palette=palette_document(),
+            mappings=mappings,
+            material_selections=material_document(
+                ("G01", "MAT_TUNABLE", 0.90, True),
+                ("G02", "MAT_TUNABLE", 0.90, True),
+            ),
+            parameter_authoring_evidence={
+                "G01": {"base_color": "white", "roughness_class": "satin"},
+                "G02": {"base_color": "white", "roughness_class": "satin"},
+            },
+        )
+
+        self.assertTrue(diagnostic["recovery_required"])
+        self.assertEqual(diagnostic["review_required_group_ids"], ["G01", "G02"])
+        self.assertEqual(diagnostic["color_tunable_identity_shares"], [])
+
+    def test_same_color_incompatible_material_families_require_recovery(self) -> None:
+        palette = palette_document()
+        palette["groups"][1]["base_color"] = "white"
+        palette["groups"][1]["family_hint"] = "rubber"
+        palette["groups"][1]["finish_hint"] = "smooth"
+        mappings = [mapping("P0001", "G01"), mapping("P0002", "G02")]
+        result = merge_staged_results(
+            palette=palette,
+            batches=[batch_document("B01", mappings)],
+            batch_targets={"B01": {"P0001", "P0002"}},
+            material_selections=material_document(
+                ("G01", "MAT_WHITE_METAL", 0.90, True),
+                ("G02", "MAT_WHITE_METAL", 0.90, True),
+            ),
+            all_part_ids={"P0001", "P0002"},
+            parameter_authoring_evidence={
+                "G01": {"base_color": "white", "roughness_class": "satin"},
+                "G02": {"base_color": "white", "roughness_class": "glossy"},
+            },
+        )
+
+        collapse = result["audit"]["collapse_check"]
+        self.assertEqual(collapse["color_material_collisions"], [])
+        self.assertEqual(collapse["review_required_group_ids"], ["G01", "G02"])
+        self.assertEqual(
+            collapse["material_identity_collisions"],
+            [
+                {
+                    "material_id": "MAT_WHITE_METAL",
+                    "group_ids": ["G01", "G02"],
+                    "family_hints": ["metal", "rubber"],
+                    "finish_hints": ["painted", "smooth"],
+                    "reason_codes": ["incompatible_material_families"],
+                    "affected_part_ids": ["P0001", "P0002"],
+                }
+            ],
+        )
+
+    def test_same_family_painted_and_bare_treatments_require_recovery(self) -> None:
+        palette = palette_document()
+        palette["groups"][1]["base_color"] = "white"
+        palette["groups"][1]["finish_hint"] = "bare"
+        mappings = [mapping("P0001", "G01"), mapping("P0002", "G02")]
+        diagnostic = detect_material_collapse(
+            palette=palette,
+            mappings=mappings,
+            material_selections=material_document(
+                ("G01", "MAT_WHITE", 0.90, True),
+                ("G02", "MAT_WHITE", 0.90, True),
+            ),
+            parameter_authoring_evidence={
+                "G01": {"base_color": "white", "roughness_class": "satin"},
+                "G02": {"base_color": "white", "roughness_class": "satin"},
+            },
+        )
+
+        self.assertEqual(diagnostic["review_required_group_ids"], ["G01", "G02"])
+        self.assertEqual(
+            diagnostic["material_identity_collisions"][0]["reason_codes"],
+            ["incompatible_surface_treatments"],
+        )
+
+    def test_same_color_matte_and_glossy_require_parameter_evidence(self) -> None:
+        palette = palette_document()
+        palette["groups"][0]["base_color"] = "gray"
+        palette["groups"][0]["finish_hint"] = "matte"
+        palette["groups"][1]["base_color"] = "gray"
+        palette["groups"][1]["finish_hint"] = "glossy"
+        mappings = [mapping("P0001", "G01"), mapping("P0002", "G02")]
+        materials = material_document(
+            ("G01", "MAT_GRAY", 0.90, True),
+            ("G02", "MAT_GRAY", 0.90, True),
+        )
+
+        diagnostic = detect_material_collapse(
+            palette=palette,
+            mappings=mappings,
+            material_selections=materials,
+        )
+        self.assertEqual(diagnostic["review_required_group_ids"], ["G01", "G02"])
+        self.assertEqual(
+            diagnostic["material_identity_collisions"][0]["reason_codes"],
+            ["incompatible_roughness_finishes"],
+        )
+
+        parameterized = detect_material_collapse(
+            palette=palette,
+            mappings=mappings,
+            material_selections=materials,
+            parameter_authoring_evidence={
+                "G01": {"base_color": "gray", "roughness_class": "matte"},
+                "G02": {"base_color": "gray", "roughness_class": "glossy"},
+            },
+        )
+        self.assertEqual(parameterized["review_required_group_ids"], [])
+        self.assertEqual(parameterized["material_identity_collisions"], [])
+        self.assertEqual(
+            parameterized["parameterized_finish_shares"][0]["roughness_classes"],
+            {"G01": "matte", "G02": "glossy"},
+        )
+
+    def test_collision_covers_group_with_low_palette_confidence(self) -> None:
+        palette = palette_document()
+        palette["groups"][1]["confidence"] = 0.50
+        mappings = [mapping("P0001", "G01"), mapping("P0002", "G02")]
+        materials = material_document(
+            ("G01", "MAT_FIRST", 0.90, True),
+            ("G02", "MAT_FIRST", 0.90, True),
+        )
+
+        result = merge_staged_results(
+            palette=palette,
+            batches=[batch_document("B01", mappings)],
+            batch_targets={"B01": {"P0001", "P0002"}},
+            material_selections=materials,
+            all_part_ids={"P0001", "P0002"},
+        )
+
+        collapse = result["audit"]["collapse_check"]
+        self.assertEqual(collapse["review_required_group_ids"], ["G01", "G02"])
+        self.assertEqual(
+            collapse["color_material_collisions"][0]["affected_part_ids"],
+            ["P0001", "P0002"],
+        )
+        self.assertEqual(collapse["review_required_part_ids"], ["P0001"])
+        self.assertEqual(
+            result["unknown_parts"],
+            [{"part_id": "P0002", "reason_code": "low_combined_confidence"}],
+        )
+
+    def test_color_collision_audit_is_stably_sorted_across_input_orders(
+        self,
+    ) -> None:
+        palette = palette_document()
+        palette["groups"].append(
+            {
+                "group_id": "G04",
+                "family_hint": "metal",
+                "base_color": "red",
+                "finish_hint": "painted",
+                "visual_description": "red painted metal",
+                "boxes": [[310, 20, 390, 200]],
+                "confidence": 0.95,
+            }
+        )
+        mappings = [
+            mapping("P0004", "G04"),
+            mapping("P0002", "G02"),
+            mapping("P0003", "G03"),
+            mapping("P0001", "G01"),
+        ]
+        selections = (
+            ("G04", "MAT_A", 0.90, True),
+            ("G02", "MAT_Z", 0.90, True),
+            ("G03", "MAT_A", 0.90, True),
+            ("G01", "MAT_Z", 0.90, True),
+        )
+        expected_collisions = [
+            {
+                "material_id": "MAT_A",
+                "group_ids": ["G03", "G04"],
+                "base_colors": ["cyan", "red"],
+                "affected_part_ids": ["P0003", "P0004"],
+            },
+            {
+                "material_id": "MAT_Z",
+                "group_ids": ["G01", "G02"],
+                "base_colors": ["white", "yellow"],
+                "affected_part_ids": ["P0001", "P0002"],
+            },
+        ]
+
+        diagnostics = []
+        results = []
+        for reverse in (False, True):
+            ordered_palette = {
+                **palette,
+                "groups": list(
+                    reversed(palette["groups"])
+                    if reverse
+                    else palette["groups"]
+                ),
+            }
+            ordered_mappings = list(reversed(mappings)) if reverse else mappings
+            ordered_selections = tuple(reversed(selections)) if reverse else selections
+            diagnostics.append(
+                detect_material_collapse(
+                    palette=ordered_palette,
+                    mappings=ordered_mappings,
+                    material_selections=material_document(*ordered_selections),
+                )
+            )
+            results.append(
+                merge_staged_results(
+                    palette=ordered_palette,
+                    batches=[batch_document("B01", ordered_mappings)],
+                    batch_targets={"B01": {f"P{index:04d}" for index in range(1, 5)}},
+                    material_selections=material_document(*ordered_selections),
+                    all_part_ids={f"P{index:04d}" for index in range(1, 5)},
+                )
+            )
+
+        for diagnostic in diagnostics:
+            self.assertEqual(
+                diagnostic["review_required_group_ids"],
+                ["G01", "G02", "G03", "G04"],
+            )
+            self.assertEqual(
+                diagnostic["color_material_collisions"], expected_collisions
+            )
+        for result in results:
+            collapse = result["audit"]["collapse_check"]
+            self.assertEqual(
+                collapse["review_required_group_ids"],
+                ["G01", "G02", "G03", "G04"],
+            )
+            self.assertEqual(
+                collapse["review_required_part_ids"],
+                ["P0001", "P0002", "P0003", "P0004"],
+            )
+            self.assertEqual(
+                collapse["color_material_collisions"], expected_collisions
+            )
+
+    def test_same_visible_color_can_share_one_material_without_recovery(self) -> None:
+        palette = palette_document()
+        palette["groups"][1]["base_color"] = "white"
+        mappings = [mapping("P0001", "G01"), mapping("P0002", "G02")]
+        diagnostic = detect_material_collapse(
+            palette=palette,
+            mappings=mappings,
             material_selections=material_document(
                 ("G01", "MAT_FIRST", 0.90, True),
                 ("G02", "MAT_FIRST", 0.90, True),
             ),
         )
-        self.assertTrue(diagnostic["detected"])
-        self.assertIn("different palette colors", diagnostic["reasons"][0])
+
+        self.assertFalse(diagnostic["detected"])
+        self.assertFalse(diagnostic["recovery_required"])
+        self.assertEqual(diagnostic["color_material_collisions"], [])
 
     def test_one_group_reference_may_legitimately_use_one_material(self) -> None:
         palette = palette_document(group_count=1)
@@ -707,17 +1085,54 @@ class CollapseDetectionTests(unittest.TestCase):
         self.assertEqual(diagnostic["filtered_palette_group_count"], 1)
         self.assertIn("filtering reduced", diagnostic["reasons"][0])
 
-        with self.assertRaisesRegex(
-            StagedAnalysisError, "filtering reduced multiple model groups"
-        ):
-            merge_staged_results(
-                palette=palette,
-                batches=[batch_document("B01", mappings)],
-                batch_targets={"B01": {"P0001"}},
-                material_selections=materials,
-                all_part_ids={"P0001"},
-                pre_filter_palette_group_count=3,
-            )
+        result = merge_staged_results(
+            palette=palette,
+            batches=[batch_document("B01", mappings)],
+            batch_targets={"B01": {"P0001"}},
+            material_selections=materials,
+            all_part_ids={"P0001"},
+            pre_filter_palette_group_count=3,
+        )
+        self.assertEqual(result["material_plan"]["assignments"], [])
+        self.assertEqual(
+            result["unknown_parts"],
+            [
+                {
+                    "part_id": "P0001",
+                    "reason_code": "material_collapse_recovery",
+                }
+            ],
+        )
+        self.assertTrue(result["audit"]["collapse_check"]["recovery_applied"])
+
+    def test_filter_collapse_is_recovered_without_eligible_mapping(self) -> None:
+        palette = palette_document(group_count=1)
+        palette["groups"][0]["confidence"] = 0.50
+        mappings = [mapping("P0001")]
+        materials = material_document(("G01", "MAT_WHITE", 0.90, True))
+
+        result = merge_staged_results(
+            palette=palette,
+            batches=[batch_document("B01", mappings)],
+            batch_targets={"B01": {"P0001"}},
+            material_selections=materials,
+            all_part_ids={"P0001"},
+            pre_filter_palette_group_count=3,
+        )
+
+        collapse = result["audit"]["collapse_check"]
+        self.assertTrue(collapse["detected"])
+        self.assertTrue(collapse["recovery_required"])
+        self.assertEqual(collapse["unsafe_group_ids"], ["G01"])
+        self.assertEqual(
+            result["unknown_parts"],
+            [
+                {
+                    "part_id": "P0001",
+                    "reason_code": "material_collapse_recovery",
+                }
+            ],
+        )
 
 
 if __name__ == "__main__":

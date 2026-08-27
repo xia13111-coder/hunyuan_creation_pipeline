@@ -2050,6 +2050,38 @@ def _confirmed_group_materials(
     return confirmed, unavailable, provisional
 
 
+def _policy_collapse_recovery_group_ids(
+    baseline_policy_audit: Mapping[str, Any],
+) -> set[str]:
+    """Read groups that the baseline explicitly barred from authoring."""
+
+    raw_recovery = baseline_policy_audit.get("material_collapse_recovery")
+    if raw_recovery is None:
+        return set()
+    recovery = _mapping(
+        raw_recovery,
+        "baseline_policy_audit.material_collapse_recovery",
+    )
+    return {
+        _text(
+            raw_group_id,
+            (
+                "baseline_policy_audit.material_collapse_recovery."
+                f"excluded_group_ids[{index}]"
+            ),
+        )
+        for index, raw_group_id in enumerate(
+            _sequence(
+                recovery.get("excluded_group_ids"),
+                (
+                    "baseline_policy_audit.material_collapse_recovery."
+                    "excluded_group_ids"
+                ),
+            )
+        )
+    }
+
+
 def _geometry_risks(
     geometry_risk: Mapping[str, Any], *, registry_part_ids: Sequence[str]
 ) -> dict[str, bool]:
@@ -8044,6 +8076,13 @@ def build_quality_repair_plan(
         whitelist_ids=allowed_material_ids,
         allow_unconfirmed_visual_tournament_seeds=not allow_parameter_writes,
     )
+    collapse_recovery_excluded_group_ids = (
+        _policy_collapse_recovery_group_ids(baseline_policy_audit)
+    )
+    for group_id in collapse_recovery_excluded_group_ids:
+        confirmed_materials.pop(group_id, None)
+        provisional_material_groups.discard(group_id)
+        material_unavailable[group_id] = "MATERIAL_COLLAPSE_RECOVERY_REQUIRED"
     if allow_parameter_writes:
         parameterizations, parameterization_skips = _mvinverse_parameterizations(
             group_materials=group_materials,
@@ -8051,6 +8090,7 @@ def build_quality_repair_plan(
             allowed_material_ids=allowed_material_ids,
             palette_fusion=palette_fusion,
             key_by_group=True,
+            excluded_group_ids=collapse_recovery_excluded_group_ids,
         )
     else:
         parameterizations = {}
@@ -10036,6 +10076,17 @@ def build_quality_repair_plan(
             ),
             "skipped": parameterization_skips,
         },
+        **(
+            {
+                "material_collapse_recovery": {
+                    "excluded_group_ids": sorted(
+                        collapse_recovery_excluded_group_ids
+                    )
+                }
+            }
+            if collapse_recovery_excluded_group_ids
+            else {}
+        ),
         "provisional_material_candidate_group_ids": sorted(
             {
                 str(item["canonical_group_id"])

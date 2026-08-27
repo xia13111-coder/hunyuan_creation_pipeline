@@ -30,6 +30,7 @@ from qwen_material_pipeline.workflows.staged_local import (
     _mvinverse_exact_default_candidates,
     _multiview_pre_filter_group_count,
     _palette_quality_metrics,
+    _parameter_authoring_evidence_by_group,
     _resolve_immutable_coating_physics_choice,
     _select_palette_candidate,
     _shortlist_materials_with_audit,
@@ -1225,6 +1226,82 @@ def test_mvinverse_tunable_exports_form_one_effective_retrieval_candidate() -> N
     assert len(painted_exports) == 1
     assert audit["mvinverse_tunable_equivalence_dedup_count"] == 1
     assert audit["runner_up_score"] == audit["ranking"][1]["score"]
+
+
+def test_parameter_authoring_evidence_requires_verified_current_evidence() -> None:
+    material_id = (
+        "mdl:vMaterials_2/Metal/Steel_Painted.mdl#Steel_Painted_Army_Green"
+    )
+    group_materials = {
+        "selections": [
+            {
+                "group_id": "G01",
+                "material_id": material_id,
+                "confidence": 0.9,
+                "confirmed": True,
+            }
+        ]
+    }
+    evidence_group = {
+        "group_id": "G01",
+        "surface_class": "dielectric",
+        "contributing_view_ids": ["front", "side"],
+        "metallic": {"median": 0.0},
+        "suggestion": {
+            "decision": "auto",
+            "auto_parameter_eligible": True,
+            "base_color_srgb": [0.2, 0.5, 0.1],
+            "metallic": 0.0,
+            "roughness": 0.4,
+        },
+    }
+
+    assert _parameter_authoring_evidence_by_group(
+        group_materials=group_materials,
+        mvinverse_evidence={"groups": [evidence_group]},
+        allow_parameter_writes=True,
+    ) == {"G01": {"base_color": "green", "roughness_class": "satin"}}
+    assert _parameter_authoring_evidence_by_group(
+        group_materials=group_materials,
+        mvinverse_evidence={"groups": []},
+        allow_parameter_writes=True,
+    ) == {}
+    assert _parameter_authoring_evidence_by_group(
+        group_materials=group_materials,
+        mvinverse_evidence={"groups": [evidence_group]},
+        allow_parameter_writes=False,
+    ) == {}
+
+
+def test_parameter_authoring_evidence_rejects_incomplete_tuning_data() -> None:
+    material_id = (
+        "mdl:vMaterials_2/Metal/Steel_Painted.mdl#Steel_Painted_Army_Green"
+    )
+    assert _parameter_authoring_evidence_by_group(
+        group_materials={
+            "selections": [
+                {
+                    "group_id": "G01",
+                    "material_id": material_id,
+                    "confidence": 0.9,
+                    "confirmed": True,
+                }
+            ]
+        },
+        mvinverse_evidence={
+            "groups": [
+                {
+                    "group_id": "G01",
+                    "surface_class": "dielectric",
+                    "suggestion": {
+                        "decision": "auto",
+                        "auto_parameter_eligible": True,
+                    },
+                }
+            ]
+        },
+        allow_parameter_writes=True,
+    ) == {}
 
 
 def test_immutable_mdl_retrieval_uses_distinct_fixed_export_defaults() -> None:

@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import threading
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -29,10 +30,10 @@ from qwen_material_pipeline.core.material_stage_contract import (
 from qwen_material_pipeline.core.staged_analysis import (
     AUTO_THRESHOLD,
     GROUP_MATERIAL_SCHEMA_VERSION,
-    MaterialCollapseError,
     REVIEW_THRESHOLD,
     StagedAnalysisError,
     UNKNOWN_REASON_CODES,
+    collapse_recovery_group_ids,
     merge_staged_results,
     validate_palette,
 )
@@ -40,7 +41,10 @@ from qwen_material_pipeline.evidence.confidence import (
     ConfidenceGateError,
     evaluate_confidence_gate,
 )
-from qwen_material_pipeline.evidence.color_semantics import fusion_color_label
+from qwen_material_pipeline.evidence.color_semantics import (
+    fusion_color_label,
+    pixel_color_label,
+)
 from qwen_material_pipeline.evidence.face_recovery import (
     build_face_material_recovery,
 )
@@ -80,7 +84,10 @@ from qwen_material_pipeline.materials.mdl_similarity import (
     extract_thumbnail_appearance_profile,
     mvinverse_similarity_terms,
 )
-from qwen_material_pipeline.materials.tuning import tuning_profile_for_material
+from qwen_material_pipeline.materials.tuning import (
+    tune_selected_material_from_mvinverse,
+    tuning_profile_for_material,
+)
 from qwen_material_pipeline.mvinverse.adapter import (
     DEFAULT_MAX_SIDE as MVINVERSE_DEFAULT_MAX_SIDE,
 )
@@ -3052,6 +3059,88 @@ def _mvinverse_tunable_equivalence_key(
     return f"mvinverse-tunable:{module_id}:{profile.profile_id}"
 
 
+def _parameter_authoring_evidence_by_group(
+    *,
+    group_materials: Mapping[str, Any],
+    mvinverse_evidence: Mapping[str, Any] | None,
+    allow_parameter_writes: bool,
+) -> dict[str, dict[str, str]]:
+    """Return verified authored colour/roughness classes by palette group.
+
+    A reviewed MDL interface is only a capability.  Cross-colour identity
+    sharing is safe after the current group's verified MVInverse evidence also
+    passes the exact tuning path used by downstream authoring.
+    """
+
+    if not allow_parameter_writes or mvinverse_evidence is None:
+        return {}
+    evidence_by_group = {
+        str(group.get("group_id")): group
+        for group in mvinverse_evidence.get("groups", [])
+        if isinstance(group, dict) and isinstance(group.get("group_id"), str)
+    }
+    result: dict[str, dict[str, str]] = {}
+    for selection in group_materials.get("selections", []):
+        if not isinstance(selection, dict):
+            continue
+        group_id = selection.get("group_id")
+        material_id = selection.get("material_id")
+        confidence = selection.get("confidence")
+        if (
+            not isinstance(group_id, str)
+            or not isinstance(material_id, str)
+            or selection.get("confirmed") is not True
+            or isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or float(confidence) < REVIEW_THRESHOLD
+        ):
+            continue
+        evidence_group = evidence_by_group.get(group_id)
+        if not isinstance(evidence_group, dict):
+            continue
+        if _mvinverse_tunable_equivalence_key(
+            material_id,
+            evidence_group,
+            allow_parameter_writes=True,
+        ) == material_id:
+            continue
+        profile = tuning_profile_for_material(material_id)
+        suggestion = evidence_group.get("suggestion")
+        predicted_metallic = (
+            suggestion.get("metallic") if isinstance(suggestion, dict) else None
+        )
+        if (
+            profile is not None
+            and profile.surface_class == "dielectric"
+            and isinstance(predicted_metallic, (int, float))
+            and not isinstance(predicted_metallic, bool)
+            and float(predicted_metallic) > 0.35
+        ):
+            continue
+        try:
+            _, tuning_audit = tune_selected_material_from_mvinverse(
+                evidence_group,
+                group_id=group_id,
+                material_id=material_id,
+            )
+        except ValueError:
+            continue
+        color_srgb = tuning_audit["base_color_srgb"]
+        color_rgb8 = [
+            max(0, min(255, round(float(channel) * 255.0)))
+            for channel in color_srgb
+        ]
+        color_label = pixel_color_label(*color_rgb8)
+        result[group_id] = {
+            "base_color": color_label,
+            "roughness_class": _roughness_class(
+                float(tuning_audit["roughness"]),
+                reliable=True,
+            ),
+        }
+    return result
+
+
 def _mvinverse_exact_default_candidates(
     pool: list[dict[str, Any]],
     mvinverse_pbr_evidence: dict[str, Any] | None,
@@ -5492,6 +5581,7 @@ def _resume_unattended_from_materials(
         "material_plan": destination / "material_plan.json",
         "group_materials": destination / "group_materials.json",
         "material_choice_audit": destination / "material_choice_audit.json",
+        "batch_plan": destination / "batch_plan.json",
         "view_evidence": destination / "view_evidence.json",
         "mapping_votes": destination / "part_mapping_multiview_votes.json",
         "mapping_audit": destination / "part_mapping_multiview_audit.json",
@@ -5561,6 +5651,7 @@ def _resume_unattended_from_materials(
         )
     group_materials = _read_json(required_paths["group_materials"])
     material_audit = _read_json(required_paths["material_choice_audit"])
+    batch_plan = _read_json(required_paths["batch_plan"])
     view_evidence = _read_json(required_paths["view_evidence"])
     batch_results = [_read_json(path) for path in batch_paths]
 
@@ -5587,6 +5678,23 @@ def _resume_unattended_from_materials(
     catalog = MaterialCatalog.load(args.catalog, material_root=args.material_root)
     pool = _catalog_pool(catalog, args.whitelist)
     allowed_material_ids = {item["material_id"] for item in pool}
+    batch_targets = batch_plan.get("batch_targets")
+    forced_unknown_parts = batch_plan.get("forced_unknown_parts")
+    if not isinstance(batch_targets, dict) or not isinstance(
+        forced_unknown_parts, dict
+    ):
+        raise ValueError("material-stage resume batch plan is invalid")
+    if any(not isinstance(target_ids, list) for target_ids in batch_targets.values()):
+        raise ValueError("material-stage resume batch targets are invalid")
+    all_part_ids = {
+        part_id for target_ids in batch_targets.values() for part_id in target_ids
+    } | set(forced_unknown_parts)
+    raw_collapse = staged_result.get("audit", {}).get("collapse_check", {})
+    pre_filter_palette_group_count = (
+        raw_collapse.get("pre_filter_palette_group_count")
+        if isinstance(raw_collapse, dict)
+        else None
+    )
     if multimodel_enabled:
         if args.sam3_repo is None or args.sam3_checkpoint is None:
             raise ValueError("multimodel resume requires SAM3 paths")
@@ -5632,6 +5740,28 @@ def _resume_unattended_from_materials(
             allowed_material_ids={str(value) for value in allowed_material_ids},
             observation_bank_path=args.retrieval_observation_bank,
         )
+    # The stage revision is static, while safe identity sharing also depends
+    # on the current parameter-write mode and verified group evidence.
+    # Re-merge the persisted, validated model outputs on every resume so a
+    # mutable checkpoint cannot become an untuned immutable preset.
+    recomputed_staged_result = merge_staged_results(
+        palette=palette,
+        pre_filter_palette_group_count=pre_filter_palette_group_count,
+        batches=gate_batches,
+        batch_targets=batch_targets,
+        material_selections=group_materials,
+        allowed_material_ids=allowed_material_ids,
+        all_part_ids=all_part_ids,
+        forced_unknown_parts=forced_unknown_parts,
+        orientation_confidence=args.orientation_confidence,
+        parameter_authoring_evidence=_parameter_authoring_evidence_by_group(
+            group_materials=group_materials,
+            mvinverse_evidence=mvinverse_evidence,
+            allow_parameter_writes=not args.immutable_mdl_after_selection,
+        ),
+    )
+    staged_result_changed = recomputed_staged_result != staged_result
+    staged_result = recomputed_staged_result
     gate_report = evaluate_confidence_gate(
         staged_result,
         registry,
@@ -5641,6 +5771,9 @@ def _resume_unattended_from_materials(
         geometry_risk_report=geometry_risk_report,
         independent_validation_audit=spatial_mapping_gate["audit"],
     )
+    if staged_result_changed:
+        _write_json(required_paths["staged_result"], staged_result)
+        _write_json(required_paths["material_plan"], staged_result["material_plan"])
     _write_json(destination / "confidence_gate.json", gate_report)
     _write_json(
         destination / "auto_material_plan.json",
@@ -5670,6 +5803,7 @@ def _resume_unattended_from_materials(
         allowed_material_ids=allowed_material_ids,
         group_materials=group_materials,
         material_choice_audit=material_audit,
+        excluded_group_ids=collapse_recovery_group_ids(staged_result),
         allow_parameter_writes=not args.immutable_mdl_after_selection,
     )
     _write_json(destination / "face_material_recovery.json", face_recovery)
@@ -8464,6 +8598,11 @@ def _main(argv: list[str] | None = None) -> int:
         all_part_ids=set(part_by_id),
         forced_unknown_parts=forced,
         orientation_confidence=args.orientation_confidence,
+        parameter_authoring_evidence=_parameter_authoring_evidence_by_group(
+            group_materials=group_materials,
+            mvinverse_evidence=mvinverse_evidence,
+            allow_parameter_writes=not args.immutable_mdl_after_selection,
+        ),
     )
     _write_json(destination / "staged_result.json", result)
     _write_json(destination / "material_plan.json", result["material_plan"])
@@ -8516,6 +8655,7 @@ def _main(argv: list[str] | None = None) -> int:
             allowed_material_ids=allowed_material_ids,
             group_materials=group_materials,
             material_choice_audit=material_audit,
+            excluded_group_ids=collapse_recovery_group_ids(result),
             allow_parameter_writes=not args.immutable_mdl_after_selection,
         )
         _write_json(destination / "face_material_recovery.json", face_recovery)
@@ -8663,19 +8803,12 @@ def main(argv: list[str] | None = None) -> int:
                         if isinstance(checkpoint_context, dict)
                         else {}
                     ),
-                    **(
-                        {"collapse_diagnostic": exc.diagnostic}
-                        if isinstance(exc, MaterialCollapseError)
-                        else {}
-                    ),
                 }
                 _write_inference_failure(
                     destination,
                     error_code=(
                         "material_disagreement_tournament_unbuildable"
                         if stage_name == "material_disagreement_tournament"
-                        else "material_collapse_detected"
-                        if stage_name == "material_collapse_gate"
                         else "confidence_gate_contract_invalid"
                         if isinstance(exc, ConfidenceGateError)
                         else "qwen_stage_checkpoint_invalid"

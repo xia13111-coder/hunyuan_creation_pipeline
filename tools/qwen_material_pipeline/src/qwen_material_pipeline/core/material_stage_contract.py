@@ -6,7 +6,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = "qwen-material-stage-contract/v1"
-PIPELINE_REVISION = "masked_rust_completion_spatial_visual_aliases_20260803"
+PIPELINE_REVISION = "identity_parameter_evidence_collapse_recovery_20260826"
 
 
 def material_stage_contract_document() -> dict[str, Any]:

@@ -3274,6 +3274,54 @@ def test_repair_parameterizes_by_group_when_groups_share_a_preset(
     assert locked_audit["mvinverse"]["parameterized_part_ids"] == []
 
 
+def test_collapse_recovery_group_cannot_seed_repair_or_mvinverse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    documents = _documents()
+    documents["baseline_policy_audit"]["material_collapse_recovery"] = {
+        "excluded_group_ids": ["G01"]
+    }
+    documents["mvinverse_pbr_evidence"] = {
+        "schema_version": "qwen-mvinverse-pbr-evidence/v1",
+        "groups": [
+            {
+                "group_id": "G01",
+                "surface_class": "dielectric",
+                "contributing_view_ids": ["ref_a", "ref_b"],
+                "metallic": {"median": 0.1},
+                "suggestion": {
+                    "decision": "auto",
+                    "auto_parameter_eligible": True,
+                    "base_color_srgb": [0.2, 0.5, 0.1],
+                    "metallic": 0.0,
+                    "roughness": 0.43,
+                },
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        policy_module,
+        "validate_mvinverse_evidence",
+        lambda document: copy.deepcopy(document),
+    )
+
+    plan, audit = _build(documents)
+
+    assert plan == documents["baseline_plan"]
+    assert audit["summary"]["changed_count"] == 0
+    assert audit["changes"] == []
+    assert audit["skip_reason_counts"]["MATERIAL_COLLAPSE_RECOVERY_REQUIRED"] == 2
+    assert audit["mvinverse"]["parameterized_part_ids"] == []
+    assert audit["mvinverse"]["skipped"] == [
+        {
+            "group_id": "G01",
+            "material_id": GREEN,
+            "reason_code": "MATERIAL_COLLAPSE_RECOVERY_REQUIRED",
+        }
+    ]
+    assert audit["material_collapse_recovery"] == {"excluded_group_ids": ["G01"]}
+
+
 @pytest.mark.parametrize(
     ("mutate", "expected_reason"),
     [
