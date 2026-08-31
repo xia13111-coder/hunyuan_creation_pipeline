@@ -48,9 +48,7 @@ LEGACY_FUSION_POLICY = "reciprocal_rank_fusion_siglip1.0_dino1.2_k60/v1"
 BASE_BANK_RETRIEVAL_STRATEGY = (
     "base_observation_bank_siglip2_dinov2_ciede2000_mvinverse_rrf/v2"
 )
-LEGACY_RETRIEVAL_STRATEGY = (
-    "siglip2_full_catalog_plus_dinov2_masked_rrf/v1"
-)
+LEGACY_RETRIEVAL_STRATEGY = "siglip2_full_catalog_plus_dinov2_masked_rrf/v1"
 SIGLIP2_IDENTITY_SCHEMA_VERSION = "retrieval-local-checkpoint/v1"
 SIGLIP2_CANONICAL_REPOSITORY = "google/siglip2-base-patch16-224"
 SIGLIP2_CANONICAL_REVISION = "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2"
@@ -153,7 +151,9 @@ def _resolve_under_root(root: Path, raw: Any, label: str) -> Path:
         resolved = candidate.resolve(strict=True)
         resolved.relative_to(root)
     except (OSError, ValueError) as exc:
-        raise VisualRetrievalError(f"{label} escapes the material root: {raw!r}") from exc
+        raise VisualRetrievalError(
+            f"{label} escapes the material root: {raw!r}"
+        ) from exc
     if not resolved.is_file():
         raise VisualRetrievalError(f"{label} is not a file: {resolved}")
     return resolved
@@ -186,7 +186,9 @@ def _model_fingerprint(model_path: Path) -> dict[str, Any]:
                 }
             )
     if not files:
-        raise VisualRetrievalError(f"model directory has no checkpoint files: {model_path}")
+        raise VisualRetrievalError(
+            f"model directory has no checkpoint files: {model_path}"
+        )
     unsigned = {"path": str(model_path), "files": files}
     return {**unsigned, "fingerprint_sha256": _canonical_sha256(unsigned)}
 
@@ -207,8 +209,7 @@ def _verify_pinned_siglip2_identity(model_path: Path) -> dict[str, Any]:
         identity.get("schema_version") != SIGLIP2_IDENTITY_SCHEMA_VERSION
         or identity.get("repository") != SIGLIP2_CANONICAL_REPOSITORY
         or identity.get("revision") != SIGLIP2_CANONICAL_REVISION
-        or identity.get("content_manifest_sha256")
-        != SIGLIP2_CONTENT_MANIFEST_SHA256
+        or identity.get("content_manifest_sha256") != SIGLIP2_CONTENT_MANIFEST_SHA256
         or not isinstance(runtime_files, list)
         or _canonical_sha256(runtime_files) != SIGLIP2_CONTENT_MANIFEST_SHA256
     ):
@@ -273,10 +274,7 @@ def _verify_pinned_siglip2_identity(model_path: Path) -> dict[str, Any]:
             raise VisualRetrievalError(
                 f"SigLIP2 runtime file failed size/SHA-256 validation: {path_text}"
             )
-    if (
-        identity.get("config_sha256")
-        != records.get("config.json", {}).get("sha256")
-    ):
+    if identity.get("config_sha256") != records.get("config.json", {}).get("sha256"):
         raise VisualRetrievalError(
             "SigLIP2 checkpoint config identity differs from the runtime manifest"
         )
@@ -329,7 +327,9 @@ def _material_text(record: Mapping[str, Any]) -> str:
         value = record.get(key)
         if isinstance(value, list):
             fields.extend(str(item) for item in value if isinstance(item, str) and item)
-    return ". ".join(dict.fromkeys(fields)) or str(record.get("material_id", "material"))
+    return ". ".join(dict.fromkeys(fields)) or str(
+        record.get("material_id", "material")
+    )
 
 
 def _descriptor_text(group: Mapping[str, Any]) -> str:
@@ -454,7 +454,9 @@ def _load_request(
             raise VisualRetrievalError("group IDs must be unique non-empty strings")
         seen.add(group_id)
         if not isinstance(observations, list):
-            raise VisualRetrievalError(f"group {group_id} observations must be an array")
+            raise VisualRetrievalError(
+                f"group {group_id} observations must be an array"
+            )
         normalized_observations: list[dict[str, Any]] = []
         for observation_index, observation in enumerate(observations):
             if not isinstance(observation, Mapping):
@@ -559,6 +561,18 @@ def _mdl_source_digest(material_root: Path) -> tuple[str, int]:
     return _canonical_sha256(records), len(records)
 
 
+def _portable_model_identity(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Compare model content without binding a bank to one machine path."""
+
+    identity = dict(value)
+    identity.pop("path", None)
+    # Older banks computed this aggregate from the full record, including the
+    # absolute path.  The per-file digests and checkpoint identity below are
+    # the actual content proof and remain stable after relocating the models.
+    identity.pop("fingerprint_sha256", None)
+    return identity
+
+
 def _load_base_observation_bank(
     *,
     bank_dir: Path,
@@ -596,8 +610,6 @@ def _load_base_observation_bank(
         or scope.get("collection_name") != "Base"
         or scope.get("exact_cover") is not True
         or scope.get("forbidden_vmaterials_2_count") != 0
-        or Path(str(scope.get("resolved_material_root", ""))).resolve()
-        != material_root
     ):
         raise VisualRetrievalError(
             "observation bank scope does not match the exact current Base root"
@@ -630,9 +642,13 @@ def _load_base_observation_bank(
     dino_record = manifest.get("dinov2")
     if (
         not isinstance(siglip_record, Mapping)
-        or siglip_record.get("model") != dict(siglip_model_identity)
+        or not isinstance(siglip_record.get("model"), Mapping)
+        or _portable_model_identity(siglip_record["model"])
+        != _portable_model_identity(siglip_model_identity)
         or not isinstance(dino_record, Mapping)
-        or dino_record.get("model") != dict(dino_model_identity)
+        or not isinstance(dino_record.get("model"), Mapping)
+        or _portable_model_identity(dino_record["model"])
+        != _portable_model_identity(dino_model_identity)
     ):
         raise VisualRetrievalError(
             "observation bank embeddings were built with different model weights"
@@ -659,9 +675,7 @@ def _load_base_observation_bank(
         or profiles_document.get("scope") != "nvidia_base"
         or not isinstance(profile_rows, list)
     ):
-        raise VisualRetrievalError(
-            "observation bank appearance profiles are invalid"
-        )
+        raise VisualRetrievalError("observation bank appearance profiles are invalid")
     profiles_by_id: dict[str, dict[str, Any]] = {}
     for row in profile_rows:
         material_id = row.get("material_id") if isinstance(row, dict) else None
@@ -698,9 +712,7 @@ def _load_base_observation_bank(
         or not np.isfinite(siglip_embeddings).all()
         or not np.isfinite(dino_embeddings).all()
     ):
-        raise VisualRetrievalError(
-            "observation bank embedding arrays are invalid"
-        )
+        raise VisualRetrievalError("observation bank embedding arrays are invalid")
     bank_index = {material_id: index for index, material_id in enumerate(bank_ids)}
     order = [bank_index[material_id] for material_id in expected_ids]
     identity = {
@@ -727,7 +739,10 @@ def _to_device(batch: Mapping[str, Any], device: str, dtype: Any) -> dict[str, A
     for key, value in batch.items():
         if hasattr(value, "to"):
             value = value.to(device)
-            if key == "pixel_values" and getattr(value, "is_floating_point", lambda: False)():
+            if (
+                key == "pixel_values"
+                and getattr(value, "is_floating_point", lambda: False)()
+            ):
                 value = value.to(dtype=dtype)
         output[key] = value
     return output
@@ -747,11 +762,11 @@ def _siglip_image_embeddings(
 
     output: list[Any] = []
     for start in range(0, len(images), batch_size):
-        inputs = processor(images=list(images[start : start + batch_size]), return_tensors="pt")
+        inputs = processor(
+            images=list(images[start : start + batch_size]), return_tensors="pt"
+        )
         with torch.inference_mode():
-            features = model.get_image_features(
-                **_to_device(inputs, device, dtype)
-            )
+            features = model.get_image_features(**_to_device(inputs, device, dtype))
         features = _siglip_pooled_features(features, "image")
         output.append(features.detach().float().cpu().numpy())
     return _normalize_rows(np.concatenate(output, axis=0))
@@ -788,7 +803,9 @@ def _siglip_text_embeddings(
             _emit_progress(
                 stage=progress_stage,
                 state="update",
-                current=min(progress_total, progress_offset + start + len(inputs["input_ids"])),
+                current=min(
+                    progress_total, progress_offset + start + len(inputs["input_ids"])
+                ),
                 total=progress_total,
                 unit="catalog-items",
                 detail="SigLIP2 catalog text embeddings",
@@ -880,9 +897,7 @@ def _build_or_load_siglip_index(
     from transformers import AutoModel, AutoProcessor
 
     model_identity = _verified_siglip2_model_identity(model_path)
-    catalog_digest, catalog_records = _catalog_digest(
-        materials, emit_progress=True
-    )
+    catalog_digest, catalog_records = _catalog_digest(materials, emit_progress=True)
     cache_key = _canonical_sha256(
         {
             "schema_version": CACHE_SCHEMA_VERSION,
@@ -917,7 +932,9 @@ def _build_or_load_siglip_index(
             or manifest.get("cache_key") != cache_key
             or manifest.get("npz_sha256") != _sha256_file(npz_path)
         ):
-            raise VisualRetrievalError("SigLIP2 cache exists but failed integrity validation")
+            raise VisualRetrievalError(
+                "SigLIP2 cache exists but failed integrity validation"
+            )
         with np.load(npz_path, allow_pickle=False) as archive:
             cached_ids = archive["material_ids"].astype(str).tolist()
             embeddings = np.asarray(archive["embeddings"], dtype=np.float32)
@@ -935,9 +952,7 @@ def _build_or_load_siglip_index(
 
     texts = [_material_text(item) for item in materials]
     available_indices = [
-        index
-        for index, item in enumerate(materials)
-        if item["_thumbnail"] is not None
+        index for index, item in enumerate(materials) if item["_thumbnail"] is not None
     ]
     progress_total = len(materials) + len(available_indices)
     _emit_progress(
@@ -1027,7 +1042,9 @@ def _build_or_load_siglip_index(
     return embeddings, manifest, model, processor
 
 
-def _manual_pixels(images: Sequence[Any], *, mean: Sequence[float], std: Sequence[float]) -> Any:
+def _manual_pixels(
+    images: Sequence[Any], *, mean: Sequence[float], std: Sequence[float]
+) -> Any:
     import numpy as np
     import torch
 
@@ -1065,7 +1082,9 @@ def _dino_tokens(
     grid = CANVAS_SIZE // patch_size
     patch_count = grid * grid
     if hidden.shape[1] < patch_count:
-        raise VisualRetrievalError("DINOv2 output contains fewer tokens than image patches")
+        raise VisualRetrievalError(
+            "DINOv2 output contains fewer tokens than image patches"
+        )
     patch_tokens = hidden[:, -patch_count:, :]
     results: list[Any] = []
     for index, mask in enumerate(masks):
@@ -1073,9 +1092,11 @@ def _dino_tokens(
         usable_height = grid * patch_size
         usable_width = grid * patch_size
         mask_array = mask_array[:usable_height, :usable_width]
-        pooled = mask_array.reshape(
-            grid, patch_size, grid, patch_size
-        ).mean(axis=(1, 3)).reshape(-1)
+        pooled = (
+            mask_array.reshape(grid, patch_size, grid, patch_size)
+            .mean(axis=(1, 3))
+            .reshape(-1)
+        )
         selected = pooled >= 0.50
         if int(np.count_nonzero(selected)) < 4:
             selected = pooled >= 0.10
@@ -1298,12 +1319,12 @@ def run(
     else:
         gallery_embeddings, siglip_manifest, siglip_model, siglip_processor = (
             _build_or_load_siglip_index(
-            materials=materials,
-            model_path=siglip_model_path,
-            cache_dir=cache_dir.expanduser().resolve(),
-            device=device,
-            batch_size=batch_size,
-        )
+                materials=materials,
+                model_path=siglip_model_path,
+                cache_dir=cache_dir.expanduser().resolve(),
+                device=device,
+                batch_size=batch_size,
+            )
         )
     dtype = torch.float16 if device == "cuda" else torch.float32
     prepared: dict[str, dict[str, Any]] = {}
@@ -1324,7 +1345,9 @@ def run(
                     "image": str(observation["image"]),
                     "image_sha256": _sha256_file(observation["image"]),
                     "mask": (
-                        str(observation["mask"]) if observation["mask"] is not None else None
+                        str(observation["mask"])
+                        if observation["mask"] is not None
+                        else None
                     ),
                     "mask_sha256": (
                         _sha256_file(observation["mask"])
@@ -1479,9 +1502,7 @@ def run(
                     "material_id": material_ids[index],
                     "score": round(float(dino_scores[index]), 8),
                 }
-                for rank, index in enumerate(
-                    dino_order[:siglip_top_k], start=1
-                )
+                for rank, index in enumerate(dino_order[:siglip_top_k], start=1)
             ]
 
             if query_rgb is None:
@@ -1505,9 +1526,7 @@ def run(
                     "material_id": material_ids[index],
                     "score": round(float(color_scores[index]), 8),
                 }
-                for rank, index in enumerate(
-                    color_order[:siglip_top_k], start=1
-                )
+                for rank, index in enumerate(color_order[:siglip_top_k], start=1)
             ]
             pbr_scores, has_pbr_prior = _mvinverse_prior_scores(
                 group=group,
@@ -1537,14 +1556,10 @@ def run(
                         "material_id": material_ids[index],
                         "score": round(float(pbr_scores[index]), 8),
                     }
-                    for rank, index in enumerate(
-                        pbr_order[:siglip_top_k], start=1
-                    )
+                    for rank, index in enumerate(pbr_order[:siglip_top_k], start=1)
                 ]
             query_appearance = {
-                "median_rgb": [
-                    round(float(value), 8) for value in query_rgb.tolist()
-                ],
+                "median_rgb": [round(float(value), 8) for value in query_rgb.tolist()],
                 "mvinverse_prior_available": has_pbr_prior,
             }
             fused = []
@@ -1564,9 +1579,7 @@ def run(
                         "material_id": material_id,
                         "score": round(rrf, 10),
                         "siglip2_rank": siglip_rank,
-                        "siglip2_score": round(
-                            float(state["siglip_scores"][index]), 8
-                        ),
+                        "siglip2_score": round(float(state["siglip_scores"][index]), 8),
                         "dino_rank": dino_rank,
                         "dino_score": (
                             round(float(dino_scores[index]), 8)
@@ -1581,9 +1594,7 @@ def run(
                             if pbr_rank is not None
                             else None
                         ),
-                        "thumbnail_available": material_by_id[material_id][
-                            "_thumbnail"
-                        ]
+                        "thumbnail_available": material_by_id[material_id]["_thumbnail"]
                         is not None,
                     }
                 )
@@ -1597,9 +1608,7 @@ def run(
                     thumbnail = material["_thumbnail"]
                     if thumbnail is None:
                         continue
-                    canvas, mask = _masked_square(
-                        thumbnail, None, size=CANVAS_SIZE
-                    )
+                    canvas, mask = _masked_square(thumbnail, None, size=CANVAS_SIZE)
                     candidate_images.append(canvas)
                     candidate_masks.append(mask)
                     candidate_ids.append(ranked["material_id"])
@@ -1635,9 +1644,7 @@ def run(
                 }
                 for material_id, candidate_tokens in candidate_tokens_by_id.items()
             ]
-            dino_scored.sort(
-                key=lambda item: (-item["score"], item["material_id"])
-            )
+            dino_scored.sort(key=lambda item: (-item["score"], item["material_id"]))
             for rank, item in enumerate(dino_scored, start=1):
                 item["rank"] = rank
             siglip_by_id = {

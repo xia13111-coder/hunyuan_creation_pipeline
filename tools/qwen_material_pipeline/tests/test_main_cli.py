@@ -11,10 +11,10 @@ from qwen_material_pipeline import __main__ as entrypoint
 @pytest.mark.parametrize(
     ("arguments", "expected_module"),
     [
+        (["setup-models"], "qwen_material_pipeline.setup.material_models"),
         (["staged"], "qwen_material_pipeline.workflows.staged_local"),
         (["basic"], "qwen_material_pipeline.workflows.basic"),
         (["catalog"], "qwen_material_pipeline.materials.catalog"),
-        (["download-qwen"], "qwen_material_pipeline.qwen.download_model"),
         (["review"], "qwen_material_pipeline.materials.review"),
         (["complete-plan"], "qwen_material_pipeline.materials.complete_plan"),
         (
@@ -146,7 +146,7 @@ def test_forwards_arguments_and_restores_sys_argv(monkeypatch):
     [
         ["--help"],
         ["usd", "--help"],
-        ["download-qwen", "--help"],
+        ["setup-models", "--help"],
         ["usd", "registry", "--help"],
         ["usd", "validate-delivery", "--help"],
     ],

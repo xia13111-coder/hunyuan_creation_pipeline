@@ -97,6 +97,14 @@ class ProjectLayout:
         return self.material_pipeline / "third_party"
 
     @property
+    def material_assets(self) -> Path:
+        return self.material_pipeline / "assets"
+
+    @property
+    def nvidia_base_observation_bank(self) -> Path:
+        return self.material_assets / "nvidia_base_observation_bank_v1"
+
+    @property
     def material_configs(self) -> Path:
         return self.material_package / "configs"
 

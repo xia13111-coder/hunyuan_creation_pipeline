@@ -40,6 +40,10 @@ class CommandSpec:
 
 
 COMMANDS: dict[str, CommandSpec] = {
+    "setup-models": CommandSpec(
+        "qwen_material_pipeline.setup.material_models",
+        "download the automatic-material models and update .env",
+    ),
     "staged": CommandSpec(
         "qwen_material_pipeline.workflows.staged_local",
         "run the conservative staged Qwen/MVInverse workflow",
@@ -59,10 +63,6 @@ COMMANDS: dict[str, CommandSpec] = {
     "base-bank": CommandSpec(
         "qwen_material_pipeline.materials.base_observation_bank",
         "build and verify the strict NVIDIA Base rendered observation bank",
-    ),
-    "download-qwen": CommandSpec(
-        "qwen_material_pipeline.qwen.download_model",
-        "download an official Qwen3-VL checkpoint to local storage",
     ),
     "review": CommandSpec(
         "qwen_material_pipeline.materials.review",

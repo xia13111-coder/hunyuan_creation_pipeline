@@ -111,8 +111,18 @@ def load_environment_file(path: str | Path) -> tuple[str, ...]:
 
 
 def load_project_environment() -> tuple[str, ...]:
-    """Load the checkout-local ``.env`` file when it exists."""
+    """Load the configured runtime file or the checkout-local ``.env``.
 
+    Containers mount the source tree read-only and run as a fixed unprivileged
+    user.  ``PIPELINE_ENV_FILE`` lets them use a dedicated, readable runtime
+    file without opening the developer's checkout-local ``.env`` to that user.
+    The explicit path is authoritative even when it does not exist, so a
+    container never falls through to a private host file by accident.
+    """
+
+    configured = os.getenv("PIPELINE_ENV_FILE")
+    if configured is not None:
+        return load_environment_file(configured)
     return load_environment_file(PROJECT_ROOT / ".env")
 
 
@@ -257,8 +267,8 @@ def configure_runtime() -> dict[str, str | None]:
     os.environ.setdefault("ROOT_DIR", str(PROJECT_ROOT))
     os.environ.setdefault("REFINE_MESH_TEMP_UPLOAD", "uguu")
     configure_discovered_sam3d_environment(PROJECT_ROOT)
-    # Qwen3-VL and MVInverse deliberately share the pinned SAM3D Torch/CUDA
-    # runtime. Isaac Sim and Blender retain their vendor-managed interpreters.
+    # SAM3, MVInverse, and retrieval share the pinned SAM3D Torch/CUDA runtime.
+    # Isaac Sim and Blender retain their vendor-managed interpreters.
     os.environ.setdefault("QWEN_PYTHON", sys.executable)
     os.environ.setdefault("MVINVERSE_PYTHON", sys.executable)
     visual_material_root = SOURCE_LAYOUT.material_pipeline
@@ -306,23 +316,6 @@ def configure_runtime() -> dict[str, str | None]:
         os.environ.setdefault("QWEN35_PYTHON", str(default_qwen35_python))
     if default_qwen35_model is not None:
         os.environ.setdefault("QWEN35_MODEL_PATH", str(default_qwen35_model))
-    removable_qwen_models = sorted(
-        Path("/media").glob("*/WD_BLACK/qwen_models/Qwen3-VL-4B-Instruct")
-    )
-    default_qwen_model = first_existing_path(
-        [
-            os.getenv("QWEN_MODEL_PATH") or "",
-            *removable_qwen_models,
-            visual_material_models / "qwen" / "Qwen3-VL-4B-Instruct",
-        ]
-    )
-    os.environ.setdefault(
-        "QWEN_MODEL_PATH",
-        str(
-            default_qwen_model
-            or visual_material_models / "qwen" / "Qwen3-VL-4B-Instruct"
-        ),
-    )
     default_mvinverse_repository = first_existing_path(
         [
             os.getenv("MVINVERSE_REPOSITORY") or "",
@@ -387,14 +380,12 @@ def configure_runtime() -> dict[str, str | None]:
         [
             os.getenv("ENTITYSEG_CONFIG") or "",
             *(
-                root
-                / "configs/entityv2/entity_segmentation/"
+                root / "configs/entityv2/entity_segmentation/"
                 "cropformer_swin_tiny_3x.yaml"
                 for root in removable_entityseg_roots
             ),
             (
-                default_entityseg_root
-                / "configs/entityv2/entity_segmentation/"
+                default_entityseg_root / "configs/entityv2/entity_segmentation/"
                 "cropformer_swin_tiny_3x.yaml"
                 if default_entityseg_root is not None
                 else ""
@@ -415,15 +406,11 @@ def configure_runtime() -> dict[str, str | None]:
     if default_entityseg_python is not None:
         os.environ.setdefault("ENTITYSEG_PYTHON", str(default_entityseg_python))
     if default_entityseg_root is not None:
-        os.environ.setdefault(
-            "ENTITYSEG_CROPFORMER_ROOT", str(default_entityseg_root)
-        )
+        os.environ.setdefault("ENTITYSEG_CROPFORMER_ROOT", str(default_entityseg_root))
     if default_entityseg_config is not None:
         os.environ.setdefault("ENTITYSEG_CONFIG", str(default_entityseg_config))
     if default_entityseg_checkpoint is not None:
-        os.environ.setdefault(
-            "ENTITYSEG_CHECKPOINT", str(default_entityseg_checkpoint)
-        )
+        os.environ.setdefault("ENTITYSEG_CHECKPOINT", str(default_entityseg_checkpoint))
     removable_siglip_models = sorted(
         Path("/media").glob("*/WD_BLACK/qwen_models/siglip2-base-patch16-224")
     )
@@ -470,30 +457,36 @@ def configure_runtime() -> dict[str, str | None]:
         "VISUAL_RETRIEVAL_CACHE",
         str(default_retrieval_cache or cache_root / "retrieval"),
     )
-    default_observation_bank = first_existing_path(
+    configured_observation_bank = os.getenv("NVIDIA_BASE_OBSERVATION_BANK")
+    observation_bank_manifest = first_existing_path(
         [
-            os.getenv("NVIDIA_BASE_OBSERVATION_BANK") or "",
+            (
+                Path(configured_observation_bank) / "index_manifest.json"
+                if configured_observation_bank
+                else ""
+            ),
+            SOURCE_LAYOUT.nvidia_base_observation_bank / "index_manifest.json",
             *(
-                root / "nvidia_base_observation_bank_v1"
+                root / "nvidia_base_observation_bank_v1" / "index_manifest.json"
                 for root in removable_retrieval_caches
             ),
-            cache_root / "nvidia_base_observation_bank_v1",
+            cache_root / "nvidia_base_observation_bank_v1" / "index_manifest.json",
         ]
     )
-    os.environ.setdefault(
-        "NVIDIA_BASE_OBSERVATION_BANK",
-        str(default_observation_bank or cache_root / "nvidia_base_observation_bank_v1"),
+    default_observation_bank = (
+        observation_bank_manifest.parent
+        if observation_bank_manifest
+        else cache_root / "nvidia_base_observation_bank_v1"
     )
+    if (
+        not configured_observation_bank
+        or not (
+            Path(configured_observation_bank).expanduser() / "index_manifest.json"
+        ).is_file()
+    ):
+        os.environ["NVIDIA_BASE_OBSERVATION_BANK"] = str(default_observation_bank)
     default_nvidia_materials = first_existing_path(
         [
-            os.getenv("NVIDIA_MDL_MATERIALS_ROOT") or "",
-            (
-                Path(os.getenv("NVIDIA_MDL_BASE_ROOT", "")).expanduser().parent
-                if os.getenv("NVIDIA_MDL_BASE_ROOT")
-                and Path(os.getenv("NVIDIA_MDL_BASE_ROOT", "")).expanduser().name
-                == "Base"
-                else os.getenv("NVIDIA_MDL_BASE_ROOT") or ""
-            ),
             Path.home()
             / "isaacsim_assets"
             / "Assets"
@@ -528,7 +521,6 @@ def configure_runtime() -> dict[str, str | None]:
         "REFINE_MESH_TEMP_UPLOAD": os.getenv("REFINE_MESH_TEMP_UPLOAD"),
         "QWEN_PYTHON": os.getenv("QWEN_PYTHON"),
         "MVINVERSE_PYTHON": os.getenv("MVINVERSE_PYTHON"),
-        "QWEN_MODEL_PATH": os.getenv("QWEN_MODEL_PATH"),
         "QWEN35_PYTHON": os.getenv("QWEN35_PYTHON"),
         "QWEN35_MODEL_PATH": os.getenv("QWEN35_MODEL_PATH"),
         "SIGLIP2_MODEL_PATH": os.getenv("SIGLIP2_MODEL_PATH"),
@@ -550,6 +542,7 @@ def configure_runtime() -> dict[str, str | None]:
         "LOCAL_MODELS_ONLY": os.getenv("PIPELINE_LOCAL_MODELS_ONLY"),
         "MODEL_CACHE_ROOT": os.getenv("MODEL_CACHE_ROOT"),
         "VISUAL_MATERIAL_ROOT": os.getenv("VISUAL_MATERIAL_ROOT"),
+        "NVIDIA_BASE_OBSERVATION_BANK": os.getenv("NVIDIA_BASE_OBSERVATION_BANK"),
     }
 
 
@@ -563,7 +556,6 @@ def runtime_summary() -> dict[str, Any]:
         "refine_mesh_config": str(default_refine_config_path()),
         "qwen_python": os.getenv("QWEN_PYTHON", sys.executable),
         "mvinverse_python": os.getenv("MVINVERSE_PYTHON", sys.executable),
-        "qwen_model_path": os.getenv("QWEN_MODEL_PATH"),
         "qwen35_python": os.getenv("QWEN35_PYTHON"),
         "qwen35_model_path": os.getenv("QWEN35_MODEL_PATH"),
         "siglip2_model_path": os.getenv("SIGLIP2_MODEL_PATH"),
@@ -585,6 +577,7 @@ def runtime_summary() -> dict[str, Any]:
         "local_models_only": os.getenv("PIPELINE_LOCAL_MODELS_ONLY", "1"),
         "model_cache_root": os.getenv("MODEL_CACHE_ROOT"),
         "visual_material_root": os.getenv("VISUAL_MATERIAL_ROOT"),
+        "nvidia_base_observation_bank": os.getenv("NVIDIA_BASE_OBSERVATION_BANK"),
     }
     summary["blender_exists"] = blender_bin().exists()
     summary["isaac_python_exists"] = isaac_python().exists()

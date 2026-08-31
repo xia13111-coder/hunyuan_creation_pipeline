@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import types
 from pathlib import Path
@@ -155,26 +156,28 @@ def test_descriptor_and_catalog_text_have_deterministic_field_order() -> None:
                 "ignored": "must not enter retrieval text",
             },
         }
-    ) == (
-        "cool silver with directional grain. metal. brushed. 0.35"
+    ) == ("cool silver with directional grain. metal. brushed. 0.35")
+    assert (
+        _descriptor_text({"group_id": "G02", "descriptor": "  glossy black polymer  "})
+        == "glossy black polymer"
     )
-    assert _descriptor_text(
-        {"group_id": "G02", "descriptor": "  glossy black polymer  "}
-    ) == "glossy black polymer"
     assert _descriptor_text({"group_id": "G03", "descriptor": {}}) == (
         "industrial material region G03"
     )
-    assert _material_text(
-        {
-            "material_id": "Steel",
-            "display_name": "Steel",
-            "description": "Steel",
-            "family": "metal",
-            "keywords": ["silver", "metal"],
-            "colors": ["silver"],
-            "finishes": ["brushed"],
-        }
-    ) == "Steel. metal. silver. brushed"
+    assert (
+        _material_text(
+            {
+                "material_id": "Steel",
+                "display_name": "Steel",
+                "description": "Steel",
+                "family": "metal",
+                "keywords": ["silver", "metal"],
+                "colors": ["silver"],
+                "finishes": ["brushed"],
+            }
+        )
+        == "Steel. metal. silver. brushed"
+    )
 
 
 def test_masked_square_neutralizes_background_and_erodes_boundaries(
@@ -194,8 +197,10 @@ def test_masked_square_neutralizes_background_and_erodes_boundaries(
         assert eroded.size == (64, 64)
         assert pixels[0, 0].tolist() == [127, 127, 127]
         assert np.any(np.all(pixels == [220, 20, 20], axis=-1))
-        assert 0 < np.count_nonzero(eroded_pixels) < np.count_nonzero(
-            np.any(pixels != [127, 127, 127], axis=-1)
+        assert (
+            0
+            < np.count_nonzero(eroded_pixels)
+            < np.count_nonzero(np.any(pixels != [127, 127, 127], axis=-1))
         )
     finally:
         canvas.close()
@@ -276,11 +281,7 @@ def test_catalog_loader_indexes_every_material_and_confines_thumbnails(
     outside = _write_image(tmp_path / "outside.png")
     _write_json(
         catalog_path,
-        {
-            "materials": [
-                {"material_id": "ESCAPE", "thumbnail_path": outside.name}
-            ]
-        },
+        {"materials": [{"material_id": "ESCAPE", "thumbnail_path": outside.name}]},
     )
     with pytest.raises(VisualRetrievalError, match="escapes the material root"):
         _load_catalog(catalog_path, root.resolve())
@@ -300,9 +301,7 @@ def test_model_fingerprint_and_row_normalization_are_content_bound(
     second = _model_fingerprint(model)
 
     assert first["fingerprint_sha256"] != second["fingerprint_sha256"]
-    normalized = _normalize_rows(
-        np.asarray([[3.0, 4.0], [0.0, 0.0]], dtype=np.float32)
-    )
+    normalized = _normalize_rows(np.asarray([[3.0, 4.0], [0.0, 0.0]], dtype=np.float32))
     assert normalized[0].tolist() == pytest.approx([0.6, 0.8])
     assert normalized[1].tolist() == [0.0, 0.0]
 
@@ -342,11 +341,7 @@ def _write_tiny_base_observation_bank(
         "materials": [
             {
                 "material_id": material_id,
-                "appearance": {
-                    "neutral_iso": {
-                        "median_rgb": [float(index), 0.0, 0.0]
-                    }
-                },
+                "appearance": {"neutral_iso": {"median_rgb": [float(index), 0.0, 0.0]}},
                 "authored_mdl": {
                     "reflection_roughness_constant": 0.2 + 0.6 * index,
                     "metallic_constant": float(index),
@@ -425,6 +420,76 @@ def test_base_observation_bank_is_sealed_reordered_and_supplies_visual_priors(
     )
     assert available is True
     assert scores[1] > scores[0]
+
+
+def test_base_observation_bank_is_portable_across_local_paths(tmp_path: Path) -> None:
+    stored_siglip = {
+        "path": "/builder/siglip",
+        "fingerprint_sha256": "builder-s",
+        "files": [{"path": "model.safetensors", "sha256": "a" * 64}],
+    }
+    stored_dino = {
+        "path": "/builder/dino",
+        "fingerprint_sha256": "builder-d",
+        "files": [{"path": "model.safetensors", "sha256": "b" * 64}],
+    }
+    (tmp_path / "builder").mkdir()
+    base, bank = _write_tiny_base_observation_bank(
+        tmp_path / "builder",
+        siglip_identity=stored_siglip,
+        dino_identity=stored_dino,
+    )
+    relocated_base = tmp_path / "consumer" / "Base"
+    shutil.copytree(base, relocated_base)
+
+    loaded = _load_base_observation_bank(
+        bank_dir=bank,
+        material_root=relocated_base,
+        material_ids=["mdl:A.mdl#A", "mdl:B.mdl#B"],
+        siglip_model_identity={
+            "path": "/consumer/siglip",
+            "fingerprint_sha256": "consumer-s",
+            "files": [{"path": "model.safetensors", "sha256": "a" * 64}],
+        },
+        dino_model_identity={
+            "path": "/consumer/dino",
+            "fingerprint_sha256": "consumer-d",
+            "files": [{"path": "model.safetensors", "sha256": "b" * 64}],
+        },
+    )
+
+    assert loaded["identity"]["material_count"] == 2
+
+
+def test_base_observation_bank_rejects_different_model_content(tmp_path: Path) -> None:
+    stored_siglip = {
+        "path": "/builder/siglip",
+        "fingerprint_sha256": "builder-s",
+        "files": [{"path": "model.safetensors", "sha256": "a" * 64}],
+    }
+    dino_identity = {
+        "path": "/builder/dino",
+        "fingerprint_sha256": "builder-d",
+        "files": [{"path": "model.safetensors", "sha256": "b" * 64}],
+    }
+    base, bank = _write_tiny_base_observation_bank(
+        tmp_path,
+        siglip_identity=stored_siglip,
+        dino_identity=dino_identity,
+    )
+
+    with pytest.raises(VisualRetrievalError, match="different model weights"):
+        _load_base_observation_bank(
+            bank_dir=bank,
+            material_root=base,
+            material_ids=["mdl:A.mdl#A", "mdl:B.mdl#B"],
+            siglip_model_identity={
+                "path": "/consumer/siglip",
+                "fingerprint_sha256": "consumer-s",
+                "files": [{"path": "model.safetensors", "sha256": "c" * 64}],
+            },
+            dino_model_identity=dino_identity,
+        )
 
 
 def test_base_observation_bank_rejects_changed_mdl_source(tmp_path: Path) -> None:

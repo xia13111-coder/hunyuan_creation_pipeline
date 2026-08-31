@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from asset_pipeline.project_layout import ProjectLayout, SOURCE_LAYOUT
@@ -17,6 +18,9 @@ def test_source_layout_has_one_owner_for_material_pipeline_paths() -> None:
     assert SOURCE_LAYOUT.material_models == SOURCE_LAYOUT.material_runtime / "models"
     assert SOURCE_LAYOUT.material_third_party == (
         SOURCE_LAYOUT.material_pipeline / "third_party"
+    )
+    assert SOURCE_LAYOUT.nvidia_base_observation_bank == (
+        SOURCE_LAYOUT.material_pipeline / "assets" / "nvidia_base_observation_bank_v1"
     )
     assert DEFAULT_CONFIG_PATH == SOURCE_LAYOUT.manual_part_id_material_config
     assert SOURCE_LAYOUT.material_retrieval_script == (
@@ -70,16 +74,12 @@ def test_deployed_layout_rebases_all_runtime_paths(tmp_path: Path) -> None:
 def test_repository_support_files_are_grouped_by_owner() -> None:
     root = SOURCE_LAYOUT.root
     expected_files = (
-        ".github/CODE_OF_CONDUCT.md",
-        ".github/CONTRIBUTING.md",
-        ".github/SECURITY.md",
         "legal/README.md",
         "legal/README.zh.md",
         "legal/THIRD_PARTY_NOTICES.md",
         "requirements/visual-materials.txt",
         "docs/development/architecture.md",
         "docs/guides/manual-part-id-materials.md",
-        "docs/release/public-release-checklist.md",
         "tools/qwen_material_pipeline/src/qwen_material_pipeline/segmentation/part_id_request.py",
         "tools/qwen_material_pipeline/scripts/qwen35/setup_qwen35_runtime.sh",
         "tools/qwen_material_pipeline/src/qwen_material_pipeline/web/result_viewer/serve.sh",
@@ -108,3 +108,21 @@ def test_repository_support_files_are_grouped_by_owner() -> None:
     )
     for relative in obsolete_paths:
         assert not (root / relative).exists(), relative
+
+
+def test_repository_root_has_no_python_source_files() -> None:
+    assert sorted(path.name for path in SOURCE_LAYOUT.root.glob("*.py")) == []
+
+
+def test_production_material_config_has_no_host_specific_model_paths() -> None:
+    document = json.loads(
+        SOURCE_LAYOUT.manual_part_id_material_config.read_text(encoding="utf-8")
+    )
+    serialized = json.dumps(document, sort_keys=True)
+    assert "/home/" not in serialized
+    assert "/media/" not in serialized
+    assert document["sam3"]["python"] == "${QWEN_PYTHON}"
+    assert document["sam3"]["entityseg"]["python"] == "${ENTITYSEG_PYTHON}"
+    assert document["retrieval"]["python"] == "${QWEN_PYTHON}"
+    assert document["retrieval"]["siglip2_model"] == "${SIGLIP2_MODEL_PATH}"
+    assert document["retrieval"]["dinov2_model"] == "${DINOV2_MODEL_PATH}"

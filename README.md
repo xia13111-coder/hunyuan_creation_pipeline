@@ -25,15 +25,15 @@ failed check.
 - Linux x86-64 and an NVIDIA CUDA GPU;
 - Conda with Python 3.10;
 - separately installed Blender and Isaac Sim;
-- locally installed Qwen3.5, SAM3, MVInverse, SigLIP2, and DINOv2 weights, plus
-  a prepared NVIDIA Base observation bank;
+- locally installed Qwen3.5, SAM3, MVInverse, SigLIP2, and DINOv2 weights;
 - a mounted NVIDIA MDL material library;
 - Tencent Cloud credentials only for Hunyuan generation or refinement stages.
 
 The complete local material workflow currently targets a GPU with about 24 GB
 of VRAM.
-Models, NVIDIA assets, vendor runtimes, and credentials are not included in the
-source release. Dependencies are loaded per workflow: STEP/STP without visual
+Models, NVIDIA MDL assets, vendor runtimes, and credentials are not included;
+the Base observation bank is bundled. Dependencies are loaded per workflow:
+STEP/STP without visual
 materials does not require Qwen, SAM3, MVInverse, SigLIP2, DINOv2, or the NVIDIA
 MDL library.
 
@@ -49,35 +49,36 @@ python -m pip install -e . -e ./tools/qwen_material_pipeline
 cp .env.example .env
 ```
 
-Fill local paths or credentials in `.env`. Pipeline commands load this file
-automatically; variables already set in the environment take precedence. Keep
-all local model paths there:
+## `.env` setup
 
-| Module | `.env` variables |
-| --- | --- |
-| Qwen / Qwen3.5 | `QWEN_MODEL_PATH`, `QWEN35_MODEL_PATH` |
-| MVInverse | `MVINVERSE_REPOSITORY`, `MVINVERSE_CHECKPOINT` |
-| SAM3 | `SAM3_REPOSITORY`, `SAM3_CHECKPOINT` |
-| EntitySeg / CropFormer | `ENTITYSEG_PYTHON`, `ENTITYSEG_CROPFORMER_ROOT`, `ENTITYSEG_CONFIG`, `ENTITYSEG_CHECKPOINT` |
-| SAM3D | `SAM3D_SINGLE_VIEW_ROOT`, `SAM3D_MULTI_VIEW_ROOT`, `SAM3D_PIPELINE_CONFIG`, `SAM3D_MOGE_CHECKPOINT`, `SAM3D_DINOV2_REPOSITORY`, `SAM3D_DINOV2_CHECKPOINT` |
-| Material retrieval | `SIGLIP2_MODEL_PATH`, `DINOV2_MODEL_PATH` |
+`.env` stores local paths only. The model command below fills model paths;
+other blank paths continue to use automatic discovery.
 
-EntitySeg runs in its own CropFormer/Detectron2 environment. Install the
-pipeline-owned compatibility layer into that environment (not into
-`~/.local`) so the isolated child process also works with
-`PYTHONNOUSERSITE=1`:
+Accept access for [SAM3](https://huggingface.co/facebook/sam3) and
+[EntitySeg](https://huggingface.co/datasets/qqlu1992/Adobe_EntitySeg), then run:
 
 ```bash
-"$ENTITYSEG_PYTHON" -m pip install \
-  -r tools/qwen_material_pipeline/requirements/entityseg.txt
-PYTHONNOUSERSITE=1 "$ENTITYSEG_PYTHON" -c \
-  'import black, cloudpickle, mmcv, yapf'
+hf auth login
+qwen-material setup-models --model-root /data/hunyuan-models
 ```
 
-The runtime fixes `PIPELINE_LOCAL_MODELS_ONLY=1`. Normal local inference does
-not download weights and fails clearly when a path is missing or
-incomplete. Hunyuan generation and ReduceFace are Tencent Cloud APIs, so they
-still require network access and credentials.
+This downloads Qwen3.5, MVInverse, SAM3, EntitySeg, SigLIP2, and DINOv2, then
+updates `.env`. Re-running resumes incomplete downloads. Normal inference stays
+local-only.
+
+Fill these paths manually:
+
+| Variable | Value |
+| --- | --- |
+| `ISAAC_PYTHON` | Isaac Sim `python.sh` |
+| `VISUAL_MATERIAL_ROOT` | NVIDIA Materials directory containing `Base/` |
+
+The same command also prepares the SAM3/CropFormer sources, EntitySeg runtime,
+and bundled observation bank. Only the Isaac Sim and NVIDIA Materials paths
+remain manual.
+
+See [.env.example](./.env.example) for all variables and
+[docker/README.md](./docker/README.md) for container paths.
 
 Verify the entry points:
 
@@ -171,7 +172,8 @@ hunyuan-asset-pipeline \
 
 ### STEP/STP with reference-image materials
 
-First confirm the whole-workpiece foreground in each reference image:
+First use `qwen-material sam3-foreground-ui` to manually point-segment and
+confirm the foreground in 2–4 photographs:
 
 ```bash
 qwen-material sam3-foreground-ui \
@@ -182,7 +184,7 @@ qwen-material sam3-foreground-ui \
   --output ./annotations/sam3_foreground_annotations.json
 ```
 
-Then run the automatic pipeline:
+After confirming and saving every view, run the automatic material workflow:
 
 ```bash
 manual-material-pipeline \
@@ -191,14 +193,13 @@ manual-material-pipeline \
   --output ./outputs/manual/asset_run
 ```
 
-STEP/STP dimensions are preserved. Use a new output directory for a from-zero
-run; `--resume` is only for the same `live` request, and reusable visual stages
-must pass their hash checks.
+STEP/STP dimensions are preserved. See the
+[automatic-material quick start](./docs/guides/manual-part-id-materials.md) for
+annotation, resume, and output details.
 
 See [Hunyuan](./docs/modules/hunyuan.md), [SAM3D](./docs/modules/sam3d.md),
 [CAD](./docs/modules/cad.md), the
-[generation guide](./docs/guides/generation-guide.md), and
-[CAD visual materials](./docs/guides/manual-part-id-materials.md).
+[generation guide](./docs/guides/generation-guide.md).
 
 ## Outputs
 
@@ -226,10 +227,9 @@ tools/{blender,isaac,sam3d}/    vendor-runtime workers
 tools/qwen_material_pipeline/   material inference and USD tools
 configs/                        versioned configuration
 requirements/                   purpose-specific dependency overlays
-docs/{guides,development,release,modules}/
+docs/{guides,development,modules}/
                                 detailed documentation
 legal/                          third-party license inventory
-.github/                        contribution and security policies
 tests/                          tests
 outputs/                        generated runs
 ```
@@ -239,15 +239,12 @@ Key references:
 - [Documentation index](./docs/README.md)
 - [Architecture](./docs/development/architecture.md)
 - [Visual materials](./docs/modules/visual-materials.md)
-- [Public release checklist](./docs/release/public-release-checklist.md)
-- [Changelog](./CHANGELOG.md)
 
 ## Test
 
 ```bash
 python -m pytest -q -p no:cacheprovider tests
 python -m pytest -q -p no:cacheprovider tools/qwen_material_pipeline/tests
-python ./tools/release/check_public_tree.py
 ```
 
 ## License
@@ -256,6 +253,4 @@ First-party code and documentation use
 [Apache License 2.0](./LICENSE). MVInverse is non-commercial, and models,
 NVIDIA software, MDL materials, and generated assets retain separate terms.
 See the [legal-file index](./legal/README.md),
-[third-party notices](./legal/THIRD_PARTY_NOTICES.md),
-[contribution guide](./.github/CONTRIBUTING.md), and
-[security policy](./.github/SECURITY.md).
+[third-party notices](./legal/THIRD_PARTY_NOTICES.md).

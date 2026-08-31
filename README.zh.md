@@ -23,12 +23,13 @@ NVIDIA `Materials/Base` 候选并验证最终 USD。对齐或图像信息不足�
 - Linux x86-64 和 NVIDIA CUDA GPU；
 - Conda 与 Python 3.10；
 - 单独安装 Blender 和 Isaac Sim；
-- 本地 Qwen3.5、SAM3、MVInverse、SigLIP2、DINOv2 权重和已构建的 Base 材质观察库；
+- 本地 Qwen3.5、SAM3、MVInverse、SigLIP2、DINOv2 权重；
 - 本机 NVIDIA MDL 材质库；
 - 只有 Hunyuan 生成或精修阶段需要腾讯云凭据。
 
-完整本地材质流程当前需要约 24 GB 显存。模型、NVIDIA 资产、外部运行时和密钥不随
-源码发布。不同流程按需加载依赖：不加视觉材质的 STEP/STP 流程不需要 Qwen、SAM3、
+完整本地材质流程当前需要约 24 GB 显存。模型、NVIDIA MDL、外部运行时和密钥不随
+源码发布；Base 材质观察库已包含在仓库中。不同流程按需加载依赖：不加视觉材质的
+STEP/STP 流程不需要 Qwen、SAM3、
 MVInverse、SigLIP2、DINOv2 或 NVIDIA MDL 材质库。
 
 ## 安装
@@ -43,20 +44,33 @@ python -m pip install -e . -e ./tools/qwen_material_pipeline
 cp .env.example .env
 ```
 
-在 `.env` 中填写本机路径或凭据。流水线命令会自动读取该文件；当前环境中已有的同名
-变量优先。本地模型路径统一放在该文件中：
+## `.env` 配置
 
-| 模块 | `.env` 变量 |
+`.env` 只保存本机路径。模型路径由下面的命令自动填写，其他空项由程序自动发现。
+
+先在 Hugging Face 接受 [SAM3](https://huggingface.co/facebook/sam3) 和
+[EntitySeg](https://huggingface.co/datasets/qqlu1992/Adobe_EntitySeg) 的访问条件，然后运行：
+
+```bash
+hf auth login
+qwen-material setup-models --model-root /data/hunyuan-models
+```
+
+该命令下载 Qwen3.5、MVInverse、SAM3、EntitySeg、SigLIP2 和 DINOv2，并自动更新
+`.env`。重复运行会继续未完成的下载；正常推理仍然只读取本地权重。
+
+仍需手动填写：
+
+| 变量 | 内容 |
 | --- | --- |
-| Qwen / Qwen3.5 | `QWEN_MODEL_PATH`、`QWEN35_MODEL_PATH` |
-| MVInverse | `MVINVERSE_REPOSITORY`、`MVINVERSE_CHECKPOINT` |
-| SAM3 | `SAM3_REPOSITORY`、`SAM3_CHECKPOINT` |
-| SAM3D | `SAM3D_SINGLE_VIEW_ROOT`、`SAM3D_MULTI_VIEW_ROOT`、`SAM3D_PIPELINE_CONFIG`、`SAM3D_MOGE_CHECKPOINT`、`SAM3D_DINOV2_REPOSITORY`、`SAM3D_DINOV2_CHECKPOINT` |
-| 材质检索 | `SIGLIP2_MODEL_PATH`、`DINOV2_MODEL_PATH` |
+| `ISAAC_PYTHON` | Isaac Sim 的 `python.sh` |
+| `VISUAL_MATERIAL_ROOT` | 包含 `Base/` 的 NVIDIA Materials 目录 |
 
-运行时固定使用 `PIPELINE_LOCAL_MODELS_ONLY=1`。正常本地推理不会下载权重；
-路径缺失或不完整时会明确失败。Hunyuan 生成和 ReduceFace 是腾讯云
-API，仍需网络和凭据。
+SAM3、CropFormer 源码、EntitySeg 环境和材质观察库也由该命令自动准备；实际需要手填的
+只剩 Isaac Sim 和 NVIDIA Materials 路径。
+
+完整变量见 [.env.example](./.env.example)，Docker 配置见
+[docker/README.zh.md](./docker/README.zh.md)。
 
 验证入口：
 
@@ -147,7 +161,8 @@ hunyuan-asset-pipeline \
 
 ### STEP/STP：根据参考图自动赋材质
 
-先在每张参考图中确认整机前景：
+先用 `qwen-material sam3-foreground-ui` 对 2–4 张照片进行 SAM3 人工点选分割并确认
+整机前景：
 
 ```bash
 qwen-material sam3-foreground-ui \
@@ -158,7 +173,7 @@ qwen-material sam3-foreground-ui \
   --output ./annotations/sam3_foreground_annotations.json
 ```
 
-然后启动自动流程：
+所有视角确认并保存后，运行自动赋材质流程：
 
 ```bash
 manual-material-pipeline \
@@ -167,13 +182,12 @@ manual-material-pipeline \
   --output ./outputs/manual/asset_run
 ```
 
-STEP/STP 保留原始尺寸。从零运行应使用新输出目录；`--resume` 只恢复同一份 `live` 输入，
-可复用的视觉阶段必须重新通过哈希校验。
+STEP/STP 保留原始尺寸。详细标注、恢复和结果说明见
+[自动赋材质快速开始](./docs/guides/manual-part-id-materials.zh.md)。
 
 详细说明见 [Hunyuan](./docs/modules/hunyuan.zh.md)、[SAM3D](./docs/modules/sam3d.zh.md)、
 [CAD](./docs/modules/cad.zh.md)、
-[生成方式选择](./docs/guides/generation-guide.zh.md)和
-[CAD 视觉材质](./docs/guides/manual-part-id-materials.zh.md)。
+[生成方式选择](./docs/guides/generation-guide.zh.md)。
 
 ## 输出
 
@@ -200,10 +214,9 @@ tools/{blender,isaac,sam3d}/    Blender、Isaac Sim 和 SAM3D 执行脚本
 tools/qwen_material_pipeline/   材质推理和 USD 工具
 configs/                        版本化配置
 requirements/                   按用途拆分的依赖增量
-docs/{guides,development,release,modules}/
+docs/{guides,development,modules}/
                                 详细文档
 legal/                          第三方版权与许可证清单
-.github/                        贡献与安全策略
 tests/                          测试
 outputs/                        生成结果
 ```
@@ -213,15 +226,12 @@ outputs/                        生成结果
 - [文档索引](./docs/README.zh.md)
 - [架构](./docs/development/architecture.zh.md)
 - [视觉材质](./docs/modules/visual-materials.zh.md)
-- [公开发布检查表](./docs/release/public-release-checklist.zh.md)
-- [变更记录](./CHANGELOG.md)
 
 ## 测试
 
 ```bash
 python -m pytest -q -p no:cacheprovider tests
 python -m pytest -q -p no:cacheprovider tools/qwen_material_pipeline/tests
-python ./tools/release/check_public_tree.py
 ```
 
 ## 许可证
@@ -229,5 +239,4 @@ python ./tools/release/check_public_tree.py
 自研代码和文档采用 [Apache License 2.0](./LICENSE)。MVInverse 仅限非商业用途；模型、
 NVIDIA 软件、MDL 材质和生成资产使用各自条款。见
 [法律文件索引](./legal/README.zh.md)、
-[第三方声明](./legal/THIRD_PARTY_NOTICES.md)、
-[贡献指南](./.github/CONTRIBUTING.md)和[安全策略](./.github/SECURITY.md)。
+[第三方声明](./legal/THIRD_PARTY_NOTICES.md)。
