@@ -1,0 +1,15 @@
+{
+  "schema_version": "nvidia-base-material-scope/v1",
+  "scope": "nvidia_base",
+  "resolved_material_root": "${VISUAL_MATERIAL_ROOT}/Base",
+  "collection_name": "Base",
+  "catalog": "catalog.json",
+  "catalog_sha256": "87cbb5d088bf8b0f201c685eeea93fcacdb542b8e91d5cae76819b5cab51fdbd",
+  "allowlist": "allowlist.json",
+  "allowlist_sha256": "73e878cedcc83aa894f1657355c32c77a4c5c22a11c340b234f323211076e7cf",
+  "material_count": 160,
+  "mdl_module_count": 161,
+  "mdl_sources_sha256": "4341450fcf1e06b92201d0eca095eb2c26e65719b9c5741d2614461dd7b26888",
+  "forbidden_vmaterials_2_count": 0,
+  "exact_cover": true
+}
