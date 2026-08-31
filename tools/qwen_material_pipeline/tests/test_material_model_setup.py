@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
+import tarfile
 from pathlib import Path
 
 from qwen_material_pipeline.setup.material_models import (
+    BLENDER_DIRECTORY,
+    BLENDER_VERSION,
     ENTITYSEG_FILENAME,
     ModelSetupError,
     SetupPaths,
     _checkout_repository,
+    _prepare_blender,
     main,
     update_environment_file,
 )
@@ -19,6 +24,7 @@ def test_setup_paths_cover_every_downloaded_model(tmp_path: Path) -> None:
     environment = paths.environment()
 
     assert environment["QWEN35_MODEL_PATH"] == str(paths.qwen_model)
+    assert environment["BLENDER_BIN"] == str(paths.blender_bin)
     assert environment["MVINVERSE_CHECKPOINT"] == str(paths.mvinverse_model)
     assert environment["SAM3_REPOSITORY"] == str(paths.sam3_repository)
     assert environment["SAM3_CHECKPOINT"] == str(paths.sam3_checkpoint)
@@ -127,3 +133,34 @@ def test_source_checkout_populates_worktree_when_default_head_is_pinned(
     )
 
     assert (destination / "model.py").read_text(encoding="utf-8") == "ready = True\n"
+
+
+def test_blender_is_downloaded_verified_and_reused(tmp_path: Path) -> None:
+    payload = tmp_path / "payload" / BLENDER_DIRECTORY
+    payload.mkdir(parents=True)
+    executable = payload / "blender"
+    executable.write_text(
+        f"#!/bin/sh\nprintf 'Blender {BLENDER_VERSION}\\n'\n", encoding="utf-8"
+    )
+    executable.chmod(0o755)
+    archive = tmp_path / "fixture.tar.xz"
+    with tarfile.open(archive, mode="w:xz") as bundle:
+        bundle.add(payload, arcname=BLENDER_DIRECTORY)
+    expected_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    paths = SetupPaths.from_root(tmp_path / "models")
+
+    installed = _prepare_blender(
+        paths, url=archive.as_uri(), expected_sha256=expected_sha256
+    )
+
+    assert installed == paths.blender_bin
+    assert installed.is_file()
+    assert paths.blender_archive.is_file()
+    assert (
+        _prepare_blender(
+            paths,
+            url=(tmp_path / "missing.tar.xz").as_uri(),
+            expected_sha256="0" * 64,
+        )
+        == installed
+    )

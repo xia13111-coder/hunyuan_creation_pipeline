@@ -24,7 +24,7 @@ failed check.
 
 - Linux x86-64 and an NVIDIA CUDA GPU;
 - Conda with Python 3.10;
-- separately installed Blender and Isaac Sim;
+- separately installed Isaac Sim;
 - locally installed Qwen3.5, SAM3, MVInverse, SigLIP2, and DINOv2 weights;
 - a mounted NVIDIA MDL material library;
 - Tencent Cloud credentials only for Hunyuan generation or refinement stages.
@@ -62,9 +62,10 @@ hf auth login
 qwen-material setup-models --model-root /data/hunyuan-models
 ```
 
-This downloads Qwen3.5, MVInverse, SAM3, EntitySeg, SigLIP2, and DINOv2, then
-updates `.env`. Re-running resumes incomplete downloads. Normal inference stays
-local-only.
+This installs and verifies Blender 4.5.0 from the
+[official release](https://download.blender.org/release/Blender4.5/), downloads
+the remaining models, then updates `.env`. Re-running resumes incomplete
+downloads. Normal inference stays local-only.
 
 Fill these paths manually:
 

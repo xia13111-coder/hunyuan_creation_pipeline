@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Download the automatic-material models and write their paths to ``.env``."""
+"""Prepare Blender and automatic-material models, then update ``.env``."""
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 MATERIAL_PIPELINE_ROOT = Path(__file__).resolve().parents[3]
@@ -20,6 +24,12 @@ QWEN_SETUP = MATERIAL_PIPELINE_ROOT / "scripts" / "qwen35" / "setup_qwen35_runti
 GIB = 1024**3
 _ENV_ASSIGNMENT = re.compile(r"^\s*(?:export\s+)?([A-Z][A-Z0-9_]*)=")
 _PLAIN_ENV_VALUE = re.compile(r"[A-Za-z0-9_./:@+,-]+")
+
+BLENDER_VERSION = "4.5.0"
+BLENDER_DIRECTORY = f"blender-{BLENDER_VERSION}-linux-x64"
+BLENDER_ARCHIVE = f"{BLENDER_DIRECTORY}.tar.xz"
+BLENDER_URL = f"https://download.blender.org/release/Blender4.5/{BLENDER_ARCHIVE}"
+BLENDER_SHA256 = "1188b95cc12321c770b631939f7c25a096910b6f884a990bf9c0f62d52b38aec"
 
 MVINVERSE_REVISION = "ac2d62d9ab2d8e23370dc4de5e6543cd52662c0e"
 DINOV2_REVISION = "e4c89a4e05589de9b3e188688a303d0f3c04d0f3"
@@ -58,6 +68,9 @@ class SetupPaths:
     entityseg_python: Path
     observation_bank: Path
     retrieval_cache: Path
+    blender_home: Path
+    blender_bin: Path
+    blender_archive: Path
 
     @classmethod
     def from_root(cls, root: Path) -> "SetupPaths":
@@ -95,12 +108,16 @@ class SetupPaths:
                 MATERIAL_PIPELINE_ROOT / "assets" / "nvidia_base_observation_bank_v1"
             ),
             retrieval_cache=model_root / "cache" / "visual-retrieval",
+            blender_home=model_root / "tools" / BLENDER_DIRECTORY,
+            blender_bin=model_root / "tools" / BLENDER_DIRECTORY / "blender",
+            blender_archive=model_root / "downloads" / BLENDER_ARCHIVE,
         )
 
-    def environment(self) -> dict[str, str]:
+    def environment(self, *, blender_bin: Path | None = None) -> dict[str, str]:
         owner_python = str(Path(sys.executable).resolve())
         return {
             "PIPELINE_LOCAL_MODELS_ONLY": "1",
+            "BLENDER_BIN": str(blender_bin or self.blender_bin),
             "MODEL_CACHE_ROOT": str(self.model_root),
             "QWEN35_PYTHON": str(self.qwen_python),
             "QWEN35_MODEL_PATH": str(self.qwen_model),
@@ -138,6 +155,176 @@ def _check_free_space(path: Path, minimum_free_gb: int) -> None:
             f"model disk has {free / GIB:.1f} GiB free; "
             f"at least {minimum_free_gb} GiB is required"
         )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _download_verified_file(
+    *, url: str, destination: Path, expected_sha256: str
+) -> Path:
+    """Download one resumable file and accept it only after SHA-256 validation."""
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file() and _sha256_file(destination) == expected_sha256:
+        return destination
+    partial = destination.with_name(f"{destination.name}.partial")
+    if partial.is_file() and _sha256_file(partial) == expected_sha256:
+        partial.replace(destination)
+        return destination
+
+    aria2 = shutil.which("aria2c")
+    if aria2 and url.startswith(("https://", "http://")):
+        completed = subprocess.run(
+            [
+                aria2,
+                "--allow-overwrite=true",
+                "--auto-file-renaming=false",
+                "--continue=true",
+                "--max-connection-per-server=8",
+                "--split=8",
+                "--min-split-size=1M",
+                "--max-tries=5",
+                "--retry-wait=2",
+                "--summary-interval=5",
+                f"--dir={destination.parent}",
+                f"--out={partial.name}",
+                url,
+            ],
+            check=False,
+        )
+        if completed.returncode == 0:
+            if partial.is_file() and _sha256_file(partial) == expected_sha256:
+                partial.replace(destination)
+                return destination
+            partial.unlink(missing_ok=True)
+            raise ModelSetupError("parallel Blender download failed SHA-256 validation")
+
+    start = partial.stat().st_size if partial.is_file() else 0
+    for attempt in range(2):
+        headers = {"User-Agent": "hunyuan-asset-pipeline-setup/1"}
+        if start:
+            headers["Range"] = f"bytes={start}-"
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            response = urllib.request.urlopen(request, timeout=60)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 416 and start and attempt == 0:
+                partial.unlink(missing_ok=True)
+                start = 0
+                continue
+            raise ModelSetupError(
+                f"unable to download Blender: HTTP {exc.code}"
+            ) from exc
+        with response:
+            append = start > 0 and getattr(response, "status", None) == 206
+            with partial.open("ab" if append else "wb") as stream:
+                shutil.copyfileobj(response, stream, length=1024 * 1024)
+        break
+
+    actual_sha256 = _sha256_file(partial)
+    if actual_sha256 != expected_sha256:
+        partial.unlink(missing_ok=True)
+        raise ModelSetupError(
+            "Blender archive failed SHA-256 validation: "
+            f"expected {expected_sha256}, got {actual_sha256}"
+        )
+    partial.replace(destination)
+    return destination
+
+
+def _safe_extract_blender(archive: Path, destination: Path) -> None:
+    staging = destination.parent / f".{destination.name}.extracting-{os.getpid()}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    staging_root = staging.resolve()
+    try:
+        with tarfile.open(archive, mode="r:xz") as bundle:
+            members = bundle.getmembers()
+            for member in members:
+                relative = PurePosixPath(member.name)
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise ModelSetupError("Blender archive contains an unsafe path")
+                target = staging.joinpath(*relative.parts).resolve()
+                target.relative_to(staging_root)
+                if member.issym():
+                    (target.parent / member.linkname).resolve().relative_to(
+                        staging_root
+                    )
+                elif member.islnk():
+                    staging.joinpath(
+                        *PurePosixPath(member.linkname).parts
+                    ).resolve().relative_to(staging_root)
+            bundle.extractall(staging)
+        extracted = staging / BLENDER_DIRECTORY
+        executable = extracted / "blender"
+        if not executable.is_file():
+            raise ModelSetupError("Blender archive did not contain its executable")
+        if destination.exists():
+            shutil.rmtree(destination)
+        extracted.replace(destination)
+    except (OSError, tarfile.TarError, ValueError) as exc:
+        raise ModelSetupError("unable to extract the verified Blender archive") from exc
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
+def _blender_version(executable: Path) -> str | None:
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        return None
+    try:
+        completed = subprocess.run(
+            [str(executable), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"^Blender\s+(\d+\.\d+\.\d+)", completed.stdout)
+    return match.group(1) if completed.returncode == 0 and match else None
+
+
+def _prepare_blender(
+    paths: SetupPaths,
+    *,
+    url: str = BLENDER_URL,
+    expected_sha256: str = BLENDER_SHA256,
+) -> Path:
+    """Provide the same pinned portable Blender used by the full Docker image."""
+
+    candidates = [
+        os.getenv("BLENDER_BIN") or "",
+        shutil.which("blender") or "",
+        paths.blender_bin,
+        Path("/opt/blender/blender"),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        executable = Path(candidate).expanduser().absolute()
+        if _blender_version(executable) == BLENDER_VERSION:
+            return executable
+    archive = _download_verified_file(
+        url=url,
+        destination=paths.blender_archive,
+        expected_sha256=expected_sha256,
+    )
+    paths.blender_home.parent.mkdir(parents=True, exist_ok=True)
+    _safe_extract_blender(archive, paths.blender_home)
+    if _blender_version(paths.blender_bin) != BLENDER_VERSION:
+        raise ModelSetupError(
+            f"installed Blender did not report the pinned version {BLENDER_VERSION}"
+        )
+    return paths.blender_bin
 
 
 def _check_gated_access() -> None:
@@ -456,8 +643,9 @@ def _download_remaining_models(paths: SetupPaths, max_workers: int) -> None:
     )
 
 
-def _verify_downloads(paths: SetupPaths) -> None:
+def _verify_downloads(paths: SetupPaths, *, blender_bin: Path) -> None:
     required = (
+        blender_bin,
         paths.qwen_python,
         paths.qwen_model / "config.json",
         paths.siglip2_model / "config.json",
@@ -512,7 +700,7 @@ def update_environment_file(path: Path, values: dict[str, str]) -> None:
     if missing:
         if output and output[-1]:
             output.append("")
-        output.append("# Downloaded material models")
+        output.append("# Automatic local runtime paths")
         output.extend(f"{name}={_format_env_value(values[name])}" for name in missing)
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -543,25 +731,28 @@ def run(args: argparse.Namespace) -> SetupPaths:
     paths = SetupPaths.from_root(args.model_root)
     if args.dry_run:
         print(f"Model root: {paths.model_root}")
+        print(f"Blender: {paths.blender_bin}")
         print(f"Source root: {paths.sam3_repository.parent}")
         print(f"Observation bank: {paths.observation_bank}")
         print(f"Environment file: {args.env_file.expanduser().resolve()}")
         return paths
 
     _enable_explicit_downloads()
-    print("[1/5] Checking access and disk space", flush=True)
+    print("[1/6] Checking access and disk space", flush=True)
     _check_gated_access()
     _check_free_space(paths.model_root, args.minimum_free_gb)
-    print("[2/5] Preparing SAM3 and EntitySeg", flush=True)
+    print(f"[2/6] Preparing Blender {BLENDER_VERSION}", flush=True)
+    blender_bin = _prepare_blender(paths)
+    print("[3/6] Preparing SAM3 and EntitySeg", flush=True)
     _prepare_sources(paths)
     _prepare_entityseg_runtime(paths)
-    print("[3/5] Preparing Qwen3.5 and SigLIP2", flush=True)
+    print("[4/6] Preparing Qwen3.5 and SigLIP2", flush=True)
     _run_qwen_setup(paths)
-    print("[4/5] Downloading MVInverse, DINOv2, SAM3 and EntitySeg", flush=True)
+    print("[5/6] Downloading MVInverse, DINOv2, SAM3 and EntitySeg", flush=True)
     _download_remaining_models(paths, args.max_workers)
-    _verify_downloads(paths)
-    print("[5/5] Updating .env", flush=True)
-    update_environment_file(args.env_file, paths.environment())
+    _verify_downloads(paths, blender_bin=blender_bin)
+    print("[6/6] Updating .env", flush=True)
+    update_environment_file(args.env_file, paths.environment(blender_bin=blender_bin))
     return paths
 
 
@@ -573,7 +764,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Model setup failed: {exc}", file=sys.stderr)
         return 1
     if not args.dry_run:
-        print(f"Models ready: {paths.model_root}")
+        print(f"Runtime and models ready: {paths.model_root}")
         print(f"Updated: {args.env_file.expanduser().resolve()}")
     return 0
 

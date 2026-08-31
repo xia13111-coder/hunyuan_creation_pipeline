@@ -22,7 +22,7 @@ NVIDIA `Materials/Base` 候选并验证最终 USD。对齐或图像信息不足�
 
 - Linux x86-64 和 NVIDIA CUDA GPU；
 - Conda 与 Python 3.10；
-- 单独安装 Blender 和 Isaac Sim；
+- 单独安装 Isaac Sim；
 - 本地 Qwen3.5、SAM3、MVInverse、SigLIP2、DINOv2 权重；
 - 本机 NVIDIA MDL 材质库；
 - 只有 Hunyuan 生成或精修阶段需要腾讯云凭据。
@@ -56,8 +56,9 @@ hf auth login
 qwen-material setup-models --model-root /data/hunyuan-models
 ```
 
-该命令下载 Qwen3.5、MVInverse、SAM3、EntitySeg、SigLIP2 和 DINOv2，并自动更新
-`.env`。重复运行会继续未完成的下载；正常推理仍然只读取本地权重。
+该命令从 [Blender 官方发布页](https://download.blender.org/release/Blender4.5/)
+安装并校验 Blender 4.5.0，下载其余模型，并自动更新 `.env`。重复运行会继续未完成的
+下载；正常推理仍然只读取本地文件。
 
 仍需手动填写：
 
