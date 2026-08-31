@@ -46,31 +46,40 @@ cp .env.example .env
 
 ## `.env` 配置
 
-`.env` 只保存本机路径。模型路径由下面的命令自动填写，其他空项由程序自动发现。
+程序会自动读取项目根目录的 `.env`，不需要执行 `source .env`。首次安装按下面三步配置。
 
-先在 Hugging Face 接受 [SAM3](https://huggingface.co/facebook/sam3) 和
-[EntitySeg](https://huggingface.co/datasets/qqlu1992/Adobe_EntitySeg) 的访问条件，然后运行：
+1. 如果还没有 `.env`，先创建：
+
+```bash
+cp .env.example .env
+```
+
+2. 在 Hugging Face 接受 [SAM3](https://huggingface.co/facebook/sam3) 和
+[EntitySeg](https://huggingface.co/datasets/qqlu1992/Adobe_EntitySeg) 的访问条件，然后下载依赖：
 
 ```bash
 hf auth login
 qwen-material setup-models --model-root /data/hunyuan-models
 ```
 
-该命令从 [Blender 官方发布页](https://download.blender.org/release/Blender4.5/)
-安装并校验 Blender 4.5.0，下载其余模型，并自动更新 `.env`。重复运行会继续未完成的
-下载；正常推理仍然只读取本地文件。
+`--model-root` 是模型和工具的保存目录，可改成其他至少有 30 GB 可用空间的目录。命令会
+安装 Blender，准备 Qwen3.5、MVInverse、SAM3、EntitySeg、SigLIP2 和 DINOv2，并把
+对应路径自动写入 `.env`。这些路径不要手填；下载中断后直接重复运行同一命令即可继续。
 
-仍需手动填写：
+3. 打开 `.env`，只填写下面两项：
 
-| 变量 | 内容 |
-| --- | --- |
-| `ISAAC_PYTHON` | Isaac Sim 的 `python.sh` |
-| `VISUAL_MATERIAL_ROOT` | 包含 `Base/` 的 NVIDIA Materials 目录 |
+```dotenv
+ISAAC_PYTHON=/opt/isaacsim/python.sh
+VISUAL_MATERIAL_ROOT=/data/NVIDIA/Materials
+```
 
-SAM3、CropFormer 源码、EntitySeg 环境和材质观察库也由该命令自动准备；实际需要手填的
-只剩 Isaac Sim 和 NVIDIA Materials 路径。
+- `ISAAC_PYTHON`：安装 [Isaac Sim](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/install_workstation.html)
+  后，填写安装目录内 `python.sh` 的绝对路径。
+- `VISUAL_MATERIAL_ROOT`：从 NVIDIA [Downloadable Asset Packs](https://docs.omniverse.nvidia.com/usd/latest/usd_content_samples/downloadable_packs.html)
+  下载并解压 **Base Materials Pack**，填写包含 `Base/` 子目录的 `Materials` 目录。
 
-完整变量见 [.env.example](./.env.example)，Docker 配置见
+腾讯云密钥只在 Hunyuan 生成或精修时填写；`SAM3D_*` 只在使用 SAM3D 重建且自动发现
+失败时填写。其他空项保持为空。完整模板见 [.env.example](./.env.example)，容器路径见
 [docker/README.zh.md](./docker/README.zh.md)。
 
 验证入口：

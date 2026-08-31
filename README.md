@@ -51,35 +51,47 @@ cp .env.example .env
 
 ## `.env` setup
 
-`.env` stores local paths only. The model command below fills model paths;
-other blank paths continue to use automatic discovery.
+The program loads `.env` from the repository root automatically; do not run
+`source .env`. Configure it in three steps.
 
-Accept access for [SAM3](https://huggingface.co/facebook/sam3) and
-[EntitySeg](https://huggingface.co/datasets/qqlu1992/Adobe_EntitySeg), then run:
+1. Create the file if it does not exist:
+
+```bash
+cp .env.example .env
+```
+
+2. Accept access for [SAM3](https://huggingface.co/facebook/sam3) and
+[EntitySeg](https://huggingface.co/datasets/qqlu1992/Adobe_EntitySeg), then download
+the dependencies:
 
 ```bash
 hf auth login
 qwen-material setup-models --model-root /data/hunyuan-models
 ```
 
-This installs and verifies Blender 4.5.0 from the
-[official release](https://download.blender.org/release/Blender4.5/), downloads
-the remaining models, then updates `.env`. Re-running resumes incomplete
-downloads. Normal inference stays local-only.
+`--model-root` is the model/tool storage directory. It may be changed to any
+directory with at least 30 GB free. The command installs Blender, prepares
+Qwen3.5, MVInverse, SAM3, EntitySeg, SigLIP2, and DINOv2, and writes their paths
+to `.env`. Do not fill those paths manually. Re-run the same command to resume
+an interrupted download.
 
-Fill these paths manually:
+3. Open `.env` and fill only these two values:
 
-| Variable | Value |
-| --- | --- |
-| `ISAAC_PYTHON` | Isaac Sim `python.sh` |
-| `VISUAL_MATERIAL_ROOT` | NVIDIA Materials directory containing `Base/` |
+```dotenv
+ISAAC_PYTHON=/opt/isaacsim/python.sh
+VISUAL_MATERIAL_ROOT=/data/NVIDIA/Materials
+```
 
-The same command also prepares the SAM3/CropFormer sources, EntitySeg runtime,
-and bundled observation bank. Only the Isaac Sim and NVIDIA Materials paths
-remain manual.
+- `ISAAC_PYTHON`: install [Isaac Sim](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/install_workstation.html),
+  then use the absolute path to `python.sh` in its installation directory.
+- `VISUAL_MATERIAL_ROOT`: download and extract NVIDIA's **Base Materials Pack**
+  from [Downloadable Asset Packs](https://docs.omniverse.nvidia.com/usd/latest/usd_content_samples/downloadable_packs.html),
+  then use the `Materials` directory that directly contains `Base/`.
 
-See [.env.example](./.env.example) for all variables and
-[docker/README.md](./docker/README.md) for container paths.
+Tencent Cloud credentials are needed only for Hunyuan generation/refinement.
+Set `SAM3D_*` only when using SAM3D reconstruction and automatic discovery
+fails. Leave the other optional values blank. See [.env.example](./.env.example)
+for the template and [docker/README.md](./docker/README.md) for container paths.
 
 Verify the entry points:
 
