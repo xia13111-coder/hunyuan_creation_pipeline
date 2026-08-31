@@ -1,0 +1,144 @@
+{
+  "schema_version": "nvidia-base-material-observation-index/v1",
+  "bank_schema_version": "nvidia-base-material-observation-bank/v1",
+  "scope": "nvidia_base",
+  "catalog_sha256": "87cbb5d088bf8b0f201c685eeea93fcacdb542b8e91d5cae76819b5cab51fdbd",
+  "render_manifest_sha256": "e85eec69c7a7cc3d49fba42a3c6fcfbdbca4651c2855e79493ac420b1c3c3cd1",
+  "appearance_profiles": "appearance_profiles.json",
+  "appearance_profiles_sha256": "a5e477934f6c7b1c57de9b5b17f637d27cc02be4fd59828227df1619cd0f2b94",
+  "visual_embeddings": "visual_embeddings.npz",
+  "visual_embeddings_sha256": "7ba32c56437b7bc23696e0dada18964e70cc8b96d3c3e6118f16f16c8386c99f",
+  "material_count": 160,
+  "complete": true,
+  "profiles": [
+    "neutral_iso",
+    "grazing_front",
+    "top_soft"
+  ],
+  "observation_source_counts": {
+    "standard_rtx_rig": 159,
+    "nvidia_official_preview_opacity_safe": 1
+  },
+  "siglip2": {
+    "model": {
+      "path": "${SIGLIP2_MODEL_PATH}",
+      "files": [
+        {
+          "path": "config.json",
+          "bytes": 253,
+          "sha256": "fe8b5fe6d5734360678fd71c11c21e1ea3364bd8598d34295d9206335973ffd7"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "bytes": 394,
+          "sha256": "9b36b57ebaf20f09bf4c22100ccc21877ea6bfe5aead0c00c59f8af8ccefacfc"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "bytes": 47164,
+          "sha256": "14afe629fe4959b9e0d51e1852b8d9f7ad074f90a1a7125a4fcdd17f06e78fc8"
+        },
+        {
+          "path": "tokenizer.json",
+          "bytes": 34363039,
+          "sha256": "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322"
+        },
+        {
+          "path": "tokenizer.model",
+          "bytes": 4241003,
+          "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2"
+        },
+        {
+          "path": "special_tokens_map.json",
+          "bytes": 636,
+          "sha256": "baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351"
+        },
+        {
+          "path": "model.safetensors",
+          "bytes": 1500800904,
+          "sha256": "612923381c76ec5a9bed335d1c48827e3f2e506ac31b044b63b2031fadee6a0b"
+        }
+      ],
+      "checkpoint_identity": {
+        "config_sha256": "fe8b5fe6d5734360678fd71c11c21e1ea3364bd8598d34295d9206335973ffd7",
+        "content_manifest_sha256": "300e35ccdc519b90ed4a4e502c1d5484dd95cb3b3fd7138638eebab86b281a43",
+        "repository": "google/siglip2-base-patch16-224",
+        "revision": "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
+        "runtime_files": [
+          {
+            "bytes": 253,
+            "path": "config.json",
+            "sha256": "fe8b5fe6d5734360678fd71c11c21e1ea3364bd8598d34295d9206335973ffd7"
+          },
+          {
+            "bytes": 1500800904,
+            "path": "model.safetensors",
+            "sha256": "612923381c76ec5a9bed335d1c48827e3f2e506ac31b044b63b2031fadee6a0b"
+          },
+          {
+            "bytes": 394,
+            "path": "preprocessor_config.json",
+            "sha256": "9b36b57ebaf20f09bf4c22100ccc21877ea6bfe5aead0c00c59f8af8ccefacfc"
+          },
+          {
+            "bytes": 636,
+            "path": "special_tokens_map.json",
+            "sha256": "baec30ea10906f16adb8c18af7a34023002c1746542612b8b41c9f09e1351351"
+          },
+          {
+            "bytes": 34363039,
+            "path": "tokenizer.json",
+            "sha256": "cb9140fae3ac5122c972d37adf83e1248471a38147ad76f8215c8872c6fd8322"
+          },
+          {
+            "bytes": 4241003,
+            "path": "tokenizer.model",
+            "sha256": "61a7b147390c64585d6c3543dd6fc636906c9af3865a5548f27f31aee1d4c8e2"
+          },
+          {
+            "bytes": 47164,
+            "path": "tokenizer_config.json",
+            "sha256": "14afe629fe4959b9e0d51e1852b8d9f7ad074f90a1a7125a4fcdd17f06e78fc8"
+          }
+        ],
+        "schema_version": "retrieval-local-checkpoint/v1",
+        "transport": {
+          "content_verification": "pinned_size_and_sha256_manifest",
+          "modelscope_repository": "google/siglip2-base-patch16-224",
+          "modelscope_revision": "153facb840ceec16916cc7ec0e3bf8757d95f7e3",
+          "source": "modelscope"
+        }
+      },
+      "fingerprint_sha256": "7286b20ddff9fd5641d322f51c5b9685ce6c32f1c9157b33633a7c9435802a15"
+    },
+    "dimension": 768,
+    "aggregation": "normalized_mean_of_three_masked_rig_views"
+  },
+  "dinov2": {
+    "model": {
+      "path": "${DINOV2_MODEL_PATH}",
+      "files": [
+        {
+          "path": "config.json",
+          "bytes": 1003,
+          "sha256": "03eee42f646659a9480f8911a81fdd81efeedd7ff39083c8e36398068daf72f5"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "bytes": 436,
+          "sha256": "14e780d86fa1861f8751f868d7f45425b5feb55c38ca26f152ca5097ab30f828"
+        },
+        {
+          "path": "model.safetensors",
+          "bytes": 1217539376,
+          "sha256": "edccedab2c4e164e80833096de89a32a6e8d7365870499a066a61dbc8894b42b"
+        }
+      ],
+      "fingerprint_sha256": "a6f8feefb20cf4652b504b23ba40d60248039f70e8f5b6ed5a493905cc45befa"
+    },
+    "dimension": 1024,
+    "aggregation": "normalized_mean_of_foreground_patch_tokens_and_views"
+  },
+  "forbidden_vmaterials_2_count": 0,
+  "manifest_sha256": "1ce83ece02e3a0768baa14ce86555e8092681808ddec7666aca2b5f49442b367"
+}

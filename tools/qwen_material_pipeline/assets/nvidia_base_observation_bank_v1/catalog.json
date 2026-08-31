@@ -1,0 +1,2504 @@
+{
+  "material_count": 160,
+  "material_root": ".",
+  "materials": [
+    {
+      "category_path": "Architecture",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "architecture",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Architecture/Ceiling_Tiles.mdl#Ceiling_Tiles",
+      "mdl_path": "Architecture/Ceiling_Tiles.mdl",
+      "sub_identifier": "Ceiling_Tiles",
+      "thumbnail_path": "Architecture/.thumbs/256x256/Ceiling_Tiles.mdl.png"
+    },
+    {
+      "category_path": "Architecture",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "architecture",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Architecture/Roof_Tiles.mdl#Roof_Tiles",
+      "mdl_path": "Architecture/Roof_Tiles.mdl",
+      "sub_identifier": "Roof_Tiles",
+      "thumbnail_path": "Architecture/.thumbs/256x256/Roof_Tiles.mdl.png"
+    },
+    {
+      "category_path": "Architecture",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "architecture",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Architecture/Shingles_01.mdl#Shingles_01",
+      "mdl_path": "Architecture/Shingles_01.mdl",
+      "sub_identifier": "Shingles_01",
+      "thumbnail_path": "Architecture/.thumbs/256x256/Shingles_01.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [
+        "beige"
+      ],
+      "description": "",
+      "display_name": "Carpet Beige",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Beige.mdl#Carpet_Beige",
+      "mdl_path": "Carpet/Carpet_Beige.mdl",
+      "sub_identifier": "Carpet_Beige",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Beige.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [
+        "gray"
+      ],
+      "description": "",
+      "display_name": "Carpet Berber Gray",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Berber_Gray.mdl#Carpet_Berber_Gray",
+      "mdl_path": "Carpet/Carpet_Berber_Gray.mdl",
+      "sub_identifier": "Carpet_Berber_Gray",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Berber_Gray.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [],
+      "description": "",
+      "display_name": "Carpet Berber Multi",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Berber_Multi.mdl#Carpet_Berber_Multi",
+      "mdl_path": "Carpet/Carpet_Berber_Multi.mdl",
+      "sub_identifier": "Carpet_Berber_Multi",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Berber_Multi.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [],
+      "description": "",
+      "display_name": "Carpet Charcoal",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Charcoal.mdl#Carpet_Charcoal",
+      "mdl_path": "Carpet/Carpet_Charcoal.mdl",
+      "sub_identifier": "Carpet_Charcoal",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Charcoal.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [],
+      "description": "",
+      "display_name": "Carpet Cream",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Cream.mdl#Carpet_Cream",
+      "mdl_path": "Carpet/Carpet_Cream.mdl",
+      "sub_identifier": "Carpet_Cream",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Cream.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [],
+      "description": "",
+      "display_name": "Carpet Diamond Olive",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Diamond_Olive.mdl#Carpet_Diamond_Olive",
+      "mdl_path": "Carpet/Carpet_Diamond_Olive.mdl",
+      "sub_identifier": "Carpet_Diamond_Olive",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Diamond_Olive.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [
+        "yellow"
+      ],
+      "description": "",
+      "display_name": "Carpet Diamond Yellow",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Diamond_Yellow.mdl#Carpet_Diamond_Yellow",
+      "mdl_path": "Carpet/Carpet_Diamond_Yellow.mdl",
+      "sub_identifier": "Carpet_Diamond_Yellow",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Diamond_Yellow.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [],
+      "description": "",
+      "display_name": "Carpet Forest",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Forest.mdl#Carpet_Forest",
+      "mdl_path": "Carpet/Carpet_Forest.mdl",
+      "sub_identifier": "Carpet_Forest",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Forest.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [
+        "gray"
+      ],
+      "description": "",
+      "display_name": "Carpet Gray",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Gray.mdl#Carpet_Gray",
+      "mdl_path": "Carpet/Carpet_Gray.mdl",
+      "sub_identifier": "Carpet_Gray",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Gray.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [
+        "tan"
+      ],
+      "description": "",
+      "display_name": "Carpet Pattern Leaf Squares Tan",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Pattern_Leaf_Squares_Tan.mdl#Carpet_Pattern_Leaf_Squares_Tan",
+      "mdl_path": "Carpet/Carpet_Pattern_Leaf_Squares_Tan.mdl",
+      "sub_identifier": "Carpet_Pattern_Leaf_Squares_Tan",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Pattern_Leaf_Squares_Tan.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [],
+      "description": "",
+      "display_name": "Carpet Pattern Loop",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Pattern_Loop.mdl#Carpet_Pattern_Loop",
+      "mdl_path": "Carpet/Carpet_Pattern_Loop.mdl",
+      "sub_identifier": "Carpet_Pattern_Loop",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Pattern_Loop.mdl.png"
+    },
+    {
+      "category_path": "Carpet",
+      "colors": [],
+      "description": "",
+      "display_name": "Carpet Pattern Squares Multi",
+      "family": "carpet",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Carpet/Carpet_Pattern_Squares_Multi.mdl#Carpet_Pattern_Squares_Multi",
+      "mdl_path": "Carpet/Carpet_Pattern_Squares_Multi.mdl",
+      "sub_identifier": "Carpet_Pattern_Squares_Multi",
+      "thumbnail_path": "Carpet/.thumbs/256x256/Carpet_Pattern_Squares_Multi.mdl.png"
+    },
+    {
+      "category_path": "Emissives",
+      "colors": [],
+      "description": "",
+      "display_name": "Light 12000 K",
+      "family": "emissives",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Emissives/Light_12000K.mdl#Light_12000K",
+      "mdl_path": "Emissives/Light_12000K.mdl",
+      "sub_identifier": "Light_12000K",
+      "thumbnail_path": "Emissives/.thumbs/256x256/Light_12000K.mdl.png"
+    },
+    {
+      "category_path": "Emissives",
+      "colors": [],
+      "description": "",
+      "display_name": "Light 1900 K",
+      "family": "emissives",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Emissives/Light_1900K.mdl#Light_1900K",
+      "mdl_path": "Emissives/Light_1900K.mdl",
+      "sub_identifier": "Light_1900K",
+      "thumbnail_path": "Emissives/.thumbs/256x256/Light_1900K.mdl.png"
+    },
+    {
+      "category_path": "Emissives",
+      "colors": [],
+      "description": "",
+      "display_name": "Light 2600 K",
+      "family": "emissives",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Emissives/Light_2600K.mdl#Light_2600K",
+      "mdl_path": "Emissives/Light_2600K.mdl",
+      "sub_identifier": "Light_2600K",
+      "thumbnail_path": "Emissives/.thumbs/256x256/Light_2600K.mdl.png"
+    },
+    {
+      "category_path": "Emissives",
+      "colors": [],
+      "description": "",
+      "display_name": "Light 2900 K",
+      "family": "emissives",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Emissives/Light_2900K.mdl#Light_2900K",
+      "mdl_path": "Emissives/Light_2900K.mdl",
+      "sub_identifier": "Light_2900K",
+      "thumbnail_path": "Emissives/.thumbs/256x256/Light_2900K.mdl.png"
+    },
+    {
+      "category_path": "Emissives",
+      "colors": [],
+      "description": "",
+      "display_name": "Light 5000 K",
+      "family": "emissives",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Emissives/Light_5000K.mdl#Light_5000K",
+      "mdl_path": "Emissives/Light_5000K.mdl",
+      "sub_identifier": "Light_5000K",
+      "thumbnail_path": "Emissives/.thumbs/256x256/Light_5000K.mdl.png"
+    },
+    {
+      "category_path": "Emissives",
+      "colors": [],
+      "description": "",
+      "display_name": "Light 5500 K",
+      "family": "emissives",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Emissives/Light_5500K.mdl#Light_5500K",
+      "mdl_path": "Emissives/Light_5500K.mdl",
+      "sub_identifier": "Light_5500K",
+      "thumbnail_path": "Emissives/.thumbs/256x256/Light_5500K.mdl.png"
+    },
+    {
+      "category_path": "Emissives",
+      "colors": [],
+      "description": "",
+      "display_name": "Light 6000 K",
+      "family": "emissives",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Emissives/Light_6000K.mdl#Light_6000K",
+      "mdl_path": "Emissives/Light_6000K.mdl",
+      "sub_identifier": "Light_6000K",
+      "thumbnail_path": "Emissives/.thumbs/256x256/Light_6000K.mdl.png"
+    },
+    {
+      "category_path": "Emissives",
+      "colors": [],
+      "description": "",
+      "display_name": "Light 7000 K",
+      "family": "emissives",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Emissives/Light_7000K.mdl#Light_7000K",
+      "mdl_path": "Emissives/Light_7000K.mdl",
+      "sub_identifier": "Light_7000K",
+      "thumbnail_path": "Emissives/.thumbs/256x256/Light_7000K.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [
+        "blue"
+      ],
+      "description": "",
+      "display_name": "Blue Glass",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Blue_Glass.mdl#Blue_Glass",
+      "mdl_path": "Glass/Blue_Glass.mdl",
+      "sub_identifier": "Blue_Glass",
+      "thumbnail_path": "Glass/.thumbs/256x256/Blue_Glass.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [
+        "clear"
+      ],
+      "description": "",
+      "display_name": "Clear Glass",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Clear_Glass.mdl#Clear_Glass",
+      "mdl_path": "Glass/Clear_Glass.mdl",
+      "sub_identifier": "Clear_Glass",
+      "thumbnail_path": "Glass/.thumbs/256x256/Clear_Glass.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [],
+      "description": "",
+      "display_name": "Dull Glass",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Dull_Glass.mdl#Dull_Glass",
+      "mdl_path": "Glass/Dull_Glass.mdl",
+      "sub_identifier": "Dull_Glass",
+      "thumbnail_path": "Glass/.thumbs/256x256/Dull_Glass.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [],
+      "description": "",
+      "display_name": "Frosted Glass",
+      "family": "glass",
+      "finishes": [
+        "frosted"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Glass/Frosted_Glass.mdl#Frosted_Glass",
+      "mdl_path": "Glass/Frosted_Glass.mdl",
+      "sub_identifier": "Frosted_Glass",
+      "thumbnail_path": "Glass/.thumbs/256x256/Frosted_Glass.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [],
+      "description": "",
+      "display_name": "Glazed Glass",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Glazed_Glass.mdl#Glazed_Glass",
+      "mdl_path": "Glass/Glazed_Glass.mdl",
+      "sub_identifier": "Glazed_Glass",
+      "thumbnail_path": "Glass/.thumbs/256x256/Glazed_Glass.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [
+        "green"
+      ],
+      "description": "",
+      "display_name": "Green Glass",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Green_Glass.mdl#Green_Glass",
+      "mdl_path": "Glass/Green_Glass.mdl",
+      "sub_identifier": "Green_Glass",
+      "thumbnail_path": "Glass/.thumbs/256x256/Green_Glass.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [],
+      "description": "",
+      "display_name": "Mirror",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Mirror.mdl#Mirror",
+      "mdl_path": "Glass/Mirror.mdl",
+      "sub_identifier": "Mirror",
+      "thumbnail_path": "Glass/.thumbs/256x256/Mirror.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [
+        "red"
+      ],
+      "description": "",
+      "display_name": "Red Glass",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Red_Glass.mdl#Red_Glass",
+      "mdl_path": "Glass/Red_Glass.mdl",
+      "sub_identifier": "Red_Glass",
+      "thumbnail_path": "Glass/.thumbs/256x256/Red_Glass.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [],
+      "description": "",
+      "display_name": "Tinted Glass",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Tinted_Glass.mdl#Tinted_Glass",
+      "mdl_path": "Glass/Tinted_Glass.mdl",
+      "sub_identifier": "Tinted_Glass",
+      "thumbnail_path": "Glass/.thumbs/256x256/Tinted_Glass.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [],
+      "description": "",
+      "display_name": "Tinted Glass R02",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Tinted_Glass_R02.mdl#Tinted_Glass_R02",
+      "mdl_path": "Glass/Tinted_Glass_R02.mdl",
+      "sub_identifier": "Tinted_Glass_R02",
+      "thumbnail_path": "Glass/.thumbs/256x256/Tinted_Glass_R02.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [],
+      "description": "",
+      "display_name": "Tinted Glass R25",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Tinted_Glass_R25.mdl#Tinted_Glass_R25",
+      "mdl_path": "Glass/Tinted_Glass_R25.mdl",
+      "sub_identifier": "Tinted_Glass_R25",
+      "thumbnail_path": "Glass/.thumbs/256x256/Tinted_Glass_R25.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [],
+      "description": "",
+      "display_name": "Tinted Glass R50",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Tinted_Glass_R50.mdl#Tinted_Glass_R50",
+      "mdl_path": "Glass/Tinted_Glass_R50.mdl",
+      "sub_identifier": "Tinted_Glass_R50",
+      "thumbnail_path": "Glass/.thumbs/256x256/Tinted_Glass_R50.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [],
+      "description": "",
+      "display_name": "Tinted Glass R75",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Tinted_Glass_R75.mdl#Tinted_Glass_R75",
+      "mdl_path": "Glass/Tinted_Glass_R75.mdl",
+      "sub_identifier": "Tinted_Glass_R75",
+      "thumbnail_path": "Glass/.thumbs/256x256/Tinted_Glass_R75.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [],
+      "description": "",
+      "display_name": "Tinted Glass R85",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Tinted_Glass_R85.mdl#Tinted_Glass_R85",
+      "mdl_path": "Glass/Tinted_Glass_R85.mdl",
+      "sub_identifier": "Tinted_Glass_R85",
+      "thumbnail_path": "Glass/.thumbs/256x256/Tinted_Glass_R85.mdl.png"
+    },
+    {
+      "category_path": "Glass",
+      "colors": [],
+      "description": "",
+      "display_name": "Tinted Glass R98",
+      "family": "glass",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Glass/Tinted_Glass_R98.mdl#Tinted_Glass_R98",
+      "mdl_path": "Glass/Tinted_Glass_R98.mdl",
+      "sub_identifier": "Tinted_Glass_R98",
+      "thumbnail_path": "Glass/.thumbs/256x256/Tinted_Glass_R98.mdl.png"
+    },
+    {
+      "category_path": "Masonry",
+      "colors": [],
+      "description": "",
+      "display_name": "Adobe Brick",
+      "family": "masonry",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Masonry/Adobe_Brick.mdl#Adobe_Brick",
+      "mdl_path": "Masonry/Adobe_Brick.mdl",
+      "sub_identifier": "Adobe_Brick",
+      "thumbnail_path": "Masonry/.thumbs/256x256/Adobe_Brick.mdl.png"
+    },
+    {
+      "category_path": "Masonry",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "masonry",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Masonry/Brick_Pavers.mdl#Brick_Pavers",
+      "mdl_path": "Masonry/Brick_Pavers.mdl",
+      "sub_identifier": "Brick_Pavers",
+      "thumbnail_path": "Masonry/.thumbs/256x256/Brick_Pavers.mdl.png"
+    },
+    {
+      "category_path": "Masonry",
+      "colors": [
+        "brown"
+      ],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "masonry",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Masonry/Brick_Wall_Brown.mdl#Brick_Wall_Brown",
+      "mdl_path": "Masonry/Brick_Wall_Brown.mdl",
+      "sub_identifier": "Brick_Wall_Brown",
+      "thumbnail_path": "Masonry/.thumbs/256x256/Brick_Wall_Brown.mdl.png"
+    },
+    {
+      "category_path": "Masonry",
+      "colors": [
+        "red"
+      ],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "masonry",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Masonry/Brick_Wall_Red.mdl#Brick_Wall_Red",
+      "mdl_path": "Masonry/Brick_Wall_Red.mdl",
+      "sub_identifier": "Brick_Wall_Red",
+      "thumbnail_path": "Masonry/.thumbs/256x256/Brick_Wall_Red.mdl.png"
+    },
+    {
+      "category_path": "Masonry",
+      "colors": [],
+      "description": "",
+      "display_name": "Concrete Block",
+      "family": "masonry",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Masonry/Concrete_Block.mdl#Concrete_Block",
+      "mdl_path": "Masonry/Concrete_Block.mdl",
+      "sub_identifier": "Concrete_Block",
+      "thumbnail_path": "Masonry/.thumbs/256x256/Concrete_Block.mdl.png"
+    },
+    {
+      "category_path": "Masonry",
+      "colors": [],
+      "description": "",
+      "display_name": "Concrete Formed",
+      "family": "masonry",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Masonry/Concrete_Formed.mdl#Concrete_Formed",
+      "mdl_path": "Masonry/Concrete_Formed.mdl",
+      "sub_identifier": "Concrete_Formed",
+      "thumbnail_path": "Masonry/.thumbs/256x256/Concrete_Formed.mdl.png"
+    },
+    {
+      "category_path": "Masonry",
+      "colors": [],
+      "description": "",
+      "display_name": "Concrete Polished",
+      "family": "masonry",
+      "finishes": [
+        "polished"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Masonry/Concrete_Polished.mdl#Concrete_Polished",
+      "mdl_path": "Masonry/Concrete_Polished.mdl",
+      "sub_identifier": "Concrete_Polished",
+      "thumbnail_path": "Masonry/.thumbs/256x256/Concrete_Polished.mdl.png"
+    },
+    {
+      "category_path": "Masonry",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "masonry",
+      "finishes": [
+        "rough"
+      ],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Masonry/Concrete_Rough.mdl#Concrete_Rough",
+      "mdl_path": "Masonry/Concrete_Rough.mdl",
+      "sub_identifier": "Concrete_Rough",
+      "thumbnail_path": "Masonry/.thumbs/256x256/Concrete_Rough.mdl.png"
+    },
+    {
+      "category_path": "Masonry",
+      "colors": [],
+      "description": "",
+      "display_name": "Concrete Smooth",
+      "family": "masonry",
+      "finishes": [
+        "smooth"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Masonry/Concrete_Smooth.mdl#Concrete_Smooth",
+      "mdl_path": "Masonry/Concrete_Smooth.mdl",
+      "sub_identifier": "Concrete_Smooth",
+      "thumbnail_path": "Masonry/.thumbs/256x256/Concrete_Smooth.mdl.png"
+    },
+    {
+      "category_path": "Masonry",
+      "colors": [],
+      "description": "",
+      "display_name": "Stucco",
+      "family": "masonry",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Masonry/Stucco.mdl#Stucco",
+      "mdl_path": "Masonry/Stucco.mdl",
+      "sub_identifier": "Stucco",
+      "thumbnail_path": "Masonry/.thumbs/256x256/Stucco.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "",
+      "display_name": "Aluminum Anodized",
+      "family": "metal",
+      "finishes": [
+        "anodized"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Metals/Aluminum_Anodized.mdl#Aluminum_Anodized",
+      "mdl_path": "Metals/Aluminum_Anodized.mdl",
+      "sub_identifier": "Aluminum_Anodized",
+      "thumbnail_path": "Metals/.thumbs/256x256/Aluminum_Anodized.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [
+        "black"
+      ],
+      "description": "",
+      "display_name": "Aluminum Anodized Black",
+      "family": "metal",
+      "finishes": [
+        "anodized"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Metals/Aluminum_Anodized_Black.mdl#Aluminum_Anodized_Black",
+      "mdl_path": "Metals/Aluminum_Anodized_Black.mdl",
+      "sub_identifier": "Aluminum_Anodized_Black",
+      "thumbnail_path": "Metals/.thumbs/256x256/Aluminum_Anodized_Black.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [
+        "blue"
+      ],
+      "description": "",
+      "display_name": "Aluminum Anodized Blue",
+      "family": "metal",
+      "finishes": [
+        "anodized"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Metals/Aluminum_Anodized_Blue.mdl#Aluminum_Anodized_Blue",
+      "mdl_path": "Metals/Aluminum_Anodized_Blue.mdl",
+      "sub_identifier": "Aluminum_Anodized_Blue",
+      "thumbnail_path": "Metals/.thumbs/256x256/Aluminum_Anodized_Blue.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "",
+      "display_name": "Aluminum Anodized Charcoal",
+      "family": "metal",
+      "finishes": [
+        "anodized"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Metals/Aluminum_Anodized_Charcoal.mdl#Aluminum_Anodized_Charcoal",
+      "mdl_path": "Metals/Aluminum_Anodized_Charcoal.mdl",
+      "sub_identifier": "Aluminum_Anodized_Charcoal",
+      "thumbnail_path": "Metals/.thumbs/256x256/Aluminum_Anodized_Charcoal.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [
+        "red"
+      ],
+      "description": "",
+      "display_name": "Aluminum Anodized Red",
+      "family": "metal",
+      "finishes": [
+        "anodized"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Metals/Aluminum_Anodized_Red.mdl#Aluminum_Anodized_Red",
+      "mdl_path": "Metals/Aluminum_Anodized_Red.mdl",
+      "sub_identifier": "Aluminum_Anodized_Red",
+      "thumbnail_path": "Metals/.thumbs/256x256/Aluminum_Anodized_Red.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [
+        "cast"
+      ],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Aluminum_Cast.mdl#Aluminum_Cast",
+      "mdl_path": "Metals/Aluminum_Cast.mdl",
+      "sub_identifier": "Aluminum_Cast",
+      "thumbnail_path": "Metals/.thumbs/256x256/Aluminum_Cast.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "",
+      "display_name": "Aluminum Polished",
+      "family": "metal",
+      "finishes": [
+        "polished"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Metals/Aluminum_Polished.mdl#Aluminum_Polished",
+      "mdl_path": "Metals/Aluminum_Polished.mdl",
+      "sub_identifier": "Aluminum_Polished",
+      "thumbnail_path": "Metals/.thumbs/256x256/Aluminum_Polished.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Brass.mdl#Brass",
+      "mdl_path": "Metals/Brass.mdl",
+      "sub_identifier": "Brass",
+      "thumbnail_path": "Metals/.thumbs/256x256/Brass.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Bronze.mdl#Bronze",
+      "mdl_path": "Metals/Bronze.mdl",
+      "sub_identifier": "Bronze",
+      "thumbnail_path": "Metals/.thumbs/256x256/Bronze.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [
+        "brushed"
+      ],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Brushed_Antique_Copper.mdl#Brushed_Antique_Copper",
+      "mdl_path": "Metals/Brushed_Antique_Copper.mdl",
+      "sub_identifier": "Brushed_Antique_Copper",
+      "thumbnail_path": "Metals/.thumbs/256x256/Brushed_Antique_Copper.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [
+        "silver"
+      ],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [
+        "cast"
+      ],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Cast_Metal_Silver_Vein.mdl#Cast_Metal_Silver_Vein",
+      "mdl_path": "Metals/Cast_Metal_Silver_Vein.mdl",
+      "sub_identifier": "Cast_Metal_Silver_Vein",
+      "thumbnail_path": "Metals/.thumbs/256x256/Cast_Metal_Silver_Vein.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Chrome.mdl#Chrome",
+      "mdl_path": "Metals/Chrome.mdl",
+      "sub_identifier": "Chrome",
+      "thumbnail_path": "Metals/.thumbs/256x256/Chrome.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Copper.mdl#Copper",
+      "mdl_path": "Metals/Copper.mdl",
+      "sub_identifier": "Copper",
+      "thumbnail_path": "Metals/.thumbs/256x256/Copper.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "",
+      "display_name": "Corrugated Metal",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Metals/CorrugatedMetal.mdl#CorrugatedMetal",
+      "mdl_path": "Metals/CorrugatedMetal.mdl",
+      "sub_identifier": "CorrugatedMetal",
+      "thumbnail_path": "Metals/.thumbs/256x256/CorrugatedMetal.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [
+        "gold"
+      ],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Gold.mdl#Gold",
+      "mdl_path": "Metals/Gold.mdl",
+      "sub_identifier": "Gold",
+      "thumbnail_path": "Metals/.thumbs/256x256/Gold.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Iron.mdl#Iron",
+      "mdl_path": "Metals/Iron.mdl",
+      "sub_identifier": "Iron",
+      "thumbnail_path": "Metals/.thumbs/256x256/Iron.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "",
+      "display_name": "Metal Door",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Metals/Metal_Door.mdl#Metal_Door",
+      "mdl_path": "Metals/Metal_Door.mdl",
+      "sub_identifier": "Metal_Door",
+      "thumbnail_path": "Metals/.thumbs/256x256/Metal_Door.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "",
+      "display_name": "Metal Seamed Roof",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Metals/Metal_Seamed_Roof.mdl#Metal_Seamed_Roof",
+      "mdl_path": "Metals/Metal_Seamed_Roof.mdl",
+      "sub_identifier": "Metal_Seamed_Roof",
+      "thumbnail_path": "Metals/.thumbs/256x256/Metal_Seamed_Roof.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/RustedMetal.mdl#RustedMetal",
+      "mdl_path": "Metals/RustedMetal.mdl",
+      "sub_identifier": "RustedMetal",
+      "thumbnail_path": "Metals/.thumbs/256x256/RustedMetal.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [
+        "silver"
+      ],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Silver.mdl#Silver",
+      "mdl_path": "Metals/Silver.mdl",
+      "sub_identifier": "Silver",
+      "thumbnail_path": "Metals/.thumbs/256x256/Silver.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Steel_Blued.mdl#Steel_Blued",
+      "mdl_path": "Metals/Steel_Blued.mdl",
+      "sub_identifier": "Steel_Blued",
+      "thumbnail_path": "Metals/.thumbs/256x256/Steel_Blued.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "",
+      "display_name": "Steel Carbon",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Metals/Steel_Carbon.mdl#Steel_Carbon",
+      "mdl_path": "Metals/Steel_Carbon.mdl",
+      "sub_identifier": "Steel_Carbon",
+      "thumbnail_path": "Metals/.thumbs/256x256/Steel_Carbon.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "",
+      "display_name": "Steel Cast",
+      "family": "metal",
+      "finishes": [
+        "cast"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Metals/Steel_Cast.mdl#Steel_Cast",
+      "mdl_path": "Metals/Steel_Cast.mdl",
+      "sub_identifier": "Steel_Cast",
+      "thumbnail_path": "Metals/.thumbs/256x256/Steel_Cast.mdl.png"
+    },
+    {
+      "category_path": "Metals",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "metal",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Metals/Steel_Stainless.mdl#Steel_Stainless",
+      "mdl_path": "Metals/Steel_Stainless.mdl",
+      "sub_identifier": "Steel_Stainless",
+      "thumbnail_path": "Metals/.thumbs/256x256/Steel_Stainless.mdl.png"
+    },
+    {
+      "category_path": "Miscellaneous",
+      "colors": [],
+      "description": "",
+      "display_name": "Chain Link Fence",
+      "family": "miscellaneous",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Miscellaneous/Chain_Link_Fence.mdl#Chain_Link_Fence",
+      "mdl_path": "Miscellaneous/Chain_Link_Fence.mdl",
+      "sub_identifier": "Chain_Link_Fence",
+      "thumbnail_path": "Miscellaneous/.thumbs/256x256/Chain_Link_Fence.mdl.png"
+    },
+    {
+      "category_path": "Miscellaneous",
+      "colors": [],
+      "description": "",
+      "display_name": "Paint Gloss",
+      "family": "paint",
+      "finishes": [
+        "glossy"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Miscellaneous/Paint_Gloss.mdl#Paint_Gloss",
+      "mdl_path": "Miscellaneous/Paint_Gloss.mdl",
+      "sub_identifier": "Paint_Gloss",
+      "thumbnail_path": "Miscellaneous/.thumbs/256x256/Paint_Gloss.mdl.png"
+    },
+    {
+      "category_path": "Miscellaneous",
+      "colors": [],
+      "description": "",
+      "display_name": "Paint Gloss Finish",
+      "family": "paint",
+      "finishes": [
+        "glossy"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Miscellaneous/Paint_Gloss_Finish.mdl#Paint_Gloss_Finish",
+      "mdl_path": "Miscellaneous/Paint_Gloss_Finish.mdl",
+      "sub_identifier": "Paint_Gloss_Finish",
+      "thumbnail_path": "Miscellaneous/.thumbs/256x256/Paint_Gloss_Finish.mdl.png"
+    },
+    {
+      "category_path": "Miscellaneous",
+      "colors": [],
+      "description": "",
+      "display_name": "Paint Matte",
+      "family": "paint",
+      "finishes": [
+        "matte"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Miscellaneous/Paint_Matte.mdl#Paint_Matte",
+      "mdl_path": "Miscellaneous/Paint_Matte.mdl",
+      "sub_identifier": "Paint_Matte",
+      "thumbnail_path": "Miscellaneous/.thumbs/256x256/Paint_Matte.mdl.png"
+    },
+    {
+      "category_path": "Miscellaneous",
+      "colors": [],
+      "description": "",
+      "display_name": "Paint Matte Finish",
+      "family": "paint",
+      "finishes": [
+        "matte"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Miscellaneous/Paint_Matte_Finish.mdl#Paint_Matte_Finish",
+      "mdl_path": "Miscellaneous/Paint_Matte_Finish.mdl",
+      "sub_identifier": "Paint_Matte_Finish",
+      "thumbnail_path": "Miscellaneous/.thumbs/256x256/Paint_Matte_Finish.mdl.png"
+    },
+    {
+      "category_path": "Miscellaneous",
+      "colors": [],
+      "description": "",
+      "display_name": "Paint Satin",
+      "family": "paint",
+      "finishes": [
+        "satin"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Miscellaneous/Paint_Satin.mdl#Paint_Satin",
+      "mdl_path": "Miscellaneous/Paint_Satin.mdl",
+      "sub_identifier": "Paint_Satin",
+      "thumbnail_path": "Miscellaneous/.thumbs/256x256/Paint_Satin.mdl.png"
+    },
+    {
+      "category_path": "Miscellaneous",
+      "colors": [],
+      "description": "",
+      "display_name": "Paint Satin Finish",
+      "family": "paint",
+      "finishes": [
+        "satin"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Miscellaneous/Paint_Satin_Finish.mdl#Paint_Satin_Finish",
+      "mdl_path": "Miscellaneous/Paint_Satin_Finish.mdl",
+      "sub_identifier": "Paint_Satin_Finish",
+      "thumbnail_path": "Miscellaneous/.thumbs/256x256/Paint_Satin_Finish.mdl.png"
+    },
+    {
+      "category_path": "Natural",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "natural",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Natural/Asphalt.mdl#Asphalt",
+      "mdl_path": "Natural/Asphalt.mdl",
+      "sub_identifier": "Asphalt",
+      "thumbnail_path": "Natural/.thumbs/256x256/Asphalt.mdl.png"
+    },
+    {
+      "category_path": "Natural",
+      "colors": [],
+      "description": "",
+      "display_name": "Dirt",
+      "family": "natural",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Natural/Dirt.mdl#Dirt",
+      "mdl_path": "Natural/Dirt.mdl",
+      "sub_identifier": "Dirt",
+      "thumbnail_path": "Natural/.thumbs/256x256/Dirt.mdl.png"
+    },
+    {
+      "category_path": "Natural",
+      "colors": [],
+      "description": "",
+      "display_name": "Grass Countryside",
+      "family": "natural",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Natural/Grass_Countryside.mdl#Grass_Countryside",
+      "mdl_path": "Natural/Grass_Countryside.mdl",
+      "sub_identifier": "Grass_Countryside",
+      "thumbnail_path": "Natural/.thumbs/256x256/Grass_Countryside.mdl.png"
+    },
+    {
+      "category_path": "Natural",
+      "colors": [],
+      "description": "",
+      "display_name": "Grass Cut",
+      "family": "natural",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Natural/Grass_Cut.mdl#Grass_Cut",
+      "mdl_path": "Natural/Grass_Cut.mdl",
+      "sub_identifier": "Grass_Cut",
+      "thumbnail_path": "Natural/.thumbs/256x256/Grass_Cut.mdl.png"
+    },
+    {
+      "category_path": "Natural",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "natural",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Natural/Grass_Winter.mdl#Grass_Winter",
+      "mdl_path": "Natural/Grass_Winter.mdl",
+      "sub_identifier": "Grass_Winter",
+      "thumbnail_path": "Natural/.thumbs/256x256/Grass_Winter.mdl.png"
+    },
+    {
+      "category_path": "Natural",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "natural",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Natural/Leaves.mdl#Leaves",
+      "mdl_path": "Natural/Leaves.mdl",
+      "sub_identifier": "Leaves",
+      "thumbnail_path": "Natural/.thumbs/256x256/Leaves.mdl.png"
+    },
+    {
+      "category_path": "Natural",
+      "colors": [
+        "brown"
+      ],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "natural",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Natural/Mulch_Brown.mdl#Mulch_Brown",
+      "mdl_path": "Natural/Mulch_Brown.mdl",
+      "sub_identifier": "Mulch_Brown",
+      "thumbnail_path": "Natural/.thumbs/256x256/Mulch_Brown.mdl.png"
+    },
+    {
+      "category_path": "Natural",
+      "colors": [],
+      "description": "",
+      "display_name": "Sand",
+      "family": "natural",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Natural/Sand.mdl#Sand",
+      "mdl_path": "Natural/Sand.mdl",
+      "sub_identifier": "Sand",
+      "thumbnail_path": "Natural/.thumbs/256x256/Sand.mdl.png"
+    },
+    {
+      "category_path": "Natural",
+      "colors": [],
+      "description": "",
+      "display_name": "Soil Rocky",
+      "family": "natural",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Natural/Soil_Rocky.mdl#Soil_Rocky",
+      "mdl_path": "Natural/Soil_Rocky.mdl",
+      "sub_identifier": "Soil_Rocky",
+      "thumbnail_path": "Natural/.thumbs/256x256/Soil_Rocky.mdl.png"
+    },
+    {
+      "category_path": "Natural",
+      "colors": [],
+      "description": "",
+      "display_name": "Water",
+      "family": "natural",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Natural/Water.mdl#Water",
+      "mdl_path": "Natural/Water.mdl",
+      "sub_identifier": "Water",
+      "thumbnail_path": "Natural/.thumbs/256x256/Water.mdl.png"
+    },
+    {
+      "category_path": "Natural",
+      "colors": [],
+      "description": "",
+      "display_name": "Water Opaque",
+      "family": "natural",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Natural/Water_Opaque.mdl#Water_Opaque",
+      "mdl_path": "Natural/Water_Opaque.mdl",
+      "sub_identifier": "Water_Opaque",
+      "thumbnail_path": "Natural/.thumbs/256x256/Water_Opaque.mdl.png"
+    },
+    {
+      "category_path": "Plastics",
+      "colors": [],
+      "description": "",
+      "display_name": "Plastic",
+      "family": "plastic",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Plastics/Plastic.mdl#Plastic",
+      "mdl_path": "Plastics/Plastic.mdl",
+      "sub_identifier": "Plastic",
+      "thumbnail_path": "Plastics/.thumbs/256x256/Plastic.mdl.png"
+    },
+    {
+      "category_path": "Plastics",
+      "colors": [],
+      "description": "",
+      "display_name": "Plastic ABS",
+      "family": "plastic",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Plastics/Plastic_ABS.mdl#Plastic_ABS",
+      "mdl_path": "Plastics/Plastic_ABS.mdl",
+      "sub_identifier": "Plastic_ABS",
+      "thumbnail_path": "Plastics/.thumbs/256x256/Plastic_ABS.mdl.png"
+    },
+    {
+      "category_path": "Plastics",
+      "colors": [],
+      "description": "",
+      "display_name": "Plastic Acrylic",
+      "family": "plastic",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Plastics/Plastic_Acrylic.mdl#Plastic_Acrylic",
+      "mdl_path": "Plastics/Plastic_Acrylic.mdl",
+      "sub_identifier": "Plastic_Acrylic",
+      "thumbnail_path": "Plastics/.thumbs/256x256/Plastic_Acrylic.mdl.png"
+    },
+    {
+      "category_path": "Plastics",
+      "colors": [
+        "clear"
+      ],
+      "description": "",
+      "display_name": "Plastic Clear",
+      "family": "plastic",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Plastics/Plastic_Clear.mdl#Plastic_Clear",
+      "mdl_path": "Plastics/Plastic_Clear.mdl",
+      "sub_identifier": "Plastic_Clear",
+      "thumbnail_path": "Plastics/.thumbs/256x256/Plastic_Clear.mdl.png"
+    },
+    {
+      "category_path": "Plastics",
+      "colors": [],
+      "description": "",
+      "display_name": "Rubber Smooth",
+      "family": "plastic",
+      "finishes": [
+        "smooth"
+      ],
+      "keywords": [],
+      "material_id": "mdl:Plastics/Rubber_Smooth.mdl#Rubber_Smooth",
+      "mdl_path": "Plastics/Rubber_Smooth.mdl",
+      "sub_identifier": "Rubber_Smooth",
+      "thumbnail_path": "Plastics/.thumbs/256x256/Rubber_Smooth.mdl.png"
+    },
+    {
+      "category_path": "Plastics",
+      "colors": [],
+      "description": "",
+      "display_name": "Rubber Textured",
+      "family": "plastic",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Plastics/Rubber_Textured.mdl#Rubber_Textured",
+      "mdl_path": "Plastics/Rubber_Textured.mdl",
+      "sub_identifier": "Rubber_Textured",
+      "thumbnail_path": "Plastics/.thumbs/256x256/Rubber_Textured.mdl.png"
+    },
+    {
+      "category_path": "Plastics",
+      "colors": [],
+      "description": "",
+      "display_name": "Veneer OU Walnut",
+      "family": "plastic",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Plastics/Veneer_OU_Walnut.mdl#Veneer_OU_Walnut",
+      "mdl_path": "Plastics/Veneer_OU_Walnut.mdl",
+      "sub_identifier": "Veneer_OU_Walnut",
+      "thumbnail_path": "Plastics/.thumbs/256x256/Veneer_OU_Walnut.mdl.png"
+    },
+    {
+      "category_path": "Plastics",
+      "colors": [],
+      "description": "",
+      "display_name": "Veneer UX Walnut Cherry",
+      "family": "plastic",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Plastics/Veneer_UX_Walnut_Cherry.mdl#Veneer_UX_Walnut_Cherry",
+      "mdl_path": "Plastics/Veneer_UX_Walnut_Cherry.mdl",
+      "sub_identifier": "Veneer_UX_Walnut_Cherry",
+      "thumbnail_path": "Plastics/.thumbs/256x256/Veneer_UX_Walnut_Cherry.mdl.png"
+    },
+    {
+      "category_path": "Plastics",
+      "colors": [],
+      "description": "",
+      "display_name": "Veneer Z5 Maple",
+      "family": "plastic",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Plastics/Veneer_Z5_Maple.mdl#Veneer_Z5_Maple",
+      "mdl_path": "Plastics/Veneer_Z5_Maple.mdl",
+      "sub_identifier": "Veneer_Z5_Maple",
+      "thumbnail_path": "Plastics/.thumbs/256x256/Veneer_Z5_Maple.mdl.png"
+    },
+    {
+      "category_path": "Plastics",
+      "colors": [],
+      "description": "",
+      "display_name": "Vinyl",
+      "family": "plastic",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Plastics/Vinyl.mdl#Vinyl",
+      "mdl_path": "Plastics/Vinyl.mdl",
+      "sub_identifier": "Vinyl",
+      "thumbnail_path": "Plastics/.thumbs/256x256/Vinyl.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Adobe_Octagon_Dots.mdl#Adobe_Octagon_Dots",
+      "mdl_path": "Stone/Adobe_Octagon_Dots.mdl",
+      "sub_identifier": "Adobe_Octagon_Dots",
+      "thumbnail_path": "Stone/.thumbs/256x256/Adobe_Octagon_Dots.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [
+        "smooth"
+      ],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Ceramic_Smooth_Fired.mdl#Ceramic_Smooth_Fired",
+      "mdl_path": "Stone/Ceramic_Smooth_Fired.mdl",
+      "sub_identifier": "Ceramic_Smooth_Fired",
+      "thumbnail_path": "Stone/.thumbs/256x256/Ceramic_Smooth_Fired.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Ceramic_Tile_12.mdl#Ceramic_Tile_12",
+      "mdl_path": "Stone/Ceramic_Tile_12.mdl",
+      "sub_identifier": "Ceramic_Tile_12",
+      "thumbnail_path": "Stone/.thumbs/256x256/Ceramic_Tile_12.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Ceramic_Tile_18.mdl#Ceramic_Tile_18",
+      "mdl_path": "Stone/Ceramic_Tile_18.mdl",
+      "sub_identifier": "Ceramic_Tile_18",
+      "thumbnail_path": "Stone/.thumbs/256x256/Ceramic_Tile_18.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Ceramic_Tile_6.mdl#Ceramic_Tile_6",
+      "mdl_path": "Stone/Ceramic_Tile_6.mdl",
+      "sub_identifier": "Ceramic_Tile_6",
+      "thumbnail_path": "Stone/.thumbs/256x256/Ceramic_Tile_6.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Fieldstone.mdl#Fieldstone",
+      "mdl_path": "Stone/Fieldstone.mdl",
+      "sub_identifier": "Fieldstone",
+      "thumbnail_path": "Stone/.thumbs/256x256/Fieldstone.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Granite_Dark.mdl#Granite_Dark",
+      "mdl_path": "Stone/Granite_Dark.mdl",
+      "sub_identifier": "Granite_Dark",
+      "thumbnail_path": "Stone/.thumbs/256x256/Granite_Dark.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Granite_Light.mdl#Granite_Light",
+      "mdl_path": "Stone/Granite_Light.mdl",
+      "sub_identifier": "Granite_Light",
+      "thumbnail_path": "Stone/.thumbs/256x256/Granite_Light.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Gravel.mdl#Gravel",
+      "mdl_path": "Stone/Gravel.mdl",
+      "sub_identifier": "Gravel",
+      "thumbnail_path": "Stone/.thumbs/256x256/Gravel.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "",
+      "display_name": "Gravel River Rock",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Stone/Gravel_River_Rock.mdl#Gravel_River_Rock",
+      "mdl_path": "Stone/Gravel_River_Rock.mdl",
+      "sub_identifier": "Gravel_River_Rock",
+      "thumbnail_path": "Stone/.thumbs/256x256/Gravel_River_Rock.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "",
+      "display_name": "Marble",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Stone/Marble.mdl#Marble",
+      "mdl_path": "Stone/Marble.mdl",
+      "sub_identifier": "Marble",
+      "thumbnail_path": "Stone/.thumbs/256x256/Marble.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [
+        "smooth"
+      ],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Marble_Smooth.mdl#Marble_Smooth",
+      "mdl_path": "Stone/Marble_Smooth.mdl",
+      "sub_identifier": "Marble_Smooth",
+      "thumbnail_path": "Stone/.thumbs/256x256/Marble_Smooth.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Marble_Tile_12.mdl#Marble_Tile_12",
+      "mdl_path": "Stone/Marble_Tile_12.mdl",
+      "sub_identifier": "Marble_Tile_12",
+      "thumbnail_path": "Stone/.thumbs/256x256/Marble_Tile_12.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Marble_Tile_18.mdl#Marble_Tile_18",
+      "mdl_path": "Stone/Marble_Tile_18.mdl",
+      "sub_identifier": "Marble_Tile_18",
+      "thumbnail_path": "Stone/.thumbs/256x256/Marble_Tile_18.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "",
+      "display_name": "Pea Gravel",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Stone/Pea_Gravel.mdl#Pea_Gravel",
+      "mdl_path": "Stone/Pea_Gravel.mdl",
+      "sub_identifier": "Pea_Gravel",
+      "thumbnail_path": "Stone/.thumbs/256x256/Pea_Gravel.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [
+        "smooth"
+      ],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Porcelain_Smooth.mdl#Porcelain_Smooth",
+      "mdl_path": "Stone/Porcelain_Smooth.mdl",
+      "sub_identifier": "Porcelain_Smooth",
+      "thumbnail_path": "Stone/.thumbs/256x256/Porcelain_Smooth.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Porcelain_Tile_4.mdl#Porcelain_Tile_4",
+      "mdl_path": "Stone/Porcelain_Tile_4.mdl",
+      "sub_identifier": "Porcelain_Tile_4",
+      "thumbnail_path": "Stone/.thumbs/256x256/Porcelain_Tile_4.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Porcelain_Tile_4_Linen.mdl#Porcelain_Tile_4_Linen",
+      "mdl_path": "Stone/Porcelain_Tile_4_Linen.mdl",
+      "sub_identifier": "Porcelain_Tile_4_Linen",
+      "thumbnail_path": "Stone/.thumbs/256x256/Porcelain_Tile_4_Linen.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Porcelain_Tile_6.mdl#Porcelain_Tile_6",
+      "mdl_path": "Stone/Porcelain_Tile_6.mdl",
+      "sub_identifier": "Porcelain_Tile_6",
+      "thumbnail_path": "Stone/.thumbs/256x256/Porcelain_Tile_6.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Porcelain_Tile_6_Linen.mdl#Porcelain_Tile_6_Linen",
+      "mdl_path": "Stone/Porcelain_Tile_6_Linen.mdl",
+      "sub_identifier": "Porcelain_Tile_6_Linen",
+      "thumbnail_path": "Stone/.thumbs/256x256/Porcelain_Tile_6_Linen.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Retaining_Block.mdl#Retaining_Block",
+      "mdl_path": "Stone/Retaining_Block.mdl",
+      "sub_identifier": "Retaining_Block",
+      "thumbnail_path": "Stone/.thumbs/256x256/Retaining_Block.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Slate.mdl#Slate",
+      "mdl_path": "Stone/Slate.mdl",
+      "sub_identifier": "Slate",
+      "thumbnail_path": "Stone/.thumbs/256x256/Slate.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Stone_Wall.mdl#Stone_Wall",
+      "mdl_path": "Stone/Stone_Wall.mdl",
+      "sub_identifier": "Stone_Wall",
+      "thumbnail_path": "Stone/.thumbs/256x256/Stone_Wall.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Terracotta.mdl#Terracotta",
+      "mdl_path": "Stone/Terracotta.mdl",
+      "sub_identifier": "Terracotta",
+      "thumbnail_path": "Stone/.thumbs/256x256/Terracotta.mdl.png"
+    },
+    {
+      "category_path": "Stone",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "stone",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Stone/Terrazzo.mdl#Terrazzo",
+      "mdl_path": "Stone/Terrazzo.mdl",
+      "sub_identifier": "Terrazzo",
+      "thumbnail_path": "Stone/.thumbs/256x256/Terrazzo.mdl.png"
+    },
+    {
+      "category_path": "Styles",
+      "colors": [
+        "white"
+      ],
+      "description": "",
+      "display_name": "White Mode",
+      "family": "styles",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Styles/WhiteMode.mdl#WhiteMode",
+      "mdl_path": "Styles/WhiteMode.mdl",
+      "sub_identifier": "WhiteMode",
+      "thumbnail_path": "Styles/.thumbs/256x256/WhiteMode.mdl.png"
+    },
+    {
+      "category_path": "Templates",
+      "colors": [],
+      "description": "",
+      "display_name": "Glass With Volume",
+      "family": "templates",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Templates/GlassWithVolume.mdl#GlassWithVolume",
+      "mdl_path": "Templates/GlassWithVolume.mdl",
+      "sub_identifier": "GlassWithVolume",
+      "thumbnail_path": null
+    },
+    {
+      "category_path": "Textiles",
+      "colors": [
+        "black"
+      ],
+      "description": "",
+      "display_name": "Cloth Black",
+      "family": "textiles",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Textiles/Cloth_Black.mdl#Cloth_Black",
+      "mdl_path": "Textiles/Cloth_Black.mdl",
+      "sub_identifier": "Cloth_Black",
+      "thumbnail_path": "Textiles/.thumbs/256x256/Cloth_Black.mdl.png"
+    },
+    {
+      "category_path": "Textiles",
+      "colors": [
+        "gray"
+      ],
+      "description": "",
+      "display_name": "Cloth Gray",
+      "family": "textiles",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Textiles/Cloth_Gray.mdl#Cloth_Gray",
+      "mdl_path": "Textiles/Cloth_Gray.mdl",
+      "sub_identifier": "Cloth_Gray",
+      "thumbnail_path": "Textiles/.thumbs/256x256/Cloth_Gray.mdl.png"
+    },
+    {
+      "category_path": "Textiles",
+      "colors": [
+        "black"
+      ],
+      "description": "",
+      "display_name": "Leather Black",
+      "family": "leather",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Textiles/Leather_Black.mdl#Leather_Black",
+      "mdl_path": "Textiles/Leather_Black.mdl",
+      "sub_identifier": "Leather_Black",
+      "thumbnail_path": "Textiles/.thumbs/256x256/Leather_Black.mdl.png"
+    },
+    {
+      "category_path": "Textiles",
+      "colors": [
+        "brown"
+      ],
+      "description": "",
+      "display_name": "Leather Brown",
+      "family": "leather",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Textiles/Leather_Brown.mdl#Leather_Brown",
+      "mdl_path": "Textiles/Leather_Brown.mdl",
+      "sub_identifier": "Leather_Brown",
+      "thumbnail_path": "Textiles/.thumbs/256x256/Leather_Brown.mdl.png"
+    },
+    {
+      "category_path": "Textiles",
+      "colors": [],
+      "description": "",
+      "display_name": "Leather Pumpkin",
+      "family": "leather",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Textiles/Leather_Pumpkin.mdl#Leather_Pumpkin",
+      "mdl_path": "Textiles/Leather_Pumpkin.mdl",
+      "sub_identifier": "Leather_Pumpkin",
+      "thumbnail_path": "Textiles/.thumbs/256x256/Leather_Pumpkin.mdl.png"
+    },
+    {
+      "category_path": "Textiles",
+      "colors": [
+        "beige"
+      ],
+      "description": "",
+      "display_name": "Linen Beige",
+      "family": "textiles",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Textiles/Linen_Beige.mdl#Linen_Beige",
+      "mdl_path": "Textiles/Linen_Beige.mdl",
+      "sub_identifier": "Linen_Beige",
+      "thumbnail_path": "Textiles/.thumbs/256x256/Linen_Beige.mdl.png"
+    },
+    {
+      "category_path": "Textiles",
+      "colors": [
+        "blue"
+      ],
+      "description": "",
+      "display_name": "Linen Blue",
+      "family": "textiles",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Textiles/Linen_Blue.mdl#Linen_Blue",
+      "mdl_path": "Textiles/Linen_Blue.mdl",
+      "sub_identifier": "Linen_Blue",
+      "thumbnail_path": "Textiles/.thumbs/256x256/Linen_Blue.mdl.png"
+    },
+    {
+      "category_path": "Textiles",
+      "colors": [
+        "white"
+      ],
+      "description": "",
+      "display_name": "Linen White",
+      "family": "textiles",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Textiles/Linen_White.mdl#Linen_White",
+      "mdl_path": "Textiles/Linen_White.mdl",
+      "sub_identifier": "Linen_White",
+      "thumbnail_path": "Textiles/.thumbs/256x256/Linen_White.mdl.png"
+    },
+    {
+      "category_path": "Wall_Board",
+      "colors": [],
+      "description": "",
+      "display_name": "Cardboard",
+      "family": "wall_board",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Wall_Board/Cardboard.mdl#Cardboard",
+      "mdl_path": "Wall_Board/Cardboard.mdl",
+      "sub_identifier": "Cardboard",
+      "thumbnail_path": "Wall_Board/.thumbs/256x256/Cardboard.mdl.png"
+    },
+    {
+      "category_path": "Wall_Board",
+      "colors": [],
+      "description": "",
+      "display_name": "Gypsum",
+      "family": "wall_board",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Wall_Board/Gypsum.mdl#Gypsum",
+      "mdl_path": "Wall_Board/Gypsum.mdl",
+      "sub_identifier": "Gypsum",
+      "thumbnail_path": "Wall_Board/.thumbs/256x256/Gypsum.mdl.png"
+    },
+    {
+      "category_path": "Wall_Board",
+      "colors": [],
+      "description": "",
+      "display_name": "MDF",
+      "family": "wall_board",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Wall_Board/MDF.mdl#MDF",
+      "mdl_path": "Wall_Board/MDF.mdl",
+      "sub_identifier": "MDF",
+      "thumbnail_path": "Wall_Board/.thumbs/256x256/MDF.mdl.png"
+    },
+    {
+      "category_path": "Wall_Board",
+      "colors": [],
+      "description": "",
+      "display_name": "Paper",
+      "family": "paper",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Wall_Board/Paper.mdl#Paper",
+      "mdl_path": "Wall_Board/Paper.mdl",
+      "sub_identifier": "Paper",
+      "thumbnail_path": "Wall_Board/.thumbs/256x256/Paper.mdl.png"
+    },
+    {
+      "category_path": "Wall_Board",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "plaster",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wall_Board/Plaster.mdl#Plaster",
+      "mdl_path": "Wall_Board/Plaster.mdl",
+      "sub_identifier": "Plaster",
+      "thumbnail_path": "Wall_Board/.thumbs/256x256/Plaster.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "",
+      "display_name": "Ash",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Wood/Ash.mdl#Ash",
+      "mdl_path": "Wood/Ash.mdl",
+      "sub_identifier": "Ash",
+      "thumbnail_path": "Wood/.thumbs/256x256/Ash.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "",
+      "display_name": "Ash Planks",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Wood/Ash_Planks.mdl#Ash_Planks",
+      "mdl_path": "Wood/Ash_Planks.mdl",
+      "sub_identifier": "Ash_Planks",
+      "thumbnail_path": "Wood/.thumbs/256x256/Ash_Planks.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Bamboo.mdl#Bamboo",
+      "mdl_path": "Wood/Bamboo.mdl",
+      "sub_identifier": "Bamboo",
+      "thumbnail_path": "Wood/.thumbs/256x256/Bamboo.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Bamboo_Planks.mdl#Bamboo_Planks",
+      "mdl_path": "Wood/Bamboo_Planks.mdl",
+      "sub_identifier": "Bamboo_Planks",
+      "thumbnail_path": "Wood/.thumbs/256x256/Bamboo_Planks.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Beadboard.mdl#Beadboard",
+      "mdl_path": "Wood/Beadboard.mdl",
+      "sub_identifier": "Beadboard",
+      "thumbnail_path": "Wood/.thumbs/256x256/Beadboard.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Birch.mdl#Birch",
+      "mdl_path": "Wood/Birch.mdl",
+      "sub_identifier": "Birch",
+      "thumbnail_path": "Wood/.thumbs/256x256/Birch.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Birch_Planks.mdl#Birch_Planks",
+      "mdl_path": "Wood/Birch_Planks.mdl",
+      "sub_identifier": "Birch_Planks",
+      "thumbnail_path": "Wood/.thumbs/256x256/Birch_Planks.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Cherry.mdl#Cherry",
+      "mdl_path": "Wood/Cherry.mdl",
+      "sub_identifier": "Cherry",
+      "thumbnail_path": "Wood/.thumbs/256x256/Cherry.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Cherry_Planks.mdl#Cherry_Planks",
+      "mdl_path": "Wood/Cherry_Planks.mdl",
+      "sub_identifier": "Cherry_Planks",
+      "thumbnail_path": "Wood/.thumbs/256x256/Cherry_Planks.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "",
+      "display_name": "Cork",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Wood/Cork.mdl#Cork",
+      "mdl_path": "Wood/Cork.mdl",
+      "sub_identifier": "Cork",
+      "thumbnail_path": "Wood/.thumbs/256x256/Cork.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Mahogany.mdl#Mahogany",
+      "mdl_path": "Wood/Mahogany.mdl",
+      "sub_identifier": "Mahogany",
+      "thumbnail_path": "Wood/.thumbs/256x256/Mahogany.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Mahogany_Planks.mdl#Mahogany_Planks",
+      "mdl_path": "Wood/Mahogany_Planks.mdl",
+      "sub_identifier": "Mahogany_Planks",
+      "thumbnail_path": "Wood/.thumbs/256x256/Mahogany_Planks.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Oak.mdl#Oak",
+      "mdl_path": "Wood/Oak.mdl",
+      "sub_identifier": "Oak",
+      "thumbnail_path": "Wood/.thumbs/256x256/Oak.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Oak_Planks.mdl#Oak_Planks",
+      "mdl_path": "Wood/Oak_Planks.mdl",
+      "sub_identifier": "Oak_Planks",
+      "thumbnail_path": "Wood/.thumbs/256x256/Oak_Planks.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "",
+      "display_name": "Parquet Floor",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [],
+      "material_id": "mdl:Wood/Parquet_Floor.mdl#Parquet_Floor",
+      "mdl_path": "Wood/Parquet_Floor.mdl",
+      "sub_identifier": "Parquet_Floor",
+      "thumbnail_path": "Wood/.thumbs/256x256/Parquet_Floor.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Plywood.mdl#Plywood",
+      "mdl_path": "Wood/Plywood.mdl",
+      "sub_identifier": "Plywood",
+      "thumbnail_path": "Wood/.thumbs/256x256/Plywood.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Timber.mdl#Timber",
+      "mdl_path": "Wood/Timber.mdl",
+      "sub_identifier": "Timber",
+      "thumbnail_path": "Wood/.thumbs/256x256/Timber.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Timber_Cladding.mdl#Timber_Cladding",
+      "mdl_path": "Wood/Timber_Cladding.mdl",
+      "sub_identifier": "Timber_Cladding",
+      "thumbnail_path": "Wood/.thumbs/256x256/Timber_Cladding.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Walnut.mdl#Walnut",
+      "mdl_path": "Wood/Walnut.mdl",
+      "sub_identifier": "Walnut",
+      "thumbnail_path": "Wood/.thumbs/256x256/Walnut.mdl.png"
+    },
+    {
+      "category_path": "Wood",
+      "colors": [],
+      "description": "Omni PBR, supports ORM textures",
+      "display_name": "Omni PBR",
+      "family": "wood",
+      "finishes": [],
+      "keywords": [
+        "omni",
+        "PBR",
+        "omniverse",
+        "generic"
+      ],
+      "material_id": "mdl:Wood/Walnut_Planks.mdl#Walnut_Planks",
+      "mdl_path": "Wood/Walnut_Planks.mdl",
+      "sub_identifier": "Walnut_Planks",
+      "thumbnail_path": "Wood/.thumbs/256x256/Walnut_Planks.mdl.png"
+    }
+  ],
+  "schema_version": 1
+}
