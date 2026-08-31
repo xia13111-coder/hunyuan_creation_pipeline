@@ -14,12 +14,10 @@ need.
 | SAM3D reconstruction | [SAM3D](./modules/sam3d.md) |
 | Mesh refinement | [Refine](./modules/refine.md) |
 | Blender post-processing | [Blender](./modules/blender.md) |
-| STEP/STP reference-image materials | [Quick start](./guides/manual-part-id-materials.md) / [Behavior and troubleshooting](./modules/visual-materials.md) |
+| STEP/STP reference-image materials | [Automatic materials](./guides/manual-part-id-materials.md) |
 | Isaac Sim physics | [Physics](./modules/physics.md) |
 | Hand-authored STEP/STP | [CAD](./modules/cad.md) |
 | HTTP API and Docker | [API](./modules/api.md) / [Docker](../docker/README.md) |
-| Release and migration | [Release and portability](./release/release-portability.md) |
-| Public source release | [Public release checklist](./release/public-release-checklist.md) |
 
 Other references:
 

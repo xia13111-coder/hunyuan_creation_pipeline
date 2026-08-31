@@ -136,73 +136,28 @@ manual_cad.run_manual_cad_workflow
 
 ## 视觉材质流程
 
-公共入口由 `asset_pipeline.visual_materials` 导出。`orchestrator.py` 负责安排阶段顺序，
-不实现模型算法。
+公共入口由 `asset_pipeline.visual_materials` 导出，主流程只负责阶段顺序和跨运行时调用：
 
 ```text
-visual_materials.run_assign_visual_materials_job
--> VisualMaterialPipelineContext.create
--> VisualMaterialWorkspace.create
--> stages.source_preparation.prepare_source_evidence
-   -> USD 注册表与实例展开
-   -> 标准 RGB 和 Part-ID 渲染
-   -> 连续三维相机对齐
--> stages.material_inference.run_material_inference
-   -> 本次运行使用的 NVIDIA Materials/Base 目录
-   -> SAM3 前景信息
-   -> Qwen + MVInverse 分析
-   -> SigLIP2 检索 + DINOv2 重排
--> stages.part_id_evidence.run_part_id_evidence_stage
-   -> 从 CAD 模型单独渲染每个 Part-ID 的完整形状模板
-   -> 第一遍 SAM3 与 EntitySeg 候选
-   -> 排除目标自身的装配邻件关系定位
-   -> 第二遍分割与迭代融合
--> 逐 Part-ID 选择候选并补全所有 Mesh
--> 不看颜色，先确定所选 MDL
--> 只为未匹配到精确预设的材质调整程序明确支持的颜色参数
--> 生成赋材质预览 USD，与参考图比较
--> 图像信息充分时执行一次受限候选调整
--> 确定最终 MDL 并记录选择结果
--> 生成不改动原始几何的最终材质 USD
+run_assign_visual_materials_job
+-> 输入、工作目录和相机信息
+-> Qwen/MVInverse/检索
+-> CAD 引导的 SAM3/EntitySeg Part-ID 信息
+-> 材质计划与完整覆盖
+-> 材质身份、必要的颜色校准和渲染比较
+-> USD 绑定、锁定和最终交付检查
 ```
 
-收集 USD 后：
+主要所有权：
 
-```text
-visual_materials.run_final_visual_acceptance_job
--> 渲染收集后的 USD
--> 与已对齐的参考视角比较
--> 检查材质和外部 MDL 依赖
-```
+- `context.py`、`workspace.py`：输入和产物路径；
+- `stages/`：相机、推理、Part-ID 信息和最终检查；
+- `policy_exact_cover.py`、`tournaments.py`、`quality_contracts/`：材质计划和质量判断；
+- `tools/qwen_material_pipeline/`：模型适配、分割、检索、材质和 USD 工具。
 
-### `asset_pipeline/visual_materials` 内部职责
-
-- `context.py` 保存已验证的输入和配置。
-- `workspace.py` 定义输出路径。
-- `commands.py` 构造子进程参数。
-- `stages/runner.py` 处理进度、子进程异常和有限重试。
-- `stages/source_preparation.py` 准备注册表、渲染图和相机数据。
-- `stages/material_inference.py` 启动材质分析子进程。
-- `stages/part_id_evidence.py` 统一负责模型图 Part-ID 定位、两遍分割、邻件关系引导、
-  融合和全视角判断数据覆盖检查。
-- `policy_exact_cover.py` 保证每个 Mesh 都有可应用的结果。
-- `exact_mdl_cache.py` 校验候选渲染缓存。
-- `tournaments.py` 按渲染效果比较入围的 MDL。
-- `quality_contracts/` 保存质量指标、问题诊断、有限修正和最终检查。
-- `stages/final_acceptance.py` 检查收集后的交付文件。
-
-### 各模型的作用
-
-- SAM3 提供已确认的整机前景，也可以重放用户点选得到的标注。
-- Qwen 描述可见零件，并在限定候选中做选择。
-- MVInverse 提供基础色、金属程度、粗糙度等 PBR 外观估计，但不单独决定最终 MDL。
-- SigLIP2 从本机完整 NVIDIA `Materials/Base` 目录中检索相似材质。
-- DINOv2 根据局部表面外观重新排序候选。
-- CAD Part-ID 渲染把照片中的信息对应到每个 Mesh。任何合格视角都看不到的零件使用
-  配置中的默认方案，确保所有 Mesh 都有材质。
-
-最终结果由 MDL 候选的实际渲染效果决定。选择结果生成后，后续阶段只校验并应用它，
-不会静默替换。具体阈值和调整规则见[视觉材质](../modules/visual-materials.zh.md)。
+模型只生成判断信息或候选，最终绑定由经过校验的代码执行。看不到的零件使用安全默认结果；
+选定的 MDL 不会被后续阶段静默替换。使用方法见
+[自动赋材质](../guides/manual-part-id-materials.zh.md)。
 
 ## 运行时与断点继续
 

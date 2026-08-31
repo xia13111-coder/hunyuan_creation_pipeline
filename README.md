@@ -185,30 +185,10 @@ hunyuan-asset-pipeline \
 
 ### STEP/STP with reference-image materials
 
-First use `qwen-material sam3-foreground-ui` to manually point-segment and
-confirm the foreground in 2–4 photographs:
-
-```bash
-qwen-material sam3-foreground-ui \
-  --reference front=./references/front.jpg \
-  --reference side=./references/side.jpg \
-  --reference top=./references/top.jpg \
-  --reference iso=./references/iso.jpg \
-  --output ./annotations/sam3_foreground_annotations.json
-```
-
-After confirming and saving every view, run the automatic material workflow:
-
-```bash
-manual-material-pipeline \
-  --stp ./input/asset.stp \
-  --sam3-annotations ./annotations/sam3_foreground_annotations.json \
-  --output ./outputs/manual/asset_run
-```
-
-STEP/STP dimensions are preserved. See the
-[automatic-material quick start](./docs/guides/manual-part-id-materials.md) for
-annotation, resume, and output details.
+Use 2–4 photographs of the same workpiece to automate part matching, material
+selection, colour adjustment, and USD binding. The only manual step is
+confirming the whole-workpiece foreground; see
+[automatic materials](./docs/guides/manual-part-id-materials.md).
 
 See [Hunyuan](./docs/modules/hunyuan.md), [SAM3D](./docs/modules/sam3d.md),
 [CAD](./docs/modules/cad.md), the

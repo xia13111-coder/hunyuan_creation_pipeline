@@ -171,29 +171,8 @@ hunyuan-asset-pipeline \
 
 ### STEP/STP：根据参考图自动赋材质
 
-先用 `qwen-material sam3-foreground-ui` 对 2–4 张照片进行 SAM3 人工点选分割并确认
-整机前景：
-
-```bash
-qwen-material sam3-foreground-ui \
-  --reference front=./references/front.jpg \
-  --reference side=./references/side.jpg \
-  --reference top=./references/top.jpg \
-  --reference iso=./references/iso.jpg \
-  --output ./annotations/sam3_foreground_annotations.json
-```
-
-所有视角确认并保存后，运行自动赋材质流程：
-
-```bash
-manual-material-pipeline \
-  --stp ./input/asset.stp \
-  --sam3-annotations ./annotations/sam3_foreground_annotations.json \
-  --output ./outputs/manual/asset_run
-```
-
-STEP/STP 保留原始尺寸。详细标注、恢复和结果说明见
-[自动赋材质快速开始](./docs/guides/manual-part-id-materials.zh.md)。
+用 2–4 张同一工件照片自动完成零件对应、选材质、校色和 USD 绑定。唯一人工步骤是确认
+每张照片的整机前景，命令见[自动赋材质](./docs/guides/manual-part-id-materials.zh.md)。
 
 详细说明见 [Hunyuan](./docs/modules/hunyuan.zh.md)、[SAM3D](./docs/modules/sam3d.zh.md)、
 [CAD](./docs/modules/cad.zh.md)、

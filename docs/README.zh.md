@@ -13,12 +13,10 @@
 | SAM3D 图片重建 | [SAM3D](./modules/sam3d.zh.md) |
 | 网格精修 | [精修](./modules/refine.zh.md) |
 | Blender 后处理 | [Blender](./modules/blender.zh.md) |
-| STEP/STP 参考图自动赋材质 | [快速开始](./guides/manual-part-id-materials.zh.md) / [行为与排错](./modules/visual-materials.zh.md) |
+| STEP/STP 参考图自动赋材质 | [自动赋材质](./guides/manual-part-id-materials.zh.md) |
 | Isaac Sim 物理 | [物理处理](./modules/physics.zh.md) |
 | 手工建模 STEP/STP | [CAD](./modules/cad.zh.md) |
 | HTTP API 和 Docker | [API](./modules/api.zh.md) / [Docker](../docker/README.zh.md) |
-| 发布与迁移 | [发布与可移植性](./release/release-portability.zh.md) |
-| 公开源码发布 | [公开发布检查表](./release/public-release-checklist.zh.md) |
 
 其他参考：
 

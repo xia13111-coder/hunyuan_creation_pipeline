@@ -1,123 +1,20 @@
-# Automatic material toolkit
+# Automatic Material Toolkit
 
-[English](./README.md) | [中文](./README.zh.md) | [Project README](../../README.md)
+[English](./README.md) | [中文](./README.zh.md)
 
-Reference-driven NVIDIA MDL retrieval and USD material tools for hand-authored
-STEP/STP assets. Most users should run the root `manual-material-pipeline`
-command; this package supplies its material stages.
+This directory contains the STEP/STP automatic-material implementation:
+segmentation, retrieval, material selection, USD binding, and validation.
+Users should run `manual-material-pipeline` as described in
+[Automatic materials](../../docs/guides/manual-part-id-materials.md); the
+internal commands do not need to be called separately.
 
-## Scope
-
-The default configuration is
-`src/qwen_material_pipeline/configs/pipeline/manual_part_id_materials.json`.
-It predicts material identity before colour, selects an NVIDIA
-`Materials/Base` entry per CAD Part-ID, preserves exact presets, and runs
-identity-preserving actual-CAD colour calibration only for corresponding
-materials whose MDLs expose reviewed colour interfaces. Corresponding library
-materials without a reviewed interface keep their selected native preset
-unchanged instead of receiving guessed parameters.
-
-This package handles reference-image evidence, camera registration, Part-ID
-mapping, material retrieval, USD binding, and validation. CAD conversion and the
-top-level workflow remain in `asset_pipeline`.
-
-## Setup
+For development:
 
 ```bash
-conda activate hunyuan_sam3d
-python -m pip install -e . -e ./tools/qwen_material_pipeline
 qwen-material --help
-```
-
-Set local model and application paths in the repository-root `.env`; copy the
-root `.env.example` as a starting point. Local models, caches, and private
-sealed projects belong under `runtime/` and are not committed.
-
-Optional verified Qwen3.5/SigLIP2 setup:
-
-```bash
-bash tools/qwen_material_pipeline/scripts/qwen35/setup_qwen35_runtime.sh
-```
-
-SAM3, EntitySeg/CropFormer, MVInverse, DINOv2, NVIDIA materials, and the Base observation bank remain
-separate local dependencies and must pass preflight.
-
-Reference photographs, their manifest, and the STEP/STP file are supplied to
-the root CLI as explicit paths. Do not copy them into this package. Every run
-writes to the repository `outputs/<run-id>/` selected by `--output`.
-
-## Pipeline
-
-```text
-normalized CAD + confirmed photos
-  -> registered RGB/Part-ID evidence
-  -> isolated model-image templates
-  -> SAM3/EntitySeg first pass + neighbour-guided second pass + iterative fusion
-  -> MVInverse/SigLIP2/DINOv2/Qwen3.5
-  -> Base MDL candidate renders
-  -> one assignment for every Part-ID
-  -> record the selected MDL, bind it in USD, and validate the result
-```
-
-Each visible Part-ID is evaluated independently. Invisible parts receive a
-configured default material. Models rank candidates; validated code performs
-the USD binding. Exact matches keep library defaults. Corresponding materials
-keep the selected MDL identity while the main pipeline renders and selects only
-reviewed colour parameters per part/component scope.
-
-## Commands
-
-| Command | Purpose |
-| --- | --- |
-| `sam3-foreground-ui` | confirm whole-workpiece foreground |
-| `staged` | run the material inference stages |
-| `catalog` | build/inspect the NVIDIA MDL catalog |
-| `base-bank` | build/verify Base observations |
-| `part-id-qwen` | rank candidates per Part-ID |
-| `exact-mdl-tournament` | render-compare MDL candidates |
-| `compare` | compare references and renders |
-| `final-visual-gate` | validate collected USD |
-| `usd` | USD part indexing, rendering, binding, validation |
-
-`qwen-material --help` is the command reference. Most users only need
-`manual-material-pipeline` and `sam3-foreground-ui`.
-
-## Resume and outputs
-
-`--resume` reuses an artifact only when its inputs, configuration, schema, model,
-and hashes still match.
-
-Important run artifacts:
-
-```text
-visual_material/renders/
-visual_material/analysis/{reference_manifest,qwen_inference_ledger,
-  part_id_reference_evidence,part_id_qwen_choices,material_selection_lock}.json
-visual_material/analysis/{part_id_cad_amodal_templates,
-  part_id_relation_guidance,part_id_hybrid_masks}/
-visual_material/analysis/mvinverse/
-visual_material/visual_quality/
-visual_material/final_visual_acceptance/
-```
-
-Do not include `runtime/` or `outputs/` in a source release.
-
-## Documentation and tests
-
-- [User command](../../docs/guides/manual-part-id-materials.md)
-- [Behavior and troubleshooting](../../docs/modules/visual-materials.md)
-- [Architecture (Chinese)](./docs/architecture.zh.md)
-- [MVInverse (Chinese)](./docs/mvinverse.zh.md)
-
-```bash
 python -m pytest -q -p no:cacheprovider tools/qwen_material_pipeline/tests
 ```
 
-## License
-
-First-party code uses [Apache License 2.0](./LICENSE). MVInverse remains
-non-commercial; its [license](./third_party/mvinverse/LICENSE) and the bundled
-[DINOv2 license](./third_party/mvinverse/DINOV2_LICENSE) remain beside the
-vendored source and are included in package builds. Models and NVIDIA assets
-retain separate terms. See the repository-wide
-[third-party notices](../../legal/THIRD_PARTY_NOTICES.md).
+See [Architecture](../../docs/development/architecture.md) for the code layout. MVInverse is
+non-commercial only; other licenses are listed in
+[Third-party notices](../../legal/THIRD_PARTY_NOTICES.md).

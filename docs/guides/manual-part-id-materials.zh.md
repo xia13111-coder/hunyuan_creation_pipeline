@@ -1,33 +1,22 @@
-# 手工建模 STEP/STP（CAD）逐 Part-ID 自动赋材质
+# STEP/STP 自动赋材质
 
 [English](./manual-part-id-materials.md) | [中文](./manual-part-id-materials.zh.md)
 
-使用同一工件的 2–4 张照片，按 CAD 零件编号（Part-ID）为 STEP/STP 装配体选择 NVIDIA
-材质定义语言（MDL）材质。CAD 始终决定几何和真实尺寸。
+流程使用同一工件的 2–4 张照片，为每个 CAD Part-ID 选择 NVIDIA Base MDL。照片只提供
+外观信息，不修改 CAD 几何、尺寸或装配关系。
 
 ## 运行
 
-首次安装命令：
-
-```bash
-conda activate hunyuan_sam3d
-python -m pip install -e . -e ./tools/qwen_material_pipeline
-```
-
-命令会自动读取项目根目录的 `.env`；非空的 shell 环境变量优先。
-
-1. 在每个视角中确认整机前景：
+先在页面中点选并确认每张照片里的整机前景：
 
 ```bash
 qwen-material sam3-foreground-ui \
   --reference front=./references/front.jpg \
   --reference side=./references/side.jpg \
-  --reference top=./references/top.jpg \
-  --reference iso=./references/iso.jpg \
   --output ./annotations/sam3_foreground_annotations.json
 ```
 
-2. 启动全新的自动任务：
+保存后运行：
 
 ```bash
 manual-material-pipeline \
@@ -36,53 +25,17 @@ manual-material-pipeline \
   --output ./outputs/manual/asset_run
 ```
 
-标注文件保存图片哈希和视角 ID。修改图片后需要重新标注。要从零运行，请使用新的输出
-目录；只有继续同一份输入时才加 `--resume`。视觉材质阶段只会复用输入、输出哈希均通过
-校验的检查点。
+程序会自动完成相机对齐、零件分割、材质选择、必要的颜色调整、USD 绑定和最终验证。
+人工只需确认整机前景，不需要逐个零件标注。
 
-可选物理参数包括 `--material`、`--approx`、`--sdf-resolution`、`--set-mass` 和
-`--cad-option KEY=VALUE`。STEP/STP 不使用目标长宽高参数。
-
-## 命令执行内容
+## 结果
 
 ```text
-STEP/STP -> USD 和物理准备 -> 相机对齐
-         -> 从 CAD 模型单独渲染每个可见零件的完整形状模板
-         -> SAM3 + EntitySeg 第一遍分割
-         -> 邻件关系引导的第二遍分割与迭代融合
-         -> 不看颜色，先确定所选 MDL
-         -> 只对未匹配到精确预设的材质调整程序明确支持的颜色参数
-         -> 为全部 Mesh 应用材质 -> 最终验证
-```
-
-SAM3 前景确认是唯一必需的人工步骤。当前主线是通用方法，不包含工件名称、Part-ID 名单、
-按视角定制的提示词或人工材质映射；所有已注册视角都必须提供真实的判断信息。局部图片贴合只调整
-二维候选，不修改 CAD、单个 Mesh 变换或最终交付相机。
-
-隐藏或无法判断的零件使用预设默认材质。精确库预设保持不变；只能确定材质类别、无法匹配
-精确预设时，流程会先固定所选 MDL，再调整程序明确支持并测试过的颜色参数。局部颜色质量
-未达标时保留实测最优结果并记录
-`REVIEW`，不会让整条流程中断；哈希损坏、Part-ID 覆盖不完整、所选 MDL 变化或交付数据无效
-仍会严格失败。
-
-## 输出
-
-```text
-RUN_ROOT/{cad_usd,intermediate,visual_material,final}/
 RUN_ROOT/pipeline_result.json
+RUN_ROOT/visual_material/
+RUN_ROOT/final/
 ```
 
-判断数据和选择检查记录位于 `RUN_ROOT/visual_material/analysis/`：
-
-```text
-part_id_cad_amodal_templates/manifest.json
-part_id_relation_guidance/request.json
-part_id_hybrid_masks/manifest.json
-part_id_reference_evidence.json
-part_id_material_plan.json
-```
-
-详细说明见[参考图赋材质流程](../modules/visual-materials.zh.md)、
-[环境变量模板](../../.env.example)和
-[第三方声明](../../legal/THIRD_PARTY_NOTICES.md)。MVInverse 仅限
-非商业用途。
+中断后对同一输出目录添加 `--resume`。失败时先查看第一条 `FAILED`；显存或磁盘不足时，
+释放资源后再继续。MVInverse 仅限非商业用途，其他许可见
+[第三方声明](../../legal/THIRD_PARTY_NOTICES.md)。

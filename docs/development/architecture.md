@@ -141,81 +141,32 @@ option. See [CAD](../modules/cad.md) and the
 
 ## Visual-material workflow
 
-Public entry points are exported from `asset_pipeline.visual_materials`.
-`orchestrator.py` runs the stages; it does not implement the model algorithms.
+Public entry points come from `asset_pipeline.visual_materials`. The owner
+coordinates stages and runtime boundaries:
 
 ```text
-visual_materials.run_assign_visual_materials_job
--> VisualMaterialPipelineContext.create
--> VisualMaterialWorkspace.create
--> stages.source_preparation.prepare_source_evidence
-   -> USD part index and instance expansion
-   -> canonical RGB and Part-ID renders
-   -> continuous 3D camera registration
--> stages.material_inference.run_material_inference
-   -> local NVIDIA Materials/Base catalog
-   -> SAM3 foreground evidence
-   -> Qwen + MVInverse analysis
-   -> SigLIP2 retrieval + DINOv2 reranking
--> stages.part_id_evidence.run_part_id_evidence_stage
-   -> isolated CAD model-image Part-ID templates
-   -> first-pass SAM3 and EntitySeg candidates
-   -> leave-target-out assembly-neighbour localization
-   -> second-pass segmentation and iterative hybrid fusion
--> per-Part-ID candidate selection and complete assignment plan
--> colour-blind material identity lock
--> reviewed colour calibration for corresponding-material assignments
--> preview USD after material assignment and render comparison
--> bounded candidate refinement when evidence permits
--> final MDL selection and selection record
--> final USD material layer
+run_assign_visual_materials_job
+-> inputs, workspace, and camera evidence
+-> Qwen/MVInverse/retrieval
+-> CAD-guided SAM3/EntitySeg Part-ID evidence
+-> complete material plan
+-> material identity, eligible colour, and render comparison
+-> USD binding, lock, and final delivery check
 ```
 
-After collection:
+Ownership:
 
-```text
-visual_materials.run_final_visual_acceptance_job
--> render collected USD
--> compare it with registered reference views
--> validate materials and external MDL dependencies
-```
+- `context.py` and `workspace.py`: inputs and artifact paths;
+- `stages/`: camera, inference, Part-ID evidence, and final checks;
+- `policy_exact_cover.py`, `tournaments.py`, and `quality_contracts/`:
+  material planning and quality decisions;
+- `tools/qwen_material_pipeline/`: model adapters, segmentation, retrieval,
+  material, and USD tools.
 
-### Responsibilities inside `asset_pipeline/visual_materials`
-
-- `context.py` holds validated run inputs and configuration.
-- `workspace.py` defines output paths.
-- `commands.py` builds subprocess arguments.
-- `stages/runner.py` handles progress, subprocess failures, and bounded retries.
-- `stages/source_preparation.py` prepares registries, renders, and camera data.
-- `stages/material_inference.py` starts the material-analysis subprocess.
-- `stages/part_id_evidence.py` owns model-image Part-ID localization, both
-  segmentation passes, relation guidance, hybrid fusion, and all-view evidence
-  coverage checks.
-- `policy_exact_cover.py` ensures every mesh receives an applicable result.
-- `exact_mdl_cache.py` verifies cached candidate renders.
-- `tournaments.py` compares shortlisted MDLs by rendered appearance.
-- `quality_contracts/` contains metrics, diagnostics, limited repair, and final
-  result checks.
-- `stages/final_acceptance.py` checks the collected deliverable.
-
-### Model roles
-
-- SAM3 supplies the confirmed whole-workpiece foreground. It may replay the
-  user's point-based annotation.
-- Qwen describes visible parts and chooses among bounded candidates.
-- MVInverse estimates PBR appearance evidence; it does not decide the final MDL
-  by itself.
-- SigLIP2 retrieves visually related materials from the complete local NVIDIA
-  `Materials/Base` catalog.
-- DINOv2 reranks candidates using local surface appearance.
-- CAD Part-ID renders connect photo evidence to individual meshes. Parts not
-  visible in any accepted view receive the configured default material so the output
-  still covers every mesh.
-
-The final choice is made from rendered MDL candidates. Once the selection
-record is created, later stages verify and apply that choice without silently
-changing it. Exact thresholds and repair rules are documented in
-[Visual materials](../modules/visual-materials.md).
+Models produce evidence or candidates; validated code performs the final
+binding. Unobservable parts receive a safe default, and later stages do not
+silently replace a selected MDL. See
+[automatic materials](../guides/manual-part-id-materials.md).
 
 ## Runtime boundaries and resume
 

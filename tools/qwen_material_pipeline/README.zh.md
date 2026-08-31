@@ -1,117 +1,17 @@
 # 自动材质工具包
 
-[English](./README.md) | [中文](./README.zh.md) | [项目 README](../../README.zh.md)
+[English](./README.md) | [中文](./README.zh.md)
 
-为手工建模 STEP/STP 资产提供参考图驱动的 NVIDIA 材质定义语言（MDL）检索和通用场景
-描述格式（USD）材质工具。普通用户运行根命令 `manual-material-pipeline`；本子包提供其中
-的材质阶段。
+本目录包含 STEP/STP 自动赋材质的内部实现：分割、检索、材质选择、USD 绑定和验证。
+普通用户只需按[自动赋材质](../../docs/guides/manual-part-id-materials.zh.md)运行
+`manual-material-pipeline`，不需要单独调用这里的子命令。
 
-## 适用范围
-
-默认配置为 `src/qwen_material_pipeline/configs/pipeline/manual_part_id_materials.json`。
-流程按 CAD 零件编号（Part-ID）从 NVIDIA `Materials/Base` 中选择视觉效果最接近的材质。
-精确目录匹配保持原始预设；如果只能确定材质类别、不能匹配到精确预设，则先固定所选 MDL，
-再进入真实 CAD 校色流程。
-
-本包负责参考图分析、相机配准、Part-ID 映射、材质检索、USD 绑定和验证。CAD 转换及
-总流程由 `asset_pipeline` 负责。
-
-## 安装
+开发调试：
 
 ```bash
-conda activate hunyuan_sam3d
-python -m pip install -e . -e ./tools/qwen_material_pipeline
 qwen-material --help
-```
-
-本机模型和应用路径写在仓库根目录 `.env` 中，可从根目录 `.env.example` 复制。本机模型、
-缓存和私有复现项目放在 `runtime/`，不提交 Git。
-
-可选的 Qwen3.5/SigLIP2 校验安装：
-
-```bash
-bash tools/qwen_material_pipeline/scripts/qwen35/setup_qwen35_runtime.sh
-```
-
-SAM3、EntitySeg/CropFormer、MVInverse、DINOv2、NVIDIA 材质和 Base 材质观察库是独立本机依赖，
-运行前必须通过环境检查。
-
-参考图、清单和 STEP/STP 文件通过根命令显式传入，不复制到本包。每次运行由 `--output`
-写入仓库 `outputs/<run-id>/`。
-
-## 流程
-
-```text
-归一 CAD + 已确认照片
-  -> 对齐 RGB 图并提取 Part-ID 外观信息
-  -> 从 CAD 模型单独渲染每个零件的形状模板
-  -> SAM3/EntitySeg 第一遍 + 邻件引导第二遍 + 迭代融合
-  -> MVInverse/SigLIP2/DINOv2/Qwen3.5
-  -> Base MDL 候选渲染
-  -> 为每个 Part-ID 生成一条材质分配
-  -> 记录最终 MDL、写入 USD 并做视觉验证
-```
-
-每个可见 Part-ID 独立判断；不可见零件使用预设默认材质。模型只负责候选排序，USD 绑定由
-经过校验的程序完成。精确库匹配保持默认参数；对应材质固定 MDL 身份后，由主流程在真实
-CAD 上自动校色，且同一照片材质组件共享一套最终采用、后续不再修改的参数。只有程序明确支持调节颜色
-的 MDL 才会写入新参数；其他对应材质保留所选库预设，不猜测参数，也不阻断其他材质继续校色。
-少数组件成员匹配到的精确预设只能用于确认材质类型；只有全部成员都验证同一预设时才保留整组原生
-颜色，否则整组在保持 MDL 身份不变的前提下共享自动校色参数。
-
-## 命令
-
-| 命令 | 作用 |
-| --- | --- |
-| `sam3-foreground-ui` | 确认整机前景 |
-| `staged` | 运行材质推理阶段 |
-| `catalog` | 构建或检查 NVIDIA MDL 目录 |
-| `base-bank` | 构建或验证 Base 材质观察库 |
-| `part-id-qwen` | 按 Part-ID 排序候选 |
-| `exact-mdl-tournament` | 渲染比较 MDL 候选 |
-| `run-corresponding-material-color-workflow` | 固定 MDL 后实际渲染、选择颜色并检查质量 |
-| `compare` | 比较参考图和渲染图 |
-| `final-visual-gate` | 验证收集后的 USD |
-| `usd` | USD 零件索引、渲染、绑定与验证 |
-
-完整参数以 `qwen-material --help` 为准。普通用户通常只需
-`manual-material-pipeline` 和 `sam3-foreground-ui`。
-
-## 恢复与输出
-
-`--resume` 只复用输入、配置、数据格式、模型和哈希均一致的产物。
-
-主要结果：
-
-```text
-visual_material/renders/
-visual_material/analysis/{reference_manifest,qwen_inference_ledger,
-  part_id_reference_evidence,part_id_qwen_choices,material_selection_lock}.json
-visual_material/analysis/{part_id_cad_amodal_templates,
-  part_id_relation_guidance,part_id_hybrid_masks}/
-visual_material/analysis/mvinverse/
-visual_material/visual_quality/
-visual_material/final_visual_acceptance/
-```
-
-`runtime/` 和 `outputs/` 不进入源码发布包。
-
-## 文档与测试
-
-- [用户命令](../../docs/guides/manual-part-id-materials.zh.md)
-- [行为与排错](../../docs/modules/visual-materials.zh.md)
-- [架构](./docs/architecture.zh.md)
-- [材质身份优先、真实 CAD 校色流程](./docs/material_identity_color_workflow.zh.md)
-- [MVInverse](./docs/mvinverse.zh.md)
-
-```bash
 python -m pytest -q -p no:cacheprovider tools/qwen_material_pipeline/tests
 ```
 
-## 许可证
-
-自研代码采用 [Apache License 2.0](./LICENSE)。MVInverse 仍仅限非商业用途；它的
-[许可证](./third_party/mvinverse/LICENSE)和内置 DINOv2 的
-[许可证](./third_party/mvinverse/DINOV2_LICENSE)继续与第三方源码放在一起，并会进入
-Python 分发包。模型和 NVIDIA 资产使用独立条款，见仓库级
+代码结构见[架构说明](../../docs/development/architecture.zh.md)。MVInverse 仅限非商业用途；其他许可见
 [第三方声明](../../legal/THIRD_PARTY_NOTICES.md)。
