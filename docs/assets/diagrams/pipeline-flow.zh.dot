@@ -50,14 +50,14 @@ digraph asset_pipeline {
     hb [label="Blender\n朝向、尺寸、居中"];
     hu [label="GLB 转 Z-up USD\n保留生成材质"];
     s [label="SAM3D 重建输入图", fillcolor="#eef6ff", color="#3973a8"];
-    sg [label="SAM3D\n重建 GLB"];
+    sg [label="SAM3D 重建带材质/纹理的 GLB"];
     e [label="已有 GLB", fillcolor="#eef6ff", color="#3973a8"];
     r [label="可选：网格精修", fillcolor="#f4f0ff", color="#7658a8"];
     b [label="Blender\n朝向、尺寸、居中"];
     u [label="GLB 转\nZ-up USD"];
 
     gvi [
-      label="SAM3D / 已有 GLB 的材质参考图\n（2–4 张，单独传入）",
+      label="已有 GLB 的可选材质参考图\n（2–4 张，单独传入）",
       fillcolor="#e7f2ff",
       color="#2872b8",
       penwidth=2.0
@@ -76,8 +76,9 @@ digraph asset_pipeline {
     hp [label="Isaac\n碰撞、刚体、质量", fillcolor="#edf8f1", color="#397a50"];
     gp [label="Isaac\n碰撞、刚体、质量", fillcolor="#edf8f1", color="#397a50"];
 
-    h -> hg -> hr -> hb -> hu -> hp;
-    s -> sg -> r;
+    h -> hg -> hr;
+    s -> sg -> hr;
+    hr -> hb -> hu -> hp;
     e -> r;
     r -> b -> u;
     u -> gm;

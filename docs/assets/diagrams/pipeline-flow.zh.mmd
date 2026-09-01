@@ -4,14 +4,14 @@ flowchart LR
         HG --> HR[可选：网格精修<br/>迁移并保留生成纹理]
         HR --> HB[Blender：朝向、尺寸、居中]
         HB --> HU[GLB 转 Z-up USD<br/>保留生成材质]
-        S[SAM3D 重建输入图] --> SG[SAM3D 重建 GLB]
+        S[SAM3D 重建输入图] --> SG[SAM3D 重建带材质/纹理的 GLB]
+        SG --> HR
         E[已有 GLB]
-        SG --> R[可选：网格精修]
-        E --> R
+        E --> R[可选：网格精修]
         R --> B[Blender：朝向、尺寸、居中]
         B --> U[GLB 转 Z-up USD]
 
-        GVI[SAM3D / 已有 GLB 的材质参考图<br/>（2–4 张，单独传入）]
+        GVI[已有 GLB 的可选材质参考图<br/>（2–4 张，单独传入）]
         U --> GM[参考图 ↔ USD 零件对应<br/>提取证据并匹配材质]
         GVI --> GM
         GM --> GA[绑定并锁定匹配到的视觉材质]
