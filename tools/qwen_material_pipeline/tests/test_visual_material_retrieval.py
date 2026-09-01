@@ -13,6 +13,7 @@ from PIL import Image
 import qwen_material_pipeline.retrieval.visual_materials as retrieval
 from qwen_material_pipeline.retrieval.visual_materials import (
     BASE_BANK_INDEX_SCHEMA_VERSION,
+    BASE_BANK_RETRIEVAL_STRATEGY,
     BASE_BANK_SCOPE_SCHEMA_VERSION,
     REQUEST_SCHEMA_VERSION,
     VisualRetrievalError,
@@ -29,6 +30,8 @@ from qwen_material_pipeline.retrieval.visual_materials import (
     _model_fingerprint,
     _mvinverse_prior_scores,
     _normalize_rows,
+    _rejected_group_result,
+    _sealed_descriptor_query_rgb,
     _siglip_pooled_features,
 )
 
@@ -43,6 +46,56 @@ def test_masked_query_rgb_accepts_six_pixel_part_id_evidence() -> None:
 
     assert color is not None
     assert np.allclose(color, np.asarray([20, 40, 60]) / 255.0)
+
+
+def test_unusable_group_result_fails_closed_without_losing_audit() -> None:
+    result = _rejected_group_result(
+        {"group_id": "P0139", "descriptor": {"base_color": "green"}},
+        {
+            "observation_audit": [{"view_id": "side"}],
+            "reason_codes": [],
+            "siglip_ranking": [{"rank": 1, "material_id": "M1"}],
+        },
+        retrieval_strategy=BASE_BANK_RETRIEVAL_STRATEGY,
+        reason_code="no_usable_masked_color_pixels",
+    )
+
+    assert result["accepted"] is False
+    assert result["reason_codes"] == ["no_usable_masked_color_pixels"]
+    assert result["observations"] == [{"view_id": "side"}]
+    assert result["siglip2_ranking"] == [{"rank": 1, "material_id": "M1"}]
+    assert result["fused_ranking"] == []
+
+
+def test_sparse_canvas_color_uses_only_sealed_source_pixel_audit() -> None:
+    color = _sealed_descriptor_query_rgb(
+        {
+            "descriptor": {
+                "median_rgb": [0.14901961, 0.35294119, 0.16862746],
+                "robust_color_evidence": {
+                    "method": "cielab_medoid_fixed_radius",
+                    "sample_count": 9,
+                },
+            }
+        }
+    )
+
+    assert color is not None
+    assert np.allclose(color, [0.14901961, 0.35294119, 0.16862746])
+    assert (
+        _sealed_descriptor_query_rgb(
+            {
+                "descriptor": {
+                    "median_rgb": [0.1, 0.2, 0.3],
+                    "robust_color_evidence": {
+                        "method": "cielab_medoid_fixed_radius",
+                        "sample_count": 5,
+                    },
+                }
+            }
+        )
+        is None
+    )
 
 
 def _write_image(

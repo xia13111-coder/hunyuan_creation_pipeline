@@ -171,8 +171,29 @@ hunyuan-asset-pipeline \
 
 ### STEP/STP：根据参考图自动赋材质
 
-用 2–4 张同一工件照片自动完成零件对应、选材质、校色和 USD 绑定。唯一人工步骤是确认
-每张照片的整机前景，命令见[自动赋材质](./docs/guides/manual-part-id-materials.zh.md)。
+用 2–4 张同一工件照片自动完成零件对应、选材质、校色和 USD 绑定。先启动 SAM3
+标注页面，逐张点选并确认整机前景：
+
+```bash
+qwen-material sam3-foreground-ui \
+  --reference front=./references/front.jpg \
+  --reference side=./references/side.jpg \
+  --reference top=./references/top.jpg \
+  --reference iso=./references/iso.jpg \
+  --output ./annotations/sam3_foreground_annotations.json
+```
+
+再把标注 JSON 交给 STEP/STP 自动赋材质流程：
+
+```bash
+manual-material-pipeline \
+  --stp ./input/asset.stp \
+  --sam3-annotations ./annotations/sam3_foreground_annotations.json \
+  --output ./outputs/manual/asset_run
+```
+
+这里的人工步骤只确认整机前景，不需要逐个零件标注。参数和中断恢复说明见
+[自动赋材质](./docs/guides/manual-part-id-materials.zh.md)。
 
 详细说明见 [Hunyuan](./docs/modules/hunyuan.zh.md)、[SAM3D](./docs/modules/sam3d.zh.md)、
 [CAD](./docs/modules/cad.zh.md)、

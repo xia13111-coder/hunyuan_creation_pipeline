@@ -13,13 +13,12 @@ tools/{blender,isaac,sam3d}/    外部运行时使用的执行脚本
 tools/qwen_material_pipeline/   材质推理与 USD 工具
 configs/                        版本化配置
 requirements/                   按用途拆分的依赖增量
-docs/{guides,development,release,modules}/
-                                用户、开发和发布文档
+docs/{guides,development,modules}/
+                                流程、模块和代码架构文档
 legal/                          第三方版权与许可证清单
-.github/                        贡献、行为规范与安全策略
 tests/                          主流水线测试
 apps/                           独立网页应用
-examples/                       示例说明和可公开元数据
+examples/                       示例说明和输入
 outputs/                        运行结果；Git 默认忽略
 docker/                         容器文件与说明
 ```
@@ -27,8 +26,8 @@ docker/                         容器文件与说明
 仓库路径统一由 `asset_pipeline/project_layout.py` 解析。其他模块不应自行拼接
 `tools/`、`configs/` 或 `outputs/` 的位置。
 
-根目录的 `LICENSE`、`NOTICE` 和 `CITATION.cff` 特意保留在打包与托管工具能够识别的
-位置。仓库级第三方声明放入 `legal/`；独立构建包或第三方源码自己的许可证继续与代码
+根目录的 `LICENSE` 和 `NOTICE` 保留在打包工具能够识别的位置。仓库级第三方声明放入
+`legal/`；独立构建包或第三方源码自己的许可证继续与代码
 放在一起。
 
 ## 材质工具包主要目录
@@ -66,7 +65,7 @@ tools/qwen_material_pipeline/
 ## 文件放置规则
 
 - 每次运行的文件统一放在 `outputs/<run-id>/`。
-- 照片、私有 CAD、密钥、模型权重和运行结果不得进入源码发布包。
+- 照片、私有 CAD、密钥、模型权重和运行结果不得进入源码目录。
 - Blender、Isaac Sim 和 SAM3D 执行脚本放在各自的 `tools/` 目录；完整工作流放在
   `asset_pipeline/`。
 - 各外部运行时的生产 worker 保持在对应目录顶层；可选操作统一放入 `utilities/` 或

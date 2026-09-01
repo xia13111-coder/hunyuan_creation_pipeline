@@ -522,6 +522,79 @@ def test_materialized_bundle_keeps_confirmed_masks_with_sealed_copy(
     assert all(path.parent.name.endswith("_masks") for path in sealed_masks.values())
 
 
+def test_materialized_bundle_accepts_hash_identical_reference_path_aliases(
+    tmp_path: Path,
+) -> None:
+    path, references = _annotation(tmp_path)
+    document, _masks = load_annotations(path, references=references)
+    destination = tmp_path / "analysis" / "sam3_foreground_annotations.json"
+    materialize_annotation_bundle(
+        document,
+        destination=destination,
+        references=references,
+        repository=tmp_path / "sam3",
+        checkpoint=tmp_path / "sam3.pt",
+    )
+    original_payload = destination.read_bytes()
+
+    alias_dir = tmp_path / "container-bind-alias"
+    alias_dir.mkdir()
+    aliased_references = []
+    source = json.loads(path.read_text(encoding="utf-8"))
+    for view in source["source_views"]:
+        alias = alias_dir / Path(view["image"]).name
+        alias.write_bytes(Path(view["image"]).read_bytes())
+        view["image"] = str(alias)
+        aliased_references.append((view["id"], alias))
+    unsigned = {key: value for key, value in source.items() if key != "integrity"}
+    source["integrity"] = {"document_sha256": canonical_sha256(unsigned)}
+    path.write_text(json.dumps(source), encoding="utf-8")
+    aliased_document, _masks = load_annotations(
+        path, references=aliased_references
+    )
+
+    materialize_annotation_bundle(
+        aliased_document,
+        destination=destination,
+        references=aliased_references,
+        repository=tmp_path / "sam3",
+        checkpoint=tmp_path / "sam3.pt",
+    )
+
+    assert destination.read_bytes() == original_payload
+
+
+def test_materialized_bundle_still_rejects_changed_annotation_content(
+    tmp_path: Path,
+) -> None:
+    path, references = _annotation(tmp_path)
+    document, _masks = load_annotations(path, references=references)
+    destination = tmp_path / "analysis" / "sam3_foreground_annotations.json"
+    materialize_annotation_bundle(
+        document,
+        destination=destination,
+        references=references,
+        repository=tmp_path / "sam3",
+        checkpoint=tmp_path / "sam3.pt",
+    )
+    document["source_views"][0]["click_sets"][0]["events"][0]["point"] = [
+        400,
+        500,
+    ]
+    document["source_views"][0]["click_sets"][0]["positive_points"] = [
+        [400, 500]
+    ]
+
+    with pytest.raises(HumanForegroundError, match="differs from this run"):
+        materialize_annotation_bundle(
+            document,
+            destination=destination,
+            references=references,
+            repository=tmp_path / "sam3",
+            checkpoint=tmp_path / "sam3.pt",
+        )
+
+
 def test_session_rejects_stale_mask_directory_before_loading_model(
     tmp_path: Path,
 ) -> None:

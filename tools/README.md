@@ -62,8 +62,7 @@ the package responsible for them.
 material package. Run it through an editable install or with
 `PYTHONPATH=./tools/qwen_material_pipeline/src`;
 saved evidence uses relative, hash-checked references instead of host paths. See
-the
-[release and portability rules](../docs/release/release-portability.md).
+the [material workflow](../docs/modules/visual-materials.md) for the data flow.
 
 For interactive use, install both first-party packages in editable mode once:
 

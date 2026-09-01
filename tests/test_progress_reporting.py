@@ -234,6 +234,33 @@ def test_run_command_rejects_uncaught_traceback_with_zero_exit_code() -> None:
         run_command([sys.executable, "-c", child_code])
 
 
+def test_run_command_rejects_unwrapped_uncaught_traceback_with_zero_exit_code() -> None:
+    child_code = (
+        "print('Traceback (most recent call last):')\n"
+        "print('  File \"worker.py\", line 3, in <module>')\n"
+        "print('RuntimeError: worker failed')\n"
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="uncaught Python traceback despite exit code 0",
+    ):
+        run_command([sys.executable, "-c", child_code])
+
+
+def test_run_command_allows_kit_handled_optional_extension_traceback() -> None:
+    child_code = (
+        "print('Traceback (most recent call last):')\n"
+        "print('  File \"extension.py\", line 9, in startup')\n"
+        "print('ImportError: optional extension dependency is unavailable')\n"
+        "print('2026-08-31 [Error] [carb.scripting-python.plugin] "
+        "Exception: Extension python module: optional.extension failed')\n"
+        "print('[1.000s] app ready')\n"
+    )
+
+    run_command([sys.executable, "-c", child_code])
+
+
 def test_run_command_ignores_previous_crash_warning_and_incomplete_traceback() -> None:
     child_code = (
         "print('[Warning] Previous crash detected; report may contain: "

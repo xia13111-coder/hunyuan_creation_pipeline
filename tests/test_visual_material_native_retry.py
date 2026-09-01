@@ -181,3 +181,66 @@ def test_visual_stage_retries_known_transient_python_runtime_state(
     assert output.read_text(encoding="utf-8") == "complete"
     assert any("transient Python runtime failure" in message for message in messages)
     assert any("retrying in a clean process (2/2)" in message for message in messages)
+
+
+def test_entityseg_stage_receives_explicit_detectron2_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entityseg_python = "/opt/entityseg/bin/python"
+    detectron2_root = "/opt/entityseg/detectron2-source"
+    captured: dict[str, str] = {}
+
+    monkeypatch.setenv("ENTITYSEG_PYTHON", entityseg_python)
+    monkeypatch.setenv("ENTITYSEG_DETECTRON2_ROOT", detectron2_root)
+
+    def runner(command, *, log_cb, env_remove, env_overrides):
+        captured.update(env_overrides)
+
+    _run_stage(
+        "part_id_entityseg_boundary_candidates",
+        [entityseg_python, "-m", "qwen_material_pipeline.segmentation.entityseg_regions"],
+        None,
+        command_runner=runner,
+    )
+
+    assert detectron2_root in captured["PYTHONPATH"].split(":")
+
+
+def test_entityseg_stage_retries_cuda_oom_at_reduced_resolution(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "entityseg"
+    manifest = output_dir / "manifest.json"
+    calls: list[list[str]] = []
+    messages: list[str] = []
+
+    def runner(command, *, log_cb, env_remove, env_overrides):
+        calls.append(list(command))
+        if len(calls) == 1:
+            output_dir.mkdir()
+            (output_dir / "partial.png").write_bytes(b"partial")
+            log_cb("torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2 GiB")
+            raise RuntimeError("Command failed with exit code 1")
+        assert command[-2:] == ["--inference-short-edge", "640"]
+        assert not output_dir.exists()
+        output_dir.mkdir()
+        manifest.write_text("{}", encoding="utf-8")
+
+    _run_stage(
+        "part_id_entityseg_boundary_candidates",
+        [
+            "/opt/entityseg/bin/python",
+            "-m",
+            "qwen_material_pipeline.segmentation.entityseg_regions",
+            "--output-dir",
+            str(output_dir),
+        ],
+        messages.append,
+        command_runner=runner,
+        required_files=(manifest,),
+    )
+
+    assert len(calls) == 2
+    assert any("recoverable EntitySeg CUDA OOM" in message for message in messages)
+    assert any("entityseg_inference_short_edge=640" in message for message in messages)
+    assert len(list(tmp_path.glob("entityseg.native_crash_attempt_01*"))) == 1

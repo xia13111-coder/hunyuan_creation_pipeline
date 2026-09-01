@@ -21,10 +21,14 @@ import json
 import math
 import traceback
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-import cv2
-import numpy as np
+if TYPE_CHECKING:
+    import cv2
+    import numpy as np
+else:
+    cv2 = None
+    np = None
 
 
 SCHEMA_VERSION = "qwen-cad-amodal-part-templates/v1"
@@ -34,6 +38,27 @@ MINIMUM_TEMPLATE_PIXELS = 4
 
 class CadMeshTemplateError(ValueError):
     """Raised when an isolated mesh template cannot be reproduced safely."""
+
+
+def _load_numeric_dependencies() -> None:
+    """Load NumPy/OpenCV only after Kit has initialized in Isaac processes.
+
+    Isaac Sim 5 extensions initialize against their bundled numerical runtime.
+    Importing the pip-installed NumPy through OpenCV first can make optional Kit
+    extensions fail during startup even though this CPU projection tool itself
+    later succeeds.  Ordinary library callers still load the modules lazily on
+    their first projection operation.
+    """
+
+    global cv2, np
+    if cv2 is None:
+        import cv2 as loaded_cv2
+
+        cv2 = loaded_cv2
+    if np is None:
+        import numpy as loaded_np
+
+        np = loaded_np
 
 
 def _start_isaac_if_needed():
@@ -85,6 +110,7 @@ def _read_object(path: Path, label: str) -> dict[str, Any]:
 
 
 def _finite_vector(value: Any, *, size: int, label: str) -> np.ndarray:
+    _load_numeric_dependencies()
     if (
         not isinstance(value, list)
         or len(value) != size
@@ -190,6 +216,7 @@ def _rasterize_faces(
     width: int,
     height: int,
 ) -> np.ndarray:
+    _load_numeric_dependencies()
     mask = np.zeros((height, width), dtype=np.uint8)
     offset = 0
     point_count = len(projected_points)
@@ -214,6 +241,7 @@ def _rasterize_faces(
 
 
 def _mask_audit(mask: np.ndarray) -> dict[str, Any]:
+    _load_numeric_dependencies()
     binary = np.asarray(mask, dtype=np.uint8) > 0
     ys, xs = np.where(binary)
     if len(xs) < MINIMUM_TEMPLATE_PIXELS:
@@ -242,6 +270,7 @@ def _mask_audit(mask: np.ndarray) -> dict[str, Any]:
 
 
 def _write_mask(path: Path, mask: np.ndarray) -> dict[str, Any]:
+    _load_numeric_dependencies()
     path.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(path), np.asarray(mask, dtype=np.uint8)):
         raise CadMeshTemplateError(f"unable to write template mask: {path}")
@@ -256,6 +285,7 @@ def build_templates(
     output_dir: Path,
     part_ids: set[str] | None = None,
 ) -> dict[str, Any]:
+    _load_numeric_dependencies()
     """Build aligned amodal masks for every observed Part-ID/view pair."""
 
     try:
@@ -520,6 +550,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--part-id", action="append", default=[])
     args = parser.parse_args(argv)
     app = _start_isaac_if_needed()
+    _load_numeric_dependencies()
     exit_code = 0
     try:
         result = build_templates(

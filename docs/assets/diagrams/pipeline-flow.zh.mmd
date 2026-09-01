@@ -7,12 +7,15 @@ flowchart LR
     R --> B[Blender：朝向、尺寸、居中]
     B --> U[GLB 转 Z-up USD]
     U --> GV[可选：根据参考图匹配并应用材质]
+    GVI[参考图（2–4 张）] --> GV
     GV --> P[Isaac：碰撞、刚体、质量]
     U -. 未启用参考图赋材质 .-> P
 
     C[STEP/STP 工程模型] --> CU[CAD 转 USD]
     CU --> CP[几何规范化与物理属性]
     CP --> CV[可选：根据参考图匹配并应用材质]
+    VI[参考图（2–4 张）] --> SM[SAM3：人工点选分割并确认整机前景]
+    SM --> CV
 
     CP -. 未启用参考图赋材质 .-> F
     CV --> F

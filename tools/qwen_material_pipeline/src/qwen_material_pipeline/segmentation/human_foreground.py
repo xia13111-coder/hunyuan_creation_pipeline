@@ -400,6 +400,27 @@ def require_replay_policy(
         )
 
 
+def _portable_annotation_identity(document: Mapping[str, Any]) -> str:
+    """Hash annotation meaning while ignoring verified filesystem aliases."""
+
+    normalized = deepcopy(dict(document))
+    normalized.pop("integrity", None)
+    raw_views = normalized.get("source_views")
+    if isinstance(raw_views, list):
+        for raw_view in raw_views:
+            if not isinstance(raw_view, dict):
+                continue
+            # ``load_annotations`` has already bound these records to encoded
+            # and decoded content hashes.  Docker bind mounts can expose those
+            # exact bytes under both the original host path and the canonical
+            # workspace path, so the path spelling is not annotation meaning.
+            raw_view.pop("image", None)
+            mask_record = raw_view.get("confirmed_mask")
+            if isinstance(mask_record, dict):
+                mask_record.pop("path", None)
+    return canonical_sha256(normalized)
+
+
 def materialize_annotation_bundle(
     document: Mapping[str, Any],
     *,
@@ -449,9 +470,18 @@ def materialize_annotation_bundle(
     ).encode("utf-8")
     if destination.exists():
         if destination.read_bytes() != payload:
-            raise HumanForegroundError(
-                "stored SAM3 foreground annotation bundle differs from this run"
-            )
+            try:
+                stored = json.loads(destination.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise HumanForegroundError(
+                    "stored SAM3 foreground annotation bundle is unreadable"
+                ) from exc
+            if not isinstance(stored, dict) or _portable_annotation_identity(
+                stored
+            ) != _portable_annotation_identity(sealed):
+                raise HumanForegroundError(
+                    "stored SAM3 foreground annotation bundle differs from this run"
+                )
     else:
         temporary = destination.with_name(destination.name + ".tmp")
         temporary.write_bytes(payload)

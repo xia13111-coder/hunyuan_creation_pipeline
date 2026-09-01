@@ -32,6 +32,7 @@ ARG BLENDER_VERSION=4.5.0
 ARG BLENDER_SERIES=4.5
 ARG BLENDER_ARCHIVE=blender-${BLENDER_VERSION}-linux-x64.tar.xz
 ARG BLENDER_URL=https://download.blender.org/release/Blender${BLENDER_SERIES}/${BLENDER_ARCHIVE}
+ARG BLENDER_SHA256=1188b95cc12321c770b631939f7c25a096910b6f884a990bf9c0f62d52b38aec
 
 ENV CONDA_DIR=${CONDA_DIR}
 ENV CONDA_ENV_NAME=${CONDA_ENV_NAME}
@@ -83,12 +84,38 @@ RUN if [ ! -e /isaac-sim ] && [ -d /opt/isaac-sim ]; then \
     fi \
     && test -x /isaac-sim/python.sh
 
-RUN curl -fsSL "${BLENDER_URL}" -o "/tmp/${BLENDER_ARCHIVE}" \
+RUN --mount=type=cache,id=blender-${BLENDER_VERSION},target=/var/cache/blender \
+    archive="/var/cache/blender/${BLENDER_ARCHIVE}" \
+    && for attempt in $(seq 1 12); do \
+        if [ -f "${archive}" ] \
+            && printf '%s  %s\n' "${BLENDER_SHA256}" "${archive}" \
+                | sha256sum --check --status; then \
+            break; \
+        fi; \
+        printf 'Downloading Blender %s (attempt %s/12, existing bytes: %s)\n' \
+            "${BLENDER_VERSION}" "${attempt}" \
+            "$(stat -c %s "${archive}" 2>/dev/null || printf 0)"; \
+        if curl --http1.1 --fail --location --show-error \
+            --connect-timeout 30 --max-time 900 \
+            --speed-limit 1024 --speed-time 60 \
+            --continue-at - "${BLENDER_URL}" -o "${archive}"; then \
+            if printf '%s  %s\n' "${BLENDER_SHA256}" "${archive}" \
+                | sha256sum --check --status; then \
+                break; \
+            fi; \
+            printf 'Blender archive checksum mismatch; restarting the download.\n' >&2; \
+            rm -f "${archive}"; \
+        fi; \
+        if [ "${attempt}" -eq 12 ]; then \
+            printf 'Unable to download a verified Blender archive after 12 attempts.\n' >&2; \
+            exit 1; \
+        fi; \
+        sleep $((attempt * 2)); \
+    done \
     && mkdir -p /opt \
-    && tar -xJf "/tmp/${BLENDER_ARCHIVE}" -C /opt \
+    && tar -xJf "${archive}" -C /opt \
     && mv "/opt/blender-${BLENDER_VERSION}-linux-x64" "${BLENDER_HOME}" \
-    && ln -sf "${BLENDER_BIN}" /usr/local/bin/blender \
-    && rm -f "/tmp/${BLENDER_ARCHIVE}"
+    && ln -sf "${BLENDER_BIN}" /usr/local/bin/blender
 
 # The Isaac base image exports Python 3.11 site-packages. The pipeline uses
 # Python 3.10 in Conda, while Isaac's python.sh configures its own path.
@@ -101,10 +128,10 @@ ENV CONDA_DEFAULT_ENV=${CONDA_ENV_NAME}
 ENV PATH=${CONDA_DIR}/envs/${CONDA_ENV_NAME}/bin:${CONDA_DIR}/bin:${BLENDER_HOME}:${PATH}
 ENV QWEN_PYTHON=${CONDA_DIR}/envs/${CONDA_ENV_NAME}/bin/python
 ENV MVINVERSE_PYTHON=${CONDA_DIR}/envs/${CONDA_ENV_NAME}/bin/python
-ENV QWEN_MODEL_PATH=/workspace/models/qwen/Qwen3-VL-4B-Instruct
 ENV VISUAL_MATERIAL_ROOT=/workspace/materials/nvidia
 ENV TORCH_HOME=${HOME}/.cache/torch
 ENV PYTHONPATH=${ROOT_DIR}:${ROOT_DIR}/tools/qwen_material_pipeline/src
+ENV PIPELINE_ASSET_ROOT=/workspace/assets
 
 RUN if ! getent group "${APP_GID}" >/dev/null; then \
         groupadd --gid "${APP_GID}" pipeline; \
@@ -114,13 +141,21 @@ RUN if ! getent group "${APP_GID}" >/dev/null; then \
             --no-create-home --shell /bin/bash pipeline; \
     fi \
     && chmod o+rx /opt/isaac-sim \
-    && mkdir -p "${TORCH_HOME}" /workspace/hunyuan3.0_assets_creation \
+    && mkdir -p "${TORCH_HOME}" /workspace/assets \
+        /workspace/cache/visual-retrieval \
+        /workspace/hunyuan3.0_assets_creation \
     && chown -R "${APP_UID}:${APP_GID}" "${HOME}" /workspace
 
 COPY --chown=${APP_UID}:${APP_GID} . /workspace/hunyuan3.0_assets_creation
 COPY --chown=${APP_UID}:${APP_GID} docker/docker-entrypoint.full.sh /usr/local/bin/docker-entrypoint.full.sh
 
-RUN chmod +x /usr/local/bin/docker-entrypoint.full.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.full.sh \
+    && ${CONDA_DIR}/envs/${CONDA_ENV_NAME}/bin/python -m pip install \
+        --no-deps --no-build-isolation \
+        /workspace/hunyuan3.0_assets_creation \
+        /workspace/hunyuan3.0_assets_creation/tools/qwen_material_pipeline \
+    && manual-material-pipeline --help >/dev/null \
+    && qwen-material --help >/dev/null
 
 WORKDIR /workspace/hunyuan3.0_assets_creation
 

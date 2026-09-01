@@ -13,13 +13,12 @@ tools/{blender,isaac,sam3d}/    workers for external runtimes
 tools/qwen_material_pipeline/   material inference and USD tools
 configs/                        versioned configuration
 requirements/                   purpose-specific dependency overlays
-docs/{guides,development,release,modules}/
-                                user, developer, and release documentation
+docs/{guides,development,modules}/
+                                workflow, module, and architecture documentation
 legal/                          third-party license inventory
-.github/                        contribution, conduct, and security policies
 tests/                          main-pipeline tests
 apps/                           standalone web applications
-examples/                       example instructions and public metadata
+examples/                       example instructions and inputs
 outputs/                        generated runs; ignored by Git
 docker/                         container files and instructions
 ```
@@ -28,8 +27,8 @@ docker/                         container files and instructions
 should use it instead of rebuilding paths to `tools/`, `configs/`, or
 `outputs/`.
 
-Root-level `LICENSE`, `NOTICE`, and `CITATION.cff` intentionally remain where
-packaging and hosting tools discover them. Repository-wide third-party notices
+Root-level `LICENSE` and `NOTICE` remain where packaging tools discover them.
+Repository-wide third-party notices
 live under `legal/`; licenses belonging to an independently built package or
 vendored dependency stay beside that code.
 
@@ -71,7 +70,7 @@ repository root.
 
 - Store each run under `outputs/<run-id>/`.
 - Do not place photographs, private CAD files, credentials, model weights, or
-  generated results in the source release.
+  generated results in source directories.
 - Keep Blender, Isaac Sim, and SAM3D workers under their matching `tools/`
   directory; workflow orchestration belongs in `asset_pipeline/`.
 - Keep production runtime workers at the top of each runtime directory and

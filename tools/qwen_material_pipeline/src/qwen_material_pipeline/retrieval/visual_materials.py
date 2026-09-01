@@ -1163,6 +1163,61 @@ def _masked_query_rgb(images: Sequence[Any], masks: Sequence[Any]) -> Any:
     return np.median(np.stack(medians), axis=0).astype(np.float32)
 
 
+def _sealed_descriptor_query_rgb(group: Mapping[str, Any]) -> Any:
+    """Return a verified source-pixel colour when canvas normalization is sparse."""
+
+    import numpy as np
+
+    descriptor = group.get("descriptor")
+    if not isinstance(descriptor, Mapping):
+        return None
+    robust = descriptor.get("robust_color_evidence")
+    median_rgb = descriptor.get("median_rgb")
+    if (
+        not isinstance(robust, Mapping)
+        or robust.get("method") != "cielab_medoid_fixed_radius"
+        or isinstance(robust.get("sample_count"), bool)
+        or not isinstance(robust.get("sample_count"), int)
+        or int(robust["sample_count"]) < 6
+        or not isinstance(median_rgb, list)
+        or len(median_rgb) != 3
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not np.isfinite(float(value))
+            or not 0.0 <= float(value) <= 1.0
+            for value in median_rgb
+        )
+    ):
+        return None
+    return np.asarray(median_rgb, dtype=np.float32)
+
+
+def _rejected_group_result(
+    group: Mapping[str, Any],
+    state: Mapping[str, Any],
+    *,
+    retrieval_strategy: str,
+    reason_code: str | None = None,
+) -> dict[str, Any]:
+    """Build an auditable fail-closed result for one unusable observation group."""
+
+    reason_codes = list(state.get("reason_codes") or [])
+    if reason_code is not None and reason_code not in reason_codes:
+        reason_codes.append(reason_code)
+    return {
+        "group_id": group["group_id"],
+        "retrieval_strategy": retrieval_strategy,
+        "descriptor": group.get("descriptor"),
+        "observations": list(state.get("observation_audit") or []),
+        "accepted": False,
+        "reason_codes": reason_codes,
+        "siglip2_ranking": list(state.get("siglip_ranking") or []),
+        "dino_ranking": [],
+        "fused_ranking": [],
+    }
+
+
 def _bank_color_vectors(
     material_ids: Sequence[str],
     profiles_by_id: Mapping[str, Mapping[str, Any]],
@@ -1445,21 +1500,15 @@ def run(
         state = prepared[group["group_id"]]
         if not state["siglip_ranking"]:
             results.append(
-                {
-                    "group_id": group["group_id"],
-                    "retrieval_strategy": (
+                _rejected_group_result(
+                    group,
+                    state,
+                    retrieval_strategy=(
                         BASE_BANK_RETRIEVAL_STRATEGY
                         if observation_bank is not None
                         else LEGACY_RETRIEVAL_STRATEGY
                     ),
-                    "descriptor": group.get("descriptor"),
-                    "observations": state["observation_audit"],
-                    "accepted": False,
-                    "reason_codes": state["reason_codes"],
-                    "siglip2_ranking": [],
-                    "dino_ranking": [],
-                    "fused_ranking": [],
-                }
+                )
             )
             continue
         query_tokens = [
@@ -1476,6 +1525,35 @@ def run(
             if len(tokens) > 0
         ]
         query_rgb = _masked_query_rgb(state["images"], state["masks"])
+        color_source = "normalized_masked_observation_pixels"
+        if observation_bank is not None and query_rgb is None:
+            query_rgb = _sealed_descriptor_query_rgb(group)
+            if query_rgb is None:
+                # Do not fabricate colour when neither normalized pixels nor
+                # the upstream sealed source-pixel audit is usable.
+                results.append(
+                    _rejected_group_result(
+                        group,
+                        state,
+                        retrieval_strategy=BASE_BANK_RETRIEVAL_STRATEGY,
+                        reason_code="no_usable_masked_color_pixels",
+                    )
+                )
+                for image in state["images"] + state["masks"]:
+                    image.close()
+                _emit_progress(
+                    stage="dinov2",
+                    state="update",
+                    current=group_index,
+                    total=len(groups),
+                    unit="groups",
+                    detail=(
+                        f"DINOv2 group {group['group_id']} rejected: "
+                        "no usable masked color pixels"
+                    ),
+                )
+                continue
+            color_source = "sealed_source_pixel_robust_color_evidence"
         color_scored: list[dict[str, Any]] = []
         pbr_scored: list[dict[str, Any]] = []
         query_appearance: dict[str, Any] = {}
@@ -1505,10 +1583,6 @@ def run(
                 for rank, index in enumerate(dino_order[:siglip_top_k], start=1)
             ]
 
-            if query_rgb is None:
-                raise VisualRetrievalError(
-                    f"group {group['group_id']} has no usable masked color pixels"
-                )
             bank_colors = _bank_color_vectors(
                 material_ids, observation_bank["profiles_by_id"]
             )
@@ -1560,6 +1634,7 @@ def run(
                 ]
             query_appearance = {
                 "median_rgb": [round(float(value), 8) for value in query_rgb.tolist()],
+                "color_source": color_source,
                 "mvinverse_prior_available": has_pbr_prior,
             }
             fused = []

@@ -85,6 +85,22 @@ def _is_isaac_native_command(command: Sequence[str]) -> bool:
     return executable.endswith(".sh") and "isaac" in executable
 
 
+def _isolated_pythonpath(command: Sequence[str]) -> str:
+    """Return the source roots needed by one isolated model interpreter."""
+
+    paths = [
+        str(ProjectLayout.from_root(root_dir()).material_pythonpath),
+    ]
+    entityseg_python = os.getenv("ENTITYSEG_PYTHON", "").strip()
+    detectron2_root = os.getenv("ENTITYSEG_DETECTRON2_ROOT", "").strip()
+    if command and entityseg_python and detectron2_root:
+        command_python = Path(command[0]).expanduser().resolve()
+        configured_python = Path(entityseg_python).expanduser().resolve()
+        if command_python == configured_python:
+            paths.append(str(Path(detectron2_root).expanduser().absolute()))
+    return os.pathsep.join(paths)
+
+
 def _visual_control_cpu_stability_guard(
     function: Callable[..., Any],
 ) -> Callable[..., Any]:
@@ -132,6 +148,8 @@ def _visual_control_cpu_stability_guard(
 
 NATIVE_CRASH_MAX_ATTEMPTS = 3
 TRANSIENT_PYTHON_RUNTIME_MAX_ATTEMPTS = 2
+ENTITYSEG_OOM_MAX_ATTEMPTS = 2
+ENTITYSEG_OOM_RETRY_SHORT_EDGE = 640
 _NATIVE_CRASH_OUTPUT_MARKERS = (
     "segmentation fault",
     "core dumped",
@@ -152,6 +170,24 @@ _TRANSIENT_PYTHON_RUNTIME_MARKERS = (
     "TypeError: 'list_iterator' object is not callable",
     "SystemError: unknown opcode",
 )
+_CUDA_OOM_OUTPUT_MARKERS = (
+    "torch.OutOfMemoryError: CUDA out of memory",
+    "CUDA out of memory. Tried to allocate",
+)
+
+
+def _is_entityseg_region_command(command: Sequence[str]) -> bool:
+    return "qwen_material_pipeline.segmentation.entityseg_regions" in command
+
+
+def _set_command_option(command: list[str], option: str, value: str) -> None:
+    if option in command:
+        value_index = command.index(option) + 1
+        if value_index >= len(command):
+            raise RuntimeError(f"missing value for command option {option}")
+        command[value_index] = value
+    else:
+        command.extend((option, value))
 
 def _isaac_crash_dump_snapshot(command: Sequence[str]) -> dict[str, tuple[int, int]]:
     """Return a cheap identity snapshot of dumps owned by this Isaac install."""
@@ -285,19 +321,20 @@ def _run_stage(
     )
     log_message(log_cb, f"Visual material stage: {name}")
     output_tail: deque[str] = deque(maxlen=256)
+    stage_command = list(command)
 
     def capture_log(message: str) -> None:
         output_tail.append(message)
         log_message(log_cb, message)
 
     def run_once() -> None:
-        effective_command = command
+        effective_command = stage_command
         if (
             command_runner is run_command
             and _VISUAL_CONTROL_CHILD_CPU_AFFINITY
             and len(_VISUAL_CONTROL_CHILD_CPU_AFFINITY) > 1
             and _TASKSET_EXECUTABLE is not None
-            and _is_isaac_native_command(command)
+            and _is_isaac_native_command(stage_command)
         ):
             # The controller is pinned for interpreter stability. Give only
             # native Isaac/Kit workloads the parallel stable subset; local
@@ -308,16 +345,14 @@ def _run_stage(
                 ",".join(
                     str(cpu) for cpu in _VISUAL_CONTROL_CHILD_CPU_AFFINITY
                 ),
-                *command,
+                *stage_command,
             ]
         command_runner(
             effective_command,
             log_cb=capture_log,
             env_remove=ISOLATED_ENV_REMOVE,
             env_overrides={
-                "PYTHONPATH": str(
-                    ProjectLayout.from_root(root_dir()).material_pythonpath
-                )
+                "PYTHONPATH": _isolated_pythonpath(stage_command)
             },
         )
         missing_outputs = [str(path) for path in required_files if not path.is_file()]
@@ -359,26 +394,35 @@ def _run_stage(
             runtime_evidence = _transient_python_runtime_evidence(
                 "\n".join(output_tail)
             )
+            entityseg_oom_evidence = tuple(
+                f"output_marker={marker}"
+                for marker in _CUDA_OOM_OUTPUT_MARKERS
+                if marker in "\n".join(output_tail)
+            )
             native_retry = retry_native_crash and bool(evidence)
             runtime_retry = bool(runtime_evidence)
-            if not native_retry and not runtime_retry:
+            entityseg_oom_retry = _is_entityseg_region_command(
+                stage_command
+            ) and bool(entityseg_oom_evidence)
+            if not native_retry and not runtime_retry and not entityseg_oom_retry:
                 raise RuntimeError(
                     f"Visual material stage failed ({name}): {exc}"
                 ) from exc
-            maximum_attempts = (
-                NATIVE_CRASH_MAX_ATTEMPTS
-                if native_retry
-                else TRANSIENT_PYTHON_RUNTIME_MAX_ATTEMPTS
-            )
-            retry_kind = (
-                "native process crash"
-                if native_retry
-                else "transient Python runtime failure"
-            )
-            retry_failure_label = (
-                "native-crash" if native_retry else "transient Python runtime"
-            )
-            retry_evidence = evidence if native_retry else runtime_evidence
+            if native_retry:
+                maximum_attempts = NATIVE_CRASH_MAX_ATTEMPTS
+                retry_kind = "native process crash"
+                retry_failure_label = "native-crash"
+                retry_evidence = evidence
+            elif entityseg_oom_retry:
+                maximum_attempts = ENTITYSEG_OOM_MAX_ATTEMPTS
+                retry_kind = "recoverable EntitySeg CUDA OOM"
+                retry_failure_label = "EntitySeg CUDA OOM"
+                retry_evidence = entityseg_oom_evidence
+            else:
+                maximum_attempts = TRANSIENT_PYTHON_RUNTIME_MAX_ATTEMPTS
+                retry_kind = "transient Python runtime failure"
+                retry_failure_label = "transient Python runtime"
+                retry_evidence = runtime_evidence
             if attempt >= maximum_attempts:
                 raise RuntimeError(
                     "Visual material stage failed after "
@@ -387,9 +431,20 @@ def _run_stage(
                 ) from exc
 
             cleanup_actions = _clean_native_retry_outputs(
-                command,
+                stage_command,
                 attempt=attempt,
             )
+            if entityseg_oom_retry:
+                _set_command_option(
+                    stage_command,
+                    "--inference-short-edge",
+                    str(ENTITYSEG_OOM_RETRY_SHORT_EDGE),
+                )
+                cleanup_actions = (
+                    *cleanup_actions,
+                    "entityseg_inference_short_edge="
+                    f"{ENTITYSEG_OOM_RETRY_SHORT_EDGE}",
+                )
             next_attempt = attempt + 1
             log_message(
                 log_cb,

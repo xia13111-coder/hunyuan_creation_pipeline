@@ -1,0 +1,108 @@
+name: hunyuan-assets
+
+services:
+  pipeline:
+    image: ${PIPELINE_IMAGE:-hunyuan-allinone:isaac-6.0.1-materials}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.full
+      args:
+        PIPELINE_ENV_IMAGE: ${PIPELINE_ENV_IMAGE:-hunyuan-allinone:isaac-6.0.1}
+        ISAACSIM_BASE_IMAGE: ${ISAACSIM_BASE_IMAGE:-isaacsim_sim:latest}
+        APP_UID: ${PIPELINE_UID:-1234}
+        APP_GID: ${PIPELINE_GID:-1234}
+    container_name: ${PIPELINE_CONTAINER_NAME:-hunyuan-pipeline-601}
+    user: "${PIPELINE_UID:-1234}:${PIPELINE_GID:-1234}"
+    init: true
+    network_mode: host
+    ipc: host
+    shm_size: 16gb
+    restart: unless-stopped
+    env_file:
+      - ${PIPELINE_DOCKER_ENV_FILE:-./.env.runtime}
+    entrypoint:
+      - /bin/bash
+      - /workspace/hunyuan3.0_assets_creation/docker/docker-entrypoint.full.sh
+    environment:
+      ROOT_DIR: /workspace/hunyuan3.0_assets_creation
+      # Docker already injects .env.runtime.  Point the Python loader at an
+      # intentionally absent file so it never falls back to a private .env in
+      # the read-only source checkout.
+      PIPELINE_ENV_FILE: /run/pipeline/environment-is-already-injected
+      PIPELINE_ASSET_ROOT: /workspace/assets
+      MODEL_CACHE_ROOT: /home/pipeline/.cache/hunyuan_asset_pipeline
+      PIPELINE_PREFLIGHT_PROFILE: complete
+      QWEN_PYTHON: /opt/conda/envs/hunyuan_sam3d/bin/python
+      MVINVERSE_PYTHON: /opt/conda/envs/hunyuan_sam3d/bin/python
+      ISAACSIM_ROOT: /isaac-sim
+      ISAAC_PYTHON: /isaac-sim/python.sh
+      BLENDER_BIN: /opt/blender/blender
+      HF_HOME: /home/pipeline/.cache/huggingface
+      TORCH_HOME: /home/pipeline/.cache/torch
+      PATH: /workspace/hunyuan3.0_assets_creation/docker/bin:/opt/conda/envs/hunyuan_sam3d/bin:/opt/conda/bin:/opt/blender:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      PYTHONPATH: /workspace/hunyuan3.0_assets_creation:/workspace/hunyuan3.0_assets_creation/tools/qwen_material_pipeline/src
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ulimits:
+      memlock: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+      stack: 67108864
+    volumes:
+      - ${PROJECT_ROOT}:/workspace/hunyuan3.0_assets_creation:ro
+      # SAM3 annotation manifests bind reference images to their original
+      # absolute host paths. Preserve that path inside the container so a
+      # previously reviewed manifest can be replayed without rewriting it.
+      - ${PROJECT_ROOT}:${PROJECT_ROOT}:ro
+      - ${ASSET_ROOT}:/workspace/assets:rw
+      - ${ISAAC_CACHE_ROOT}/cache/main:/isaac-sim/.cache:rw
+      - ${ISAAC_CACHE_ROOT}/cache/computecache:/isaac-sim/.nv/ComputeCache:rw
+      - ${ISAAC_CACHE_ROOT}/logs:/isaac-sim/.nvidia-omniverse/logs:rw
+      - ${ISAAC_CACHE_ROOT}/config:/isaac-sim/.nvidia-omniverse/config:rw
+      - ${ISAAC_CACHE_ROOT}/data:/isaac-sim/.local/share/ov/data:rw
+      - ${ISAAC_CACHE_ROOT}/pkg:/isaac-sim/.local/share/ov/pkg:rw
+      - ${MODEL_CACHE_ROOT}/home:/home/pipeline:rw
+      - ${QWEN35_RUNTIME_DIR}:${QWEN35_RUNTIME_DIR}:ro
+      - ${QWEN35_MODEL_PATH}:${QWEN35_MODEL_PATH}:ro
+      - ${MVINVERSE_REPOSITORY}:${MVINVERSE_REPOSITORY}:ro
+      - ${MVINVERSE_CHECKPOINT}:${MVINVERSE_CHECKPOINT}:ro
+      - ${SAM3_REPOSITORY}:${SAM3_REPOSITORY}:ro
+      - ${SAM3_CHECKPOINT}:${SAM3_CHECKPOINT}:ro
+      - ${SAM3D_SINGLE_VIEW_ROOT}:${SAM3D_SINGLE_VIEW_ROOT}:ro
+      - ${SAM3D_MULTI_VIEW_ROOT}:${SAM3D_MULTI_VIEW_ROOT}:ro
+      - ${SAM3D_PIPELINE_CONFIG}:${SAM3D_PIPELINE_CONFIG}:ro
+      - ${SAM3D_MOGE_CHECKPOINT}:${SAM3D_MOGE_CHECKPOINT}:ro
+      - ${SAM3D_DINOV2_REPOSITORY}:${SAM3D_DINOV2_REPOSITORY}:ro
+      - ${SAM3D_DINOV2_CHECKPOINT}:${SAM3D_DINOV2_CHECKPOINT}:ro
+      - ${ENTITYSEG_RUNTIME_DIR}:${ENTITYSEG_RUNTIME_DIR}:ro
+      - ${ENTITYSEG_BASE_RUNTIME_DIR}:${ENTITYSEG_BASE_RUNTIME_DIR}:ro
+      - ${ENTITYSEG_DETECTRON2_ROOT}:${ENTITYSEG_DETECTRON2_ROOT}:ro
+      - ${ENTITYSEG_CROPFORMER_ROOT}:${ENTITYSEG_CROPFORMER_ROOT}:ro
+      - ${ENTITYSEG_CONFIG}:${ENTITYSEG_CONFIG}:ro
+      - ${ENTITYSEG_CHECKPOINT}:${ENTITYSEG_CHECKPOINT}:ro
+      - ${SIGLIP2_MODEL_PATH}:${SIGLIP2_MODEL_PATH}:ro
+      - ${DINOV2_MODEL_PATH}:${DINOV2_MODEL_PATH}:ro
+      - ${VISUAL_MATERIAL_ROOT}:${VISUAL_MATERIAL_ROOT}:ro
+      - ${NVIDIA_BASE_OBSERVATION_BANK}:${NVIDIA_BASE_OBSERVATION_BANK}:ro
+      - ${VISUAL_RETRIEVAL_CACHE}:${VISUAL_RETRIEVAL_CACHE}:rw
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 5
+    command:
+      - python
+      - -m
+      - uvicorn
+      - asset_pipeline.api:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"

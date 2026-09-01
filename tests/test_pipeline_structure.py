@@ -421,6 +421,36 @@ class PipelineStructureTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, r"\.env:1"):
                 runtime.load_environment_file(env_file)
 
+    def test_project_environment_prefers_explicit_runtime_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            env_file = Path(directory) / "container.env"
+            env_file.write_text(
+                "PIPELINE_TEST_CONTAINER_ENV=container-value\n",
+                encoding="utf-8",
+            )
+            with patch.dict(
+                os.environ,
+                {"PIPELINE_ENV_FILE": str(env_file)},
+                clear=False,
+            ):
+                loaded = runtime.load_project_environment()
+                self.assertEqual(loaded, ("PIPELINE_TEST_CONTAINER_ENV",))
+                self.assertEqual(
+                    os.environ["PIPELINE_TEST_CONTAINER_ENV"],
+                    "container-value",
+                )
+            os.environ.pop("PIPELINE_TEST_CONTAINER_ENV", None)
+
+    def test_missing_explicit_runtime_file_does_not_fall_back(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.env"
+            with patch.dict(
+                os.environ,
+                {"PIPELINE_ENV_FILE": str(missing)},
+                clear=False,
+            ):
+                self.assertEqual(runtime.load_project_environment(), ())
+
     def test_public_package_exports_new_owners(self) -> None:
         self.assertEqual(
             asset_pipeline.run_refine_mesh_job.__module__, "asset_pipeline.jobs.refine"

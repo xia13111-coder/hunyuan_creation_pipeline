@@ -1,358 +1,179 @@
-# Docker 操作指南
+# 完整 Docker 使用说明
 
-[English](./README.md) | [中文](./README.zh.md) | [项目 README](../README.zh.md)
+这套配置运行当前主线代码，并包含 API、Blender、Isaac Sim、Qwen3.5、MVInverse、
+SAM3、EntitySeg、DINOv2、SigLIP2 和 NVIDIA Base 材质流程。模型和材质库体积很大，
+保存在宿主机，通过只读目录挂入容器；输入、输出和缓存放在可写数据盘。
 
-离线镜像包含流水线运行环境、共享视觉模型依赖、Blender 4.5.0、Isaac Sim 6.0.1、CLI
-和 HTTP API。Qwen3.5 独立环境、模型权重和材质观察库从宿主机挂载。`/workspace`、
-`/isaac-sim`、`/opt/blender` 和 `/home/pipeline` 开头的是容器路径，换机器时保持不变。
+## 准备
 
-## 1. 导入离线包
-
-从 [Docker Offline Bundle - Isaac Sim 6.0.1](https://github.com/xia13111-coder/hunyuan_creation_pipeline/releases/tag/docker-isaac-6.0.1)
-下载 17 个分卷和校验文件：
-
-```text
-hunyuan-pipeline-isaac-6.0.1-offline.tar.part-000 ... part-016
-hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
-```
-
-仓库可能要求有权限的 GitHub 账号。也可以使用
-[GitHub CLI](https://cli.github.com/) 下载：
+宿主机需要 Linux、NVIDIA GPU、Docker Engine、Docker Compose v2 和 NVIDIA
+Container Toolkit。先确认 GPU 可被容器使用：
 
 ```bash
-mkdir -p hunyuan-docker-bundle
-cd hunyuan-docker-bundle
-gh auth login
-gh release download docker-isaac-6.0.1 \
-  --repo xia13111-coder/hunyuan_creation_pipeline \
-  --pattern 'hunyuan-pipeline-isaac-6.0.1-offline.*'
+docker run --rm --gpus all --entrypoint nvidia-smi \
+  hunyuan-allinone:isaac-6.0.1-materials -L
 ```
 
-离线包信息：
-
-| 项目 | 值 |
-| --- | --- |
-| 总大小 | `32,108,196,352` 字节（约 29.9 GiB） |
-| 分卷 | 17 个；除最后一个外均为 1900 MiB |
-| 完整镜像 | `hunyuan-allinone:isaac-6.0.1-materials` |
-| 完整镜像 ID | `sha256:913fe7c41298e99ec12701afdecc4a784f2e3f07b534c1b0bc9db77099f86855` |
-| Hub 镜像 | `nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0` |
-| 腾讯云 SDK | AI3D/common `3.0.1462` |
-
-宿主机需要 Linux、支持光追的 NVIDIA GPU、Docker Engine、NVIDIA Container Toolkit、
-`acl` 和足够的磁盘空间。离线包与 Docker data root 位于同一分区时，建议至少预留
-80 GB。
+没有镜像时，从项目的
+[Docker 离线镜像发布页](https://github.com/xia13111-coder/hunyuan_creation_pipeline/releases/tag/docker-isaac-6.0.1)
+下载全部分卷和 SHA256 文件，再导入：
 
 ```bash
-nvidia-smi
-docker --version
-docker info >/dev/null
+cd docker/offline-images
 sha256sum -c hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
 cat hunyuan-pipeline-isaac-6.0.1-offline.tar.part-* | docker load
+cd ../..
 ```
 
-任一校验失败都不要导入。随后检查镜像和 GPU 容器能力：
+## 第一次启动
 
 ```bash
-docker image inspect hunyuan-allinone:isaac-6.0.1-materials \
-  --format '{{index .RepoTags 0}} {{.Id}}'
-docker image inspect nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0 \
-  --format '{{index .RepoTags 0}} {{.Id}}'
-docker run --rm --gpus all --entrypoint nvidia-smi \
-  hunyuan-allinone:isaac-6.0.1-materials
-```
-
-归档分卷时应同时保留校验文件。
-
-## 2. 准备宿主机目录
-
-从项目根目录执行：
-
-```bash
-export PROJECT_ROOT="$(pwd -P)"
-export RUNTIME_ROOT="${RUNTIME_ROOT:-$PROJECT_ROOT/docker/runtime}"
-export ASSET_ROOT="${ASSET_ROOT:-$RUNTIME_ROOT/assets}"
-export ISAAC_CACHE_ROOT="${ISAAC_CACHE_ROOT:-$RUNTIME_ROOT/isaac-sim-6.0.1}"
-export MODEL_CACHE_ROOT="${MODEL_CACHE_ROOT:-$RUNTIME_ROOT/model-cache}"
-
-mkdir -p "$ASSET_ROOT"/{input,sam3d-visualization}
-mkdir -p "$ISAAC_CACHE_ROOT"/{cache/main,cache/computecache,config,data,logs,pkg}
-mkdir -p "$MODEL_CACHE_ROOT"/{ov-hub,huggingface,torch-hub,models,mvinverse,nvidia-materials,retrieval,nvidia_base_observation_bank_v1}
-```
-
-| 变量 | 默认位置 | 用途 |
-| --- | --- | --- |
-| `PROJECT_ROOT` | 当前目录 | 只读源码和配置 |
-| `ASSET_ROOT` | `docker/runtime/assets` | 输入和输出 |
-| `ISAAC_CACHE_ROOT` | `docker/runtime/isaac-sim-6.0.1` | Isaac Sim 可写缓存 |
-| `MODEL_CACHE_ROOT` | `docker/runtime/model-cache` | 模型与 Hub 缓存 |
-
-SAM3D 还需要 `tools/sam3d/third_party/` 以及已准备好的 Hugging Face 和 Torch Hub 缓存。
-镜像以 UID/GID `1234:1234` 运行，需要授权其写入运行目录：
-
-```bash
-command -v setfacl >/dev/null || sudo apt-get install -y acl
-sudo chown -R "$(id -u):$(id -g)" "$ASSET_ROOT"
-sudo chown -R 1234:1234 \
-  "$ISAAC_CACHE_ROOT" "$MODEL_CACHE_ROOT/ov-hub" "$MODEL_CACHE_ROOT/retrieval"
-find "$ASSET_ROOT" -type d -exec setfacl \
-  -m "u:$(id -u):rwx,u:1234:rwx,d:u:$(id -u):rwx,d:u:1234:rwx" {} +
-find "$ASSET_ROOT" -type f -exec setfacl \
-  -m "u:$(id -u):rw-,u:1234:rw-" {} +
-```
-
-输入放在 `$ASSET_ROOT/input`。源码、模型、观察库和 NVIDIA Materials 只读挂载；输出、
-Isaac/Hub 缓存和视觉检索缓存可写。
-
-## 3. 配置并启动
-
-创建本机密钥文件：
-
-```bash
-cp docker/env.runtime.example docker/.env.runtime
-chmod 600 docker/.env.runtime
+docker/run-full.sh init
 ${EDITOR:-nano} docker/.env.runtime
+docker/run-full.sh preflight
+docker/run-full.sh up
+docker/run-full.sh smoke
 ```
 
-不要提交 `.env.runtime`。Hunyuan 生成和精修任务需要腾讯云凭据；手工建模 STEP/STP 以及带
-`--skip-refine` 的已有 GLB 任务不需要。
+`docker/.env.runtime` 由 Compose 读取，和根目录 `.env` 是两份不同的配置。这里所有路径
+都必须是宿主机绝对路径；Compose 会把外部模型按相同绝对路径只读挂载，不能写
+`$HOME`、相对路径或容器内路径。
 
-启动 Isaac Hub 缓存。容器不存在时才会创建：
+### 镜像和容器
+
+| 变量 | 默认值/填写内容 | 作用和获取方式 |
+| --- | --- | --- |
+| `PIPELINE_IMAGE` | `hunyuan-allinone:isaac-6.0.1-materials` | 最终运行镜像。通过上面的离线发布包 `docker load` 获得，或在两个基础镜像就绪后执行 `docker/run-full.sh build` 构建。 |
+| `PIPELINE_ENV_IMAGE` | `hunyuan-allinone:isaac-6.0.1` | 仅构建时使用的 Conda/项目依赖镜像，可用 `docker/Dockerfile` 构建；直接运行已导入的最终镜像时不会读取它。 |
+| `ISAACSIM_BASE_IMAGE` | 本地 Isaac Sim 6.0.1 镜像标签 | 仅构建时使用。官方来源为 [NVIDIA NGC Isaac Sim](https://catalog.ngc.nvidia.com/orgs/nvidia/-/containers/isaac-sim/-)，可填写 `nvcr.io/nvidia/isaac-sim:6.0.1`。 |
+| `PIPELINE_CONTAINER_NAME` | `hunyuan-pipeline-601` | API/流水线容器名称，可改，但后续 `docker exec` 命令也要使用新名称。 |
+| `HUB_CONTAINER_NAME` | `isaac-hub-cache` | Isaac Hub 缓存容器名称。 |
+| `HUB_IMAGE` | `nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0` | 由启动脚本自动运行；来源和用途见 [NVIDIA Hub Workstation Cache](https://docs.omniverse.nvidia.com/utilities/latest/cache/hub-workstation.html)。离线使用时也必须先导入该镜像。 |
+| `PIPELINE_UID` / `PIPELINE_GID` | 宿主机用户 ID/组 ID | 分别填写 `id -u` 和 `id -g` 的输出，使容器写出的文件归当前用户所有。 |
+| `PIPELINE_MIN_FREE_GB` | `50` | `preflight` 要求 `ASSET_ROOT` 至少保留的空间，单位 GiB；不是磁盘配额。 |
+| `PIPELINE_DOCKER_MIN_BUILD_FREE_GB` | `15` | 执行 `build` 前要求 Docker 数据根目录保留的空间，单位 GiB。构建期间候选镜像会与当前镜像短暂共存。 |
+| `PIPELINE_START_TIMEOUT_SECONDS` | `300` | Compose 等待服务健康的最长时间，单位秒。 |
+| `PIPELINE_MIN_NOFILE` | `65536` | 容器预检要求的文件描述符软上限；完整参考图渲染会同时打开大量 GPU/渲染资源。Compose 已设置同样的 `nofile` 上限。 |
+
+如果不用离线最终镜像而要从源码构建，先准备基础镜像：
 
 ```bash
-docker start isaac-hub-cache 2>/dev/null || docker run --name isaac-hub-cache \
-  --restart unless-stopped --network=host -u 1234:1234 \
-  -v "$MODEL_CACHE_ROOT/ov-hub:/var/cache/hub:rw" \
-  -d nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0
+docker build -f docker/Dockerfile \
+  -t hunyuan-allinone:isaac-6.0.1 .
+docker pull nvcr.io/nvidia/isaac-sim:6.0.1
 ```
 
-Hub 不可用时，Isaac Sim 可能退出或发生段错误。
+然后在 `.env.runtime` 中把 `ISAACSIM_BASE_IMAGE` 改为
+`nvcr.io/nvidia/isaac-sim:6.0.1`，再执行 `docker/run-full.sh build`。
 
-设置模型、观察库、缓存和材质目录。以
-`ASSET_MODEL_VOLUME="$MODEL_CACHE_ROOT"` 运行 Qwen3.5 安装脚本时，脚本会在同一目录中
-创建 `env/` 和 `model/`。容器按相同绝对路径挂载该运行时，避免 Python 环境前缀变化。
+### 宿主机目录
+
+| 变量 | 填写内容 | 读写方式和用途 |
+| --- | --- | --- |
+| `PROJECT_ROOT` | 当前代码仓库根目录 | 只读挂到容器 `/workspace/hunyuan3.0_assets_creation`，并保留同名宿主机绝对路径；后者用于原样回放 SAM3 标注清单中经过哈希校验的参考图路径。必须正好指向当前 checkout。 |
+| `ASSET_ROOT` | 输入、输出和任务结果目录 | 可写挂到 `/workspace/assets`；应放在大容量数据盘。 |
+| `MODEL_CACHE_ROOT` | 容器 Home、Hugging Face、Torch 和 Hub 缓存根目录 | 可写；启动脚本会创建 `home/` 和 `ov-hub/`。它不是某个模型的路径。 |
+| `ISAAC_CACHE_ROOT` | Isaac Sim 缓存和日志根目录 | 可写；启动脚本会创建 `cache/`、`logs/`、`config/`、`data/`、`pkg/`。无需下载内容。 |
+
+### 外部 Python、模型和权重
+
+| 变量 | 必须指向 | 获取方式 |
+| --- | --- | --- |
+| `QWEN35_RUNTIME_DIR` | Qwen3.5 独立运行环境根目录 | 运行根 README 中的 `setup_qwen35_runtime.sh` 创建；它不是模型目录。 |
+| `QWEN35_PYTHON` | 上述目录中的可执行 Python | 通常为 `QWEN35_RUNTIME_DIR/env/bin/python`。容器按同一路径挂载，所以不能使用容器专用路径替代。 |
+| `QWEN35_MODEL_PATH` | 含 `config.json` 和 safetensors 的 Qwen3.5-4B 目录 | 来源为 [Qwen/Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B)；推荐使用仓库脚本下载固定版本。 |
+| `MVINVERSE_REPOSITORY` | MVInverse 源码目录 | 当前仓库已带兼容源码；上游为 [Maddog241/mvinverse](https://github.com/Maddog241/mvinverse)。 |
+| `MVINVERSE_CHECKPOINT` | 含 `config.json` 和 `model.safetensors` 的目录 | 从 [maddog241/mvinverse](https://huggingface.co/maddog241/mvinverse) 下载。 |
+| `SAM3_REPOSITORY` | 与权重匹配的 SAM3 源码目录 | 推荐填写 SAM 3D Objects 的 `submodules/sam3`；上游为 [facebookresearch/sam3](https://github.com/facebookresearch/sam3)。 |
+| `SAM3_CHECKPOINT` | `sam3.pt` 文件 | 从受访问控制的 [facebook/sam3](https://huggingface.co/facebook/sam3) 下载。 |
+| `SAM3D_SINGLE_VIEW_ROOT` | SAM 3D Objects 源码根目录 | 从 [facebookresearch/sam-3d-objects](https://github.com/facebookresearch/sam-3d-objects) 带子模块克隆。 |
+| `SAM3D_MULTI_VIEW_ROOT` | 多视角扩展根目录 | 从 [devinli123/MV-SAM3D](https://github.com/devinli123/MV-SAM3D) 克隆。完整 Docker 检查要求该目录存在。 |
+| `SAM3D_PIPELINE_CONFIG` | SAM 3D 权重包内的 `checkpoints/pipeline.yaml` | 从受访问控制的 [facebook/sam-3d-objects](https://huggingface.co/facebook/sam-3d-objects) 下载。 |
+| `SAM3D_MOGE_CHECKPOINT` | MoGe 的 `model.pt` | 从 [Ruicheng/moge-vitl](https://huggingface.co/Ruicheng/moge-vitl) 下载。 |
+| `SAM3D_DINOV2_REPOSITORY` | 含 `hubconf.py` 的 DINOv2 源码目录 | 从 [facebookresearch/dinov2](https://github.com/facebookresearch/dinov2) 克隆。 |
+| `SAM3D_DINOV2_CHECKPOINT` | `dinov2_vitl14_reg4_pretrain.pth` | 从 [Meta 官方地址](https://dl.fbaipublicfiles.com/dinov2/dinov2_vitl14/dinov2_vitl14_reg4_pretrain.pth) 下载。 |
+| `SIGLIP2_MODEL_PATH` | SigLIP2 模型目录 | [google/siglip2-base-patch16-224](https://huggingface.co/google/siglip2-base-patch16-224)；Qwen3.5 设置脚本会一并下载。 |
+| `DINOV2_MODEL_PATH` | 含 `config.json` 的 Transformers DINOv2 目录 | [facebook/dinov2-with-registers-large](https://huggingface.co/facebook/dinov2-with-registers-large)；不要填成上面的 `.pth`。 |
+
+具体下载命令和目录示例见根目录 [README 的 `.env` 章节](../README.zh.md#env-参数与资源下载)。
+
+### EntitySeg 独立环境
+
+| 变量 | 必须指向 | 获取方式和原因 |
+| --- | --- | --- |
+| `ENTITYSEG_RUNTIME_DIR` | EntitySeg 虚拟环境根目录 | 本机创建，不是下载模型；其中应包含 `bin/python` 和依赖。 |
+| `ENTITYSEG_BASE_RUNTIME_DIR` | `ENTITYSEG_PYTHON` 解析符号链接后所在的基础 Python 前缀 | Docker 需要同时挂载它，否则虚拟环境的 Python 链接在容器内会失效。普通 venv 没有外部链接时可与运行目录按实际布局填写。 |
+| `ENTITYSEG_DETECTRON2_ROOT` | 含 `detectron2/__init__.py` 的 Detectron2 源码/安装根目录 | 按 [CropFormer 安装说明](https://github.com/qqlu/Entity/blob/main/Entityv2/CODE.md) 准备；用于保留与旧版 CropFormer 匹配的 Detectron2。 |
+| `ENTITYSEG_PYTHON` | EntitySeg 环境的可执行 Python | 必须可执行，并能导入 Detectron2、CropFormer 和 `requirements/entityseg.txt` 中的兼容包。 |
+| `ENTITYSEG_CROPFORMER_ROOT` | `Entity/Entityv2/CropFormer` | 从 [qqlu/Entity](https://github.com/qqlu/Entity) 下载。 |
+| `ENTITYSEG_CONFIG` | `cropformer_swin_tiny_3x.yaml` 文件 | 位于 CropFormer 的 `configs/entityv2/entity_segmentation/`。 |
+| `ENTITYSEG_CHECKPOINT` | `CropFormer_swin_tiny_3x_5cea5e.pth` | 从作者发布的 [CropFormer 模型目录](https://huggingface.co/datasets/qqlu1992/Adobe_EntitySeg/tree/main/CropFormer_model/Entity_Segmentation/CropFormer_swin_tiny_3x) 下载并接受访问条件。 |
+
+### 材质、观察库和运行选项
+
+| 变量 | 填写内容 | 来源或默认行为 |
+| --- | --- | --- |
+| `VISUAL_MATERIAL_ROOT` | 包含 `Base/` 的 NVIDIA `Materials` 目录 | 从 NVIDIA [Downloadable Asset Packs](https://docs.omniverse.nvidia.com/usd/latest/usd_content_samples/downloadable_packs.html) 下载 **Base Materials Pack** 并解压。 |
+| `NVIDIA_BASE_OBSERVATION_BANK` | 含 `index_manifest.json` 的观察库目录 | 不是下载项；按根 README 的命令用本机材质、Isaac Sim、SigLIP2 和 DINOv2 生成。以只读方式挂载。 |
+| `VISUAL_RETRIEVAL_CACHE` | 可写检索缓存目录 | 本机创建；模型或材质库变化后应换新目录。 |
+| `PIPELINE_LOCAL_MODELS_ONLY` | `1` | 固定为 `1`，禁止任务过程中隐式下载模型。 |
+| `ACCEPT_EULA` | `Y` | 表示接受 Isaac Sim 容器许可；NVIDIA 的官方容器启动说明要求设置。 |
+| `PRIVACY_CONSENT` | `Y` | NVIDIA 容器的隐私/遥测同意项；不接受时应先查看 NVIDIA 说明，不要随意伪造值。 |
+| `PIPELINE_MAX_WORKERS` | `1` | API 并发任务数。一张 GPU 建议保持 `1`。 |
+| `PIPELINE_MAX_LOG_LINES` | `2000` | 每个 API 任务保留在内存中的日志行数。 |
+| `REFINE_MESH_TEMP_UPLOAD` | `uguu` | 云端精修本地 GLB 时使用的第三方临时上传服务；敏感资产不应使用。 |
+| `TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY` | 腾讯云 API 密钥 | 仅云端 Hunyuan/精修需要，从 [腾讯云 API 密钥管理](https://console.cloud.tencent.com/cam/capi) 创建；只跑 STEP/STP 自动赋材质时留空。 |
+| `TENCENTCLOUD_REGION` | 例如 `ap-guangzhou` | 留空时默认 `ap-guangzhou`。 |
+
+输出盘建议至少保留 50 GiB；不要把 `ASSET_ROOT` 和缓存目录放在空间不足的系统盘。
+
+启动脚本会自动创建可写目录、验证全部模型和挂载、检查 GPU，并启动 Isaac Hub
+缓存。任何必需组件缺失时都会在创建流水线任务前直接给出明确错误。
+
+## 使用
+
+API 地址：
+
+- 健康检查：<http://127.0.0.1:8000/health>
+- 接口页面：<http://127.0.0.1:8000/docs>
+
+STEP/STP 自动赋材质示例。先把输入放到宿主机的 `ASSET_ROOT`，容器内统一使用
+`/workspace/assets`：
 
 ```bash
-export QWEN35_RUNTIME_DIR="${QWEN35_RUNTIME_DIR:-$MODEL_CACHE_ROOT/qwen35_4b_runtime}"
-export QWEN35_PYTHON="${QWEN35_PYTHON:-$QWEN35_RUNTIME_DIR/env/bin/python}"
-export QWEN35_MODEL_DIR="${QWEN35_MODEL_DIR:-$QWEN35_RUNTIME_DIR/model}"
-export SIGLIP2_MODEL_DIR="${SIGLIP2_MODEL_DIR:-$MODEL_CACHE_ROOT/models/siglip2-base-patch16-224}"
-export DINOV2_MODEL_DIR="${DINOV2_MODEL_DIR:-$MODEL_CACHE_ROOT/models/dinov2-with-registers-large}"
-export MVINVERSE_MODEL_DIR="${MVINVERSE_MODEL_DIR:-$MODEL_CACHE_ROOT/mvinverse/model}"
-export NVIDIA_MATERIAL_DIR="${NVIDIA_MATERIAL_DIR:-$MODEL_CACHE_ROOT/nvidia-materials}"
-export NVIDIA_BASE_BANK_DIR="${NVIDIA_BASE_BANK_DIR:-$MODEL_CACHE_ROOT/nvidia_base_observation_bank_v1}"
-export VISUAL_RETRIEVAL_CACHE_DIR="${VISUAL_RETRIEVAL_CACHE_DIR:-$MODEL_CACHE_ROOT/retrieval}"
-
-test -x "$QWEN35_PYTHON"
-test -f "$QWEN35_MODEL_DIR/config.json"
-test -f "$SIGLIP2_MODEL_DIR/config.json"
-test -f "$DINOV2_MODEL_DIR/config.json"
-test -f "$MVINVERSE_MODEL_DIR/config.json"
-test -d "$NVIDIA_MATERIAL_DIR/Base"
-test -f "$NVIDIA_BASE_BANK_DIR/index_manifest.json"
-test -d "$VISUAL_RETRIEVAL_CACHE_DIR"
+docker exec -it hunyuan-pipeline-601 manual-material-pipeline \
+  --stp /workspace/assets/input/model.stp \
+  --sam3-annotations /workspace/assets/input/sam3_foreground_annotations.json \
+  --output /workspace/assets/runs/model \
+  --visual-inference-mode live
 ```
 
-观察库记录构建时使用的材质根目录和检索模型。应按下方相同的容器目标路径构建；身份不匹配
-时流程会拒绝复用，而不会静默使用旧结果。
+腾讯云密钥只用于可选的云端生成/细化；只运行 STEP/STP 自动赋材质时可以留空。
 
-启动流水线容器：
+## 管理命令
 
 ```bash
-docker run --name hunyuan-pipeline-601 \
-  --gpus all \
-  --network=host \
-  --env-file docker/.env.runtime \
-  -e ROOT_DIR=/workspace/hunyuan3.0_assets_creation \
-  -v "$PROJECT_ROOT:/workspace/hunyuan3.0_assets_creation:ro" \
-  -v "$ASSET_ROOT:/workspace/assets:rw" \
-  -v "$ASSET_ROOT/sam3d-visualization:/workspace/hunyuan3.0_assets_creation/tools/sam3d/third_party/sam-3d-objects-multiview/visualization:rw" \
-  -v "$ISAAC_CACHE_ROOT/cache/main:/isaac-sim/.cache:rw" \
-  -v "$ISAAC_CACHE_ROOT/cache/computecache:/isaac-sim/.nv/ComputeCache:rw" \
-  -v "$ISAAC_CACHE_ROOT/logs:/isaac-sim/.nvidia-omniverse/logs:rw" \
-  -v "$ISAAC_CACHE_ROOT/config:/isaac-sim/.nvidia-omniverse/config:rw" \
-  -v "$ISAAC_CACHE_ROOT/data:/isaac-sim/.local/share/ov/data:rw" \
-  -v "$ISAAC_CACHE_ROOT/pkg:/isaac-sim/.local/share/ov/pkg:rw" \
-  -v "$MODEL_CACHE_ROOT/ov-hub:/var/cache/hub:rw" \
-  -v "$MODEL_CACHE_ROOT/huggingface:/home/pipeline/.cache/huggingface:ro" \
-  -v "$MODEL_CACHE_ROOT/torch-hub:/home/pipeline/.cache/torch/hub:ro" \
-  -v "$QWEN35_RUNTIME_DIR:$QWEN35_RUNTIME_DIR:ro" \
-  -e QWEN35_PYTHON="$QWEN35_PYTHON" \
-  -e QWEN35_MODEL_PATH="$QWEN35_MODEL_DIR" \
-  -v "$SIGLIP2_MODEL_DIR:/workspace/models/siglip2:ro" \
-  -e SIGLIP2_MODEL_PATH=/workspace/models/siglip2 \
-  -v "$DINOV2_MODEL_DIR:/workspace/models/dinov2:ro" \
-  -e DINOV2_MODEL_PATH=/workspace/models/dinov2 \
-  -v "$MVINVERSE_MODEL_DIR:/workspace/hunyuan3.0_assets_creation/tools/qwen_material_pipeline/runtime/models/mvinverse/model:ro" \
-  -v "$NVIDIA_MATERIAL_DIR:/workspace/materials/nvidia:ro" \
-  -e VISUAL_MATERIAL_ROOT=/workspace/materials/nvidia \
-  -v "$NVIDIA_BASE_BANK_DIR:/workspace/models/nvidia_base_observation_bank_v1:ro" \
-  -e NVIDIA_BASE_OBSERVATION_BANK=/workspace/models/nvidia_base_observation_bank_v1 \
-  -v "$VISUAL_RETRIEVAL_CACHE_DIR:/workspace/cache/visual-retrieval:rw" \
-  -e VISUAL_RETRIEVAL_CACHE=/workspace/cache/visual-retrieval \
-  -d hunyuan-allinone:isaac-6.0.1-materials
+docker/run-full.sh status       # 状态
+docker/run-full.sh logs         # 日志
+docker/run-full.sh shell        # 容器终端
+docker/run-full.sh smoke        # 完整运行时检查
+docker/run-full.sh down         # 停止 API 容器
+docker/run-full.sh up           # 启动现有容器并等待健康；健康容器不会被重建
+docker/run-full.sh build        # 依赖或 Dockerfile 变化后重建
+docker/run-full.sh replace      # 删除同名旧容器并使用当前配置重建
 ```
 
-每个 `-v` 参数中，冒号左侧是宿主机路径，右侧是容器路径。API 使用 host 网络，地址为
-`http://127.0.0.1:8000`。
+源码以只读方式挂载，修改 Python 后执行 `docker/run-full.sh replace` 以重启 API 进程；
+只有依赖或 Dockerfile 变化时才需要 `build`。
 
-```bash
-docker logs --tail 100 hunyuan-pipeline-601
-curl --noproxy '*' --fail http://127.0.0.1:8000/health
-docker exec hunyuan-pipeline-601 qwen-material base-bank verify \
-  --material-root /workspace/materials/nvidia/Base \
-  --output-dir /workspace/models/nvidia_base_observation_bank_v1
-```
+## 常见问题
 
-首次 Isaac 任务可能需要几分钟初始化缓存。
-
-## 4. 运行 CLI 任务
-
-参数统一使用 `/workspace/assets` 下的容器路径。同一块 GPU 上不要同时运行 API 和 CLI
-任务。
-
-已有 GLB：
-
-```bash
-docker exec hunyuan-pipeline-601 python -m asset_pipeline.cli \
-  --existing-glb /workspace/assets/input/model.glb \
-  --refine-config-path configs/refinement/hunyuan_reduce_local_postprocess.yaml \
-  --intermediate-output-dir /workspace/assets/glb/intermediate \
-  --final-output-dir /workspace/assets/glb/final \
-  --result-json /workspace/assets/glb/result.json \
-  --len-x 0.4 --len-y 0.3 --len-z 0.8 \
-  --orientation "X=L,Y=M,Z=S" --material plastic --approx sdf
-```
-
-无需精修时添加 `--skip-refine`。
-
-不含自动视觉材质的手工建模 STEP/STP：
-
-```bash
-docker exec hunyuan-pipeline-601 python -m asset_pipeline.cli \
-  --manual-stp /workspace/assets/input/manual_asset.stp \
-  --cad-usd-output-dir /workspace/assets/manual/cad_usd \
-  --intermediate-output-dir /workspace/assets/manual/intermediate \
-  --final-output-dir /workspace/assets/manual/final \
-  --result-json /workspace/assets/manual/result.json \
-  --material steel --approx sdf --manual-sdf-resolution 32
-```
-
-SAM3D 图片：
-
-```bash
-docker exec hunyuan-pipeline-601 python -m asset_pipeline.cli \
-  --sam3d-input /workspace/assets/input/sam3d_images \
-  --sam3d-mode auto --sam3d-prompt "goods shelves" \
-  --output-dir /workspace/assets/sam3d/work \
-  --refine-config-path configs/refinement/hunyuan_reduce_local_postprocess.yaml \
-  --intermediate-output-dir /workspace/assets/sam3d/intermediate \
-  --final-output-dir /workspace/assets/sam3d/final \
-  --result-json /workspace/assets/sam3d/result.json \
-  --len-x 0.4 --len-y 0.3 --len-z 0.8 \
-  --orientation "X=L,Y=M,Z=S" --material plastic --approx sdf
-```
-
-其他输入和参数见[项目 README](../README.zh.md)及[模块索引](../docs/README.zh.md)。
-
-## 5. HTTP API 与维护
-
-API 支持 Hunyuan、已有 GLB 和手工建模 STEP/STP 任务。SAM3D 图片使用 CLI。自动视觉材质
-还需要 Qwen3.5、SAM3、MVInverse、SigLIP2、DINOv2、Base 材质观察库和 NVIDIA Materials。
-
-```bash
-curl --noproxy '*' http://127.0.0.1:8000/health
-curl --noproxy '*' http://127.0.0.1:8000/credentials/tencent-cloud
-curl --noproxy '*' http://127.0.0.1:8000/jobs
-curl --noproxy '*' http://127.0.0.1:8000/jobs/<job_id>
-curl --noproxy '*' 'http://127.0.0.1:8000/jobs/<job_id>/logs?tail=200'
-```
-
-任务记录保存在进程内存中，重启后会消失。请求格式见
-[HTTP API 文档](../docs/modules/api.zh.md)。
-
-```bash
-docker logs -f --tail 200 hunyuan-pipeline-601
-docker exec -it hunyuan-pipeline-601 bash
-docker stop hunyuan-pipeline-601
-docker start hunyuan-pipeline-601
-docker restart hunyuan-pipeline-601
-docker inspect hunyuan-pipeline-601 --format '{{json .State.Health}}'
-```
-
-CLI 新进程会立即读取源码挂载中的改动；API 需要重启容器。只有依赖、Dockerfile、
-Blender 或 Isaac Sim 变化后才需要重建镜像。
-
-## 6. 构建或发布镜像
-
-当前离线包无需在目标机器构建。如果只有旧的 `hunyuan-allinone:isaac-6.0.1` 基础镜像，
-可构建视觉材质层：
-
-```bash
-DOCKER_BUILDKIT=1 docker build \
-  -f docker/Dockerfile.visual-materials \
-  -t hunyuan-allinone:isaac-6.0.1-materials .
-```
-
-发布新的完整离线包时，从当前干净源码构建并分割两个运行镜像：
-
-```bash
-export PROJECT_ROOT="$(pwd -P)"
-export IMAGE_BUNDLE_DIR="${IMAGE_BUNDLE_DIR:-$PROJECT_ROOT/docker/offline-images}"
-mkdir -p "$IMAGE_BUNDLE_DIR"
-set -o pipefail
-
-DOCKER_BUILDKIT=1 docker build \
-  -f docker/Dockerfile.full \
-  -t hunyuan-allinone:isaac-6.0.1-materials .
-
-docker save \
-  hunyuan-allinone:isaac-6.0.1-materials \
-  nvcr.io/nvidia/omniverse/hub_workstation_cache:2.0.0 \
-  | split --bytes=1900M --numeric-suffixes=0 --suffix-length=3 - \
-      "$IMAGE_BUNDLE_DIR/hunyuan-pipeline-isaac-6.0.1-offline.tar.part-"
-
-cd "$IMAGE_BUNDLE_DIR"
-sha256sum hunyuan-pipeline-isaac-6.0.1-offline.tar.part-* \
-  > hunyuan-pipeline-isaac-6.0.1-offline.parts.sha256
-```
-
-离线包不应包含构建阶段镜像。不要在 `Dockerfile.full` 最终阶段执行 `apt upgrade`；替换
-Isaac 镜像中的 libc 可能导致 Vulkan 初始化失败。
-
-## 7. 验收与排错
-
-```bash
-docker exec hunyuan-pipeline-601 python -m unittest discover -s tests -v
-docker exec hunyuan-pipeline-601 /opt/blender/blender --version
-docker exec hunyuan-pipeline-601 /isaac-sim/python.sh -c \
-  'from isaacsim import SimulationApp; app = SimulationApp({"headless": True}); print("Isaac Sim OK"); app.close()'
-curl --noproxy '*' --fail http://127.0.0.1:8000/health
-```
-
-当前版本已包含腾讯云 AI3D/common `3.0.1462`。旧镜像若出现
-`models has no attribute SubmitHunyuanTo3DProJobRequest`，需同时升级两个包并重启：
-
-```bash
-docker exec -u 0 hunyuan-pipeline-601 \
-  /opt/conda/envs/hunyuan_sam3d/bin/python -m pip install \
-  --no-cache-dir --no-deps --upgrade \
-  tencentcloud-sdk-python-ai3d==3.0.1462 \
-  tencentcloud-sdk-python-common==3.0.1462
-docker restart hunyuan-pipeline-601
-```
-
-旧容器重建后会丢失这个临时修复。永久修复应基于当前源码重建；不要对含密钥的运行容器
-执行 `docker commit`。
-
-| 问题 | 处理方法 |
+| 现象 | 处理 |
 | --- | --- |
-| 宿主机无法写 `$ASSET_ROOT` | 重新执行第 2 节 ACL 命令。 |
-| 缓存提示 `Permission denied` | 确保 UID 1234 可写 Isaac 和 Hub 缓存。 |
-| `SimulationApp` 退出或段错误 | 确认 `isaac-hub-cache` 使用 host 网络运行。 |
-| 找不到 SAM3D 模块或权重 | 检查 `tools/sam3d/third_party/` 和模型缓存。 |
-| SAM3D 扩展加载失败 | CUDA、PyTorch、Python 和系统 ABI 必须与镜像一致。 |
-| 缺少 Pro/Rapid 请求类 | 按上面的方法同时升级两个腾讯云 SDK 包。 |
-| Hunyuan 生成或精修缺少凭据 | 更新 `.env.runtime` 并重启。 |
-| API 无法访问 | 检查日志、健康状态和宿主机 8000 端口。 |
-| 磁盘不足 | 用 `docker system df` 检查，只删除确认无用的缓存或旧镜像。 |
+| 容器反复重启 | 运行 `docker/run-full.sh preflight`，再看 `docker/run-full.sh logs` |
+| `No space left on device` | 将输出和缓存改到大容量数据盘；确认后再清理旧镜像或缓存 |
+| CUDA OOM | 同一 GPU 只运行一个重模型阶段，关闭其他占用 GPU 的进程 |
+| EntitySeg 找不到 Detectron2 | 检查 `ENTITYSEG_BASE_RUNTIME_DIR` 和 `ENTITYSEG_DETECTRON2_ROOT` |
+| API 健康但云端生成不可用 | 配置 `TENCENTCLOUD_SECRET_ID`、`TENCENTCLOUD_SECRET_KEY` 和区域 |
+
+不要提交 `docker/.env.runtime`，也不要把密钥写入镜像。

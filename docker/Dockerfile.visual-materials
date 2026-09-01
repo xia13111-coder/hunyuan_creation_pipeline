@@ -16,7 +16,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 ENV QWEN_PYTHON=/opt/conda/envs/hunyuan_sam3d/bin/python
 ENV MVINVERSE_PYTHON=/opt/conda/envs/hunyuan_sam3d/bin/python
-ENV QWEN_MODEL_PATH=/workspace/models/qwen/Qwen3-VL-4B-Instruct
 ENV VISUAL_MATERIAL_ROOT=/workspace/materials/nvidia
+ENV ROOT_DIR=/workspace/hunyuan3.0_assets_creation
+ENV PIPELINE_ASSET_ROOT=/workspace/assets
+ENV PYTHONPATH=/workspace/hunyuan3.0_assets_creation:/workspace/hunyuan3.0_assets_creation/tools/qwen_material_pipeline/src
 
 USER 1234:1234

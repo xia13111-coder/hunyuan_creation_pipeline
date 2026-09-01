@@ -33,11 +33,14 @@ digraph asset_pipeline {
   r [label="可选：网格精修", fillcolor="#f4f0ff", color="#7658a8"];
   b [label="Blender：朝向、尺寸\n和居中"];
   u [label="GLB 转 Z-up USD"];
+  gvi [label="参考图（2–4 张）", fillcolor="#eef6ff", color="#3973a8"];
   gv [label="可选：根据参考图\n匹配并应用材质", fillcolor="#fff4fb", color="#a23b77"];
 
   c [label="STEP/STP 工程模型", fillcolor="#fff7e8", color="#9a681f"];
   cu [label="CAD 转 USD", fillcolor="#fff7e8", color="#9a681f"];
   cp [label="几何规范化\n与物理属性", fillcolor="#edf8f1", color="#397a50"];
+  vi [label="参考图（2–4 张）", fillcolor="#eef6ff", color="#3973a8"];
+  sm [label="SAM3：人工点选分割\n并确认整机前景", fillcolor="#f4f0ff", color="#7658a8"];
   cv [label="可选：根据参考图\n匹配并应用材质", fillcolor="#fff4fb", color="#a23b77"];
 
   p [label="Isaac：碰撞、刚体\n和质量", fillcolor="#edf8f1", color="#397a50"];
@@ -47,10 +50,12 @@ digraph asset_pipeline {
   s -> sg -> r;
   e -> r;
   r -> b -> u -> gv -> p;
+  gvi -> gv;
   u -> p [style=dashed, color="#9a681f", fontcolor="#7c5318", fontsize=11,
            xlabel="未启用参考图赋材质"];
 
   c -> cu -> cp -> cv -> f;
+  vi -> sm -> cv;
   cp -> f [style=dashed, color="#9a681f", fontcolor="#7c5318", fontsize=11,
             xlabel="未启用参考图赋材质"];
   p -> f;

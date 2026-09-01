@@ -1,0 +1,33 @@
+[package]
+title = "Isaac Sim Physics Validation"
+description = "Minimal headless experience for validating USD rigid-body assets"
+version = "1.0.0"
+
+[dependencies]
+"isaacsim.simulation_app" = {}
+"omni.kit.loop-isaac" = {}
+"omni.kit.usd.layers" = {}
+"omni.physics.physx" = {}
+"omni.physics.stageupdate" = {}
+"omni.usd" = {}
+
+[settings.app]
+name = "Isaac-Sim Physics Validation"
+settings.persistent = false
+vulkan = false
+
+[settings.app.exts]
+enabled = []
+
+[settings.app.exts.folders]
+'++' = [
+    "/home/user/isaacsim500/apps",
+    "/home/user/isaacsim500/exts",
+    "/home/user/isaacsim500/extscache",
+    "/home/user/isaacsim500/extsDeprecated",
+]
+
+[settings]
+app.window.enabled = false
+renderer.enabled = false
+renderer.active = ""
