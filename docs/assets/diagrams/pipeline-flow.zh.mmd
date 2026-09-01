@@ -1,22 +1,36 @@
 flowchart LR
-    H[图片（Hunyuan）] --> HG[生成 3D 模型]
-    HG --> R[可选：网格精修]
-    S[图片（SAM3D）] --> SG[重建 3D 模型]
-    SG --> R
-    E[已有 GLB] --> R
-    R --> B[Blender：朝向、尺寸、居中]
-    B --> U[GLB 转 Z-up USD]
-    U --> GV[可选：根据参考图匹配并应用材质]
-    GVI[参考图（2–4 张）] --> GV
-    GV --> P[Isaac：碰撞、刚体、质量]
-    U -. 未启用参考图赋材质 .-> P
+    subgraph GLB[图片 / GLB 工作流]
+        H[Hunyuan 生成输入图] --> HG[Hunyuan 生成带材质/纹理的 GLB]
+        HG --> HR[可选：网格精修<br/>迁移并保留生成纹理]
+        HR --> HB[Blender：朝向、尺寸、居中]
+        HB --> HU[GLB 转 Z-up USD<br/>保留生成材质]
+        S[SAM3D 重建输入图] --> SG[SAM3D 重建 GLB]
+        E[已有 GLB]
+        SG --> R[可选：网格精修]
+        E --> R
+        R --> B[Blender：朝向、尺寸、居中]
+        B --> U[GLB 转 Z-up USD]
 
-    C[STEP/STP 工程模型] --> CU[CAD 转 USD]
-    CU --> CP[几何规范化与物理属性]
-    CP --> CV[可选：根据参考图匹配并应用材质]
-    VI[参考图（2–4 张）] --> SM[SAM3：人工点选分割并确认整机前景]
-    SM --> CV
+        GVI[SAM3D / 已有 GLB 的材质参考图<br/>（2–4 张，单独传入）]
+        U --> GM[参考图 ↔ USD 零件对应<br/>提取证据并匹配材质]
+        GVI --> GM
+        GM --> GA[绑定并锁定匹配到的视觉材质]
+        GA --> GP[Isaac：碰撞、刚体、质量]
+        U -. 未启用参考图材质 .-> GP
+        HU --> HP[Isaac：碰撞、刚体、质量]
+    end
 
-    CP -. 未启用参考图赋材质 .-> F
-    CV --> F
-    P --> F[收集最终 USD 资产]
+    subgraph CAD[STEP / STP 工作流]
+        C[STEP/STP 工程模型] --> CU[CAD 转 USD]
+        CU --> CP[Isaac 几何规范化与物理属性]
+        VI[同一工件参考图（2–4 张）] --> SM[SAM3 人工点选分割<br/>确认整机前景并封存标注]
+        SM --> CM[参考图 ↔ CAD Part-ID 对应<br/>提取证据并匹配材质]
+        CP --> CM
+        CM --> CA[绑定、校准并锁定匹配到的视觉材质]
+    end
+
+    HP --> F[收集最终 USD 及全部依赖]
+    GP --> F
+    CA --> F
+    CP -. 未启用参考图材质 .-> F
+    F --> V[交付验证<br/>CAD 另做最终视觉验收]

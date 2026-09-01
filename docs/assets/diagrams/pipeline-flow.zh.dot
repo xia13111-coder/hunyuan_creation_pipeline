@@ -3,14 +3,15 @@ digraph asset_pipeline {
     rankdir=LR,
     bgcolor="white",
     fontname="Noto Sans CJK SC",
-    label="资产创建总体流程",
+    label="资产创建默认流程",
     labelloc=t,
     labeljust=l,
     fontsize=24,
-    nodesep=0.45,
-    ranksep=0.72,
-    pad=0.25,
-    splines=ortho
+    nodesep=0.38,
+    ranksep=0.82,
+    pad=0.28,
+    splines=ortho,
+    compound=true
   ];
   node [
     shape=box,
@@ -19,44 +20,143 @@ digraph asset_pipeline {
     fillcolor="#f8fafc",
     fontcolor="#172033",
     fontname="Noto Sans CJK SC",
-    fontsize=15,
+    fontsize=14,
     penwidth=1.5,
-    margin="0.18,0.12"
+    margin="0.16,0.11"
   ];
-  edge [color="#475569", penwidth=1.7, arrowsize=0.75];
+  edge [
+    color="#475569",
+    fontcolor="#475569",
+    fontname="Noto Sans CJK SC",
+    fontsize=10,
+    penwidth=1.7,
+    arrowsize=0.72
+  ];
 
-  h [label="图片（Hunyuan）", fillcolor="#eef6ff", color="#3973a8"];
-  hg [label="生成 3D 模型"];
-  s [label="图片（SAM3D）", fillcolor="#eef6ff", color="#3973a8"];
-  sg [label="重建 3D 模型"];
-  e [label="已有 GLB", fillcolor="#eef6ff", color="#3973a8"];
-  r [label="可选：网格精修", fillcolor="#f4f0ff", color="#7658a8"];
-  b [label="Blender：朝向、尺寸\n和居中"];
-  u [label="GLB 转 Z-up USD"];
-  gvi [label="参考图（2–4 张）", fillcolor="#eef6ff", color="#3973a8"];
-  gv [label="可选：根据参考图\n匹配并应用材质", fillcolor="#fff4fb", color="#a23b77"];
+  subgraph cluster_glb {
+    label="图片 / GLB 工作流";
+    labelloc=t;
+    labeljust=l;
+    fontsize=17;
+    fontname="Noto Sans CJK SC";
+    color="#bfd2e5";
+    fillcolor="#f8fbff";
+    style="rounded,filled";
+    penwidth=1.4;
 
-  c [label="STEP/STP 工程模型", fillcolor="#fff7e8", color="#9a681f"];
-  cu [label="CAD 转 USD", fillcolor="#fff7e8", color="#9a681f"];
-  cp [label="几何规范化\n与物理属性", fillcolor="#edf8f1", color="#397a50"];
-  vi [label="参考图（2–4 张）", fillcolor="#eef6ff", color="#3973a8"];
-  sm [label="SAM3：人工点选分割\n并确认整机前景", fillcolor="#f4f0ff", color="#7658a8"];
-  cv [label="可选：根据参考图\n匹配并应用材质", fillcolor="#fff4fb", color="#a23b77"];
+    h [label="Hunyuan 生成输入图", fillcolor="#eef6ff", color="#3973a8"];
+    hg [label="Hunyuan 生成带材质/纹理的 GLB"];
+    hr [label="可选：网格精修\n迁移并保留生成纹理", fillcolor="#f4f0ff", color="#7658a8"];
+    hb [label="Blender\n朝向、尺寸、居中"];
+    hu [label="GLB 转 Z-up USD\n保留生成材质"];
+    s [label="SAM3D 重建输入图", fillcolor="#eef6ff", color="#3973a8"];
+    sg [label="SAM3D\n重建 GLB"];
+    e [label="已有 GLB", fillcolor="#eef6ff", color="#3973a8"];
+    r [label="可选：网格精修", fillcolor="#f4f0ff", color="#7658a8"];
+    b [label="Blender\n朝向、尺寸、居中"];
+    u [label="GLB 转\nZ-up USD"];
 
-  p [label="Isaac：碰撞、刚体\n和质量", fillcolor="#edf8f1", color="#397a50"];
-  f [label="收集最终 USD", fillcolor="#e8f5ee", color="#276640", penwidth=2.2];
+    gvi [
+      label="SAM3D / 已有 GLB 的材质参考图\n（2–4 张，单独传入）",
+      fillcolor="#e7f2ff",
+      color="#2872b8",
+      penwidth=2.0
+    ];
+    gm [
+      label="参考图 ↔ USD 零件对应\n提取证据并匹配材质",
+      fillcolor="#fff4fb",
+      color="#a23b77",
+      penwidth=2.0
+    ];
+    ga [
+      label="绑定并锁定\n匹配到的视觉材质",
+      fillcolor="#fff4fb",
+      color="#a23b77"
+    ];
+    hp [label="Isaac\n碰撞、刚体、质量", fillcolor="#edf8f1", color="#397a50"];
+    gp [label="Isaac\n碰撞、刚体、质量", fillcolor="#edf8f1", color="#397a50"];
 
-  h -> hg -> r;
-  s -> sg -> r;
-  e -> r;
-  r -> b -> u -> gv -> p;
-  gvi -> gv;
-  u -> p [style=dashed, color="#9a681f", fontcolor="#7c5318", fontsize=11,
-           xlabel="未启用参考图赋材质"];
+    h -> hg -> hr -> hb -> hu -> hp;
+    s -> sg -> r;
+    e -> r;
+    r -> b -> u;
+    u -> gm;
+    gvi -> gm [color="#2872b8", penwidth=2.2];
+    gm -> ga -> gp;
+    u -> gp [
+      style=dashed,
+      color="#9a681f",
+      fontcolor="#7c5318",
+      xlabel="未启用参考图材质"
+    ];
+  }
 
-  c -> cu -> cp -> cv -> f;
-  vi -> sm -> cv;
-  cp -> f [style=dashed, color="#9a681f", fontcolor="#7c5318", fontsize=11,
-            xlabel="未启用参考图赋材质"];
-  p -> f;
+  subgraph cluster_cad {
+    label="STEP / STP 工作流";
+    labelloc=t;
+    labeljust=l;
+    fontsize=17;
+    fontname="Noto Sans CJK SC";
+    color="#e4c58e";
+    fillcolor="#fffbf4";
+    style="rounded,filled";
+    penwidth=1.4;
+
+    c [label="STEP/STP\n工程模型", fillcolor="#fff7e8", color="#9a681f"];
+    cu [label="CAD 转 USD", fillcolor="#fff7e8", color="#9a681f"];
+    cp [label="Isaac 几何规范化\n与物理属性", fillcolor="#edf8f1", color="#397a50"];
+
+    vi [
+      label="同一工件参考图（2–4 张）",
+      fillcolor="#e7f2ff",
+      color="#2872b8",
+      penwidth=2.0
+    ];
+    sm [
+      label="SAM3 人工点选分割\n确认整机前景并封存标注",
+      fillcolor="#f4f0ff",
+      color="#7658a8",
+      penwidth=2.0
+    ];
+    cm [
+      label="参考图 ↔ CAD Part-ID 对应\n提取证据并匹配材质",
+      fillcolor="#fff4fb",
+      color="#a23b77",
+      penwidth=2.0
+    ];
+    ca [
+      label="绑定、校准并锁定\n匹配到的视觉材质",
+      fillcolor="#fff4fb",
+      color="#a23b77"
+    ];
+
+    c -> cu -> cp;
+    vi -> sm -> cm [color="#2872b8", penwidth=2.2];
+    cp -> cm;
+    cm -> ca;
+  }
+
+  f [
+    label="收集最终 USD\n及全部依赖",
+    fillcolor="#e8f5ee",
+    color="#276640",
+    penwidth=2.2
+  ];
+  v [
+    label="交付验证\n（CAD 另做最终视觉验收）",
+    fillcolor="#e8f5ee",
+    color="#276640",
+    penwidth=2.2
+  ];
+
+  hp -> f;
+  gp -> f;
+  ca -> f;
+  cp -> f [
+    style=dashed,
+    color="#9a681f",
+    fontcolor="#7c5318",
+    xlabel="未启用参考图材质"
+  ];
+  f -> v;
 }
