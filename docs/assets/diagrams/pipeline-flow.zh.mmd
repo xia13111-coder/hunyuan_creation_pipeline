@@ -1,23 +1,14 @@
 flowchart LR
     subgraph GLB[图片 / GLB 工作流]
         H[Hunyuan 生成输入图] --> HG[Hunyuan 生成带材质/纹理的 GLB]
-        HG --> HR[可选：网格精修<br/>迁移并保留生成纹理]
-        HR --> HB[Blender：朝向、尺寸、居中]
-        HB --> HU[GLB 转 Z-up USD<br/>保留生成材质]
         S[SAM3D 重建输入图] --> SG[SAM3D 重建带材质/纹理的 GLB]
-        SG --> HR
         E[已有 GLB]
-        E --> R[可选：网格精修]
+        HG --> R[可选：网格精修<br/>迁移并保留原材质/纹理]
+        SG --> R
+        E --> R
         R --> B[Blender：朝向、尺寸、居中]
-        B --> U[GLB 转 Z-up USD]
-
-        GVI[已有 GLB 的可选材质参考图<br/>（2–4 张，单独传入）]
-        U --> GM[参考图 ↔ USD 零件对应<br/>提取证据并匹配材质]
-        GVI --> GM
-        GM --> GA[绑定并锁定匹配到的视觉材质]
-        GA --> GP[Isaac：碰撞、刚体、质量]
-        U -. 未启用参考图材质 .-> GP
-        HU --> HP[Isaac：碰撞、刚体、质量]
+        B --> U[GLB 转 Z-up USD<br/>保留原材质/纹理]
+        U --> P[Isaac：碰撞、刚体、质量]
     end
 
     subgraph CAD[STEP / STP 工作流]
@@ -29,8 +20,7 @@ flowchart LR
         CM --> CA[绑定、校准并锁定匹配到的视觉材质]
     end
 
-    HP --> F[收集最终 USD 及全部依赖]
-    GP --> F
+    P --> F[收集最终 USD 及全部依赖]
     CA --> F
     CP -. 未启用参考图材质 .-> F
     F --> V[交付验证<br/>CAD 另做最终视觉验收]

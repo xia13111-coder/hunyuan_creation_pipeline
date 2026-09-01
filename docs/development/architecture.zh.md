@@ -4,11 +4,10 @@
 
 ![资产创建总体流程](../assets/diagrams/pipeline-flow.zh.svg)
 
-Hunyuan 和 SAM3D 都在生成或重建阶段输出带视觉材质和纹理的 GLB；精修阶段负责迁移并
-保留这些纹理，两条路线都不会再进入参考图赋材质流程。图中的额外“材质参考图”只用于
-需要重新赋材质的已有 GLB：转成 USD 后执行“参考图与 USD 零件建立对应关系 → 材质检索
-与匹配 → 绑定材质”。STEP/STP 的正式 `manual-material-pipeline` 则先用 SAM3 人工点选
-确认参考图中的整机前景，再与 CAD Part-ID 建立对应关系。
+Hunyuan、SAM3D 和已有 GLB 在得到 GLB 后合并到同一条后处理链：可选网格精修并迁移、
+保留原材质和纹理，再经 Blender、Z-up USD 转换和 Isaac 物理处理。这三种方式都不进入
+参考图赋材质流程。只有 STEP/STP 的正式 `manual-material-pipeline` 使用参考图：先用
+SAM3 人工点选确认整机前景，再与 CAD Part-ID 建立对应关系并匹配材质。
 
 本页只说明模块职责和主要调用链。运行命令和调参方法请查看对应的流程文档。
 
@@ -110,7 +109,7 @@ GLB 通用后处理：
 ```text
 workflows.run_process_model_job
 -> Blender 预检、轴对齐、可选尺寸调整和 GLB-to-USD
--> 可选参考图材质赋值
+-> 保留输入 GLB 的原材质和纹理
 -> Isaac Sim 物理处理
 -> USD 收集
 -> 交付检查

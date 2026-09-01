@@ -105,11 +105,15 @@ Common GLB post-processing:
 ```text
 workflows.run_process_model_job
 -> Blender preflight, axis alignment, optional resize, and GLB-to-USD
--> optional reference-driven material assignment
+-> preserve the input GLB's existing materials and textures
 -> Isaac Sim physics
 -> USD collection
 -> delivery validation
 ```
+
+Hunyuan output, SAM3D output, and existing GLBs merge into this same
+post-processing path. Reference-driven material assignment belongs only to the
+STEP/STP workflow described below.
 
 For refinement internals, see [Refine](../modules/refine.md). For Blender and
 physics, see [Blender](../modules/blender.md) and

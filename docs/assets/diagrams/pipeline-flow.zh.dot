@@ -45,51 +45,19 @@ digraph asset_pipeline {
     penwidth=1.4;
 
     h [label="Hunyuan 生成输入图", fillcolor="#eef6ff", color="#3973a8"];
-    hg [label="Hunyuan 生成带材质/纹理的 GLB"];
-    hr [label="可选：网格精修\n迁移并保留生成纹理", fillcolor="#f4f0ff", color="#7658a8"];
-    hb [label="Blender\n朝向、尺寸、居中"];
-    hu [label="GLB 转 Z-up USD\n保留生成材质"];
+    hg [label="Hunyuan 生成\n带材质/纹理的 GLB"];
     s [label="SAM3D 重建输入图", fillcolor="#eef6ff", color="#3973a8"];
-    sg [label="SAM3D 重建带材质/纹理的 GLB"];
+    sg [label="SAM3D 重建\n带材质/纹理的 GLB"];
     e [label="已有 GLB", fillcolor="#eef6ff", color="#3973a8"];
-    r [label="可选：网格精修", fillcolor="#f4f0ff", color="#7658a8"];
+    r [label="可选：网格精修\n迁移并保留原材质/纹理", fillcolor="#f4f0ff", color="#7658a8"];
     b [label="Blender\n朝向、尺寸、居中"];
-    u [label="GLB 转\nZ-up USD"];
+    u [label="GLB 转 Z-up USD\n保留原材质/纹理"];
+    p [label="Isaac\n碰撞、刚体、质量", fillcolor="#edf8f1", color="#397a50"];
 
-    gvi [
-      label="已有 GLB 的可选材质参考图\n（2–4 张，单独传入）",
-      fillcolor="#e7f2ff",
-      color="#2872b8",
-      penwidth=2.0
-    ];
-    gm [
-      label="参考图 ↔ USD 零件对应\n提取证据并匹配材质",
-      fillcolor="#fff4fb",
-      color="#a23b77",
-      penwidth=2.0
-    ];
-    ga [
-      label="绑定并锁定\n匹配到的视觉材质",
-      fillcolor="#fff4fb",
-      color="#a23b77"
-    ];
-    hp [label="Isaac\n碰撞、刚体、质量", fillcolor="#edf8f1", color="#397a50"];
-    gp [label="Isaac\n碰撞、刚体、质量", fillcolor="#edf8f1", color="#397a50"];
-
-    h -> hg -> hr;
-    s -> sg -> hr;
-    hr -> hb -> hu -> hp;
+    h -> hg -> r;
+    s -> sg -> r;
     e -> r;
-    r -> b -> u;
-    u -> gm;
-    gvi -> gm [color="#2872b8", penwidth=2.2];
-    gm -> ga -> gp;
-    u -> gp [
-      style=dashed,
-      color="#9a681f",
-      fontcolor="#7c5318",
-      xlabel="未启用参考图材质"
-    ];
+    r -> b -> u -> p;
   }
 
   subgraph cluster_cad {
@@ -150,8 +118,7 @@ digraph asset_pipeline {
     penwidth=2.2
   ];
 
-  hp -> f;
-  gp -> f;
+  p -> f;
   ca -> f;
   cp -> f [
     style=dashed,
